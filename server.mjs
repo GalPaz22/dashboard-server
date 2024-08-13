@@ -72,7 +72,7 @@ app.post('/search', async (req, res) => {
 
         const results = topProducts.map(({ product }) => ({
             id: product._id,
-            title: product.title,
+            title: product.Title,
             description: product.description,
             price: product.price,
             image: product.image,
@@ -80,6 +80,7 @@ app.post('/search', async (req, res) => {
         }));
 
         res.json(results);
+        console.log('Search results:', results);
     } catch (error) {
         console.error('Error handling search request:', error);
         res.status(500).json({ error: 'Server error' });
