@@ -94,7 +94,7 @@ app.post('/search', async (req, res) => {
         const collection = db.collection(collectionName);
 
         // Translate the query from Hebrew to English
-        const translatedQuery = await translateQuery(query, systemPrompt);
+        const translatedQuery = await translateQuery(query);
 
         if (!translatedQuery) {
             return res.status(500).json({ error: 'Error translating query' });
