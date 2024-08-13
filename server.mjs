@@ -107,16 +107,17 @@ app.post('/search', async (req, res) => {
 
         // Build the MongoDB filter
         const mongoFilter = {};
-        if (category !== undefined) {
+        if (category !== undefined && category !== null) {
             mongoFilter.category = category;
         }
-        if (minPrice !== undefined && maxPrice !== undefined) {
+        if (minPrice !== undefined && minPrice !== null && maxPrice !== undefined && maxPrice !== null) {
             mongoFilter.price = { $gte: minPrice, $lte: maxPrice };
-        } else if (minPrice !== undefined) {
+        } else if (minPrice !== undefined && minPrice !== null) {
             mongoFilter.price = { $gte: minPrice };
-        } else if (maxPrice !== undefined) {
+        } else if (maxPrice !== undefined && maxPrice !== null) {
             mongoFilter.price = { $lte: maxPrice };
         }
+        
 
         // Get all products that match the filter
         const filteredProducts = await collection.find(mongoFilter).toArray();
