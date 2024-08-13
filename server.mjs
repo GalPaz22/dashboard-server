@@ -18,9 +18,9 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 async function translateQuery(query) {
     try {
         const response = await openai.chat.completions.create({
-            model: 'gpt-4o-mini',
+            model: 'gpt-4o-mini', 
             messages: [
-                { role: 'system', content: 'translate the query from hebrew to english' },
+                { role: 'system', content: 'Translate the following text from Hebrew to English:' },
                 { role: 'user', content: query }
             ]
         });
@@ -33,13 +33,13 @@ async function translateQuery(query) {
 }
 
 // Utility function to extract filters from query using LLM
-async function extractFiltersFromQuery(query, systemPrompt) {
+async function extractFiltersFromQuery(query) {
     try {
         const response = await openai.chat.completions.create({
             model: 'gpt-4o-mini',
             response_format: { type: 'json_object' },
             messages: [
-                { role: 'system', content: systemPrompt },
+                { role: 'system', content: 'Extract category and price range from the query in JSON format with the next keys: category (can be only red or white), minPrice, maxPrice. If one of the keys is missing, do not return it.' },
                 { role: 'user', content: query }
             ],
             temperature: 0.5,
@@ -79,10 +79,10 @@ function cosineSimilarity(vec1, vec2) {
 
 // Route to handle the search endpoint
 app.post('/search', async (req, res) => {
-    const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
+    const { mongodbUri, dbName, collectionName, query } = req.body;
 
-    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
-        return res.status(400).json({ error: 'Query, MongoDB URI, database name, collection name, and system prompt are required' });
+    if (!query || !mongodbUri || !dbName || !collectionName) {
+        return res.status(400).json({ error: 'Query, MongoDB URI, database name, and collection name are required' });
     }
 
     let client;
@@ -101,7 +101,7 @@ app.post('/search', async (req, res) => {
         }
 
         // Extract filters from the translated query
-        const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
+        const filters = await extractFiltersFromQuery(translatedQuery);
         const { category, minPrice, maxPrice } = filters;
 
         // Build the MongoDB filter
