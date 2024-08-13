@@ -18,7 +18,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 async function translateQuery(query) {
     try {
         const response = await openai.chat.completions.create({
-            model: 'gpt-4o-mini', // Adjust the model if necessary
+            model: 'gpt-4o-mini', 
             messages: [
                 { role: 'system', content: 'Translate the following text from Hebrew to English:' },
                 { role: 'user', content: query }
@@ -28,6 +28,29 @@ async function translateQuery(query) {
         return translatedText || null;
     } catch (error) {
         console.error('Error translating query:', error);
+        throw error;
+    }
+}
+
+// Utility function to extract filters from query using LLM
+async function extractFiltersFromQuery(query) {
+    try {
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4o-mini',
+            response_format: { type: 'json_object' },
+            messages: [
+                { role: 'system', content: 'Extract year and price range from the query in JSON format with the next keys: year, minPrice, maxPrice. If one of the keys is missing, do not return it.' },
+                { role: 'user', content: query }
+            ],
+            temperature: 0.5,
+        });
+
+        const content = response.choices[0]?.message?.content;
+        const filters = JSON.parse(content);
+        console.log('Extracted Filters:', filters);
+        return filters;
+    } catch (error) {
+        console.error('Error extracting filters:', error);
         throw error;
     }
 }
@@ -77,6 +100,23 @@ app.post('/search', async (req, res) => {
             return res.status(500).json({ error: 'Error translating query' });
         }
 
+        // Extract filters from the translated query
+        const filters = await extractFiltersFromQuery(translatedQuery);
+        const { year, minPrice, maxPrice } = filters;
+
+        // Build the MongoDB filter
+        const mongoFilter = {};
+        if (year !== undefined) {
+            mongoFilter.year = year;
+        }
+        if (minPrice !== undefined && maxPrice !== undefined) {
+            mongoFilter.price = { $gte: minPrice, $lte: maxPrice };
+        } else if (minPrice !== undefined) {
+            mongoFilter.price = { $gte: minPrice };
+        } else if (maxPrice !== undefined) {
+            mongoFilter.price = { $lte: maxPrice };
+        }
+
         // Get the query embedding
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
 
@@ -84,8 +124,8 @@ app.post('/search', async (req, res) => {
             return res.status(500).json({ error: 'Error generating query embedding' });
         }
 
-        // Get all products with embeddings
-        const products = await collection.find({ embedding: { $exists: true } }).toArray();
+        // Get all products with embeddings that match the filter
+        const products = await collection.find({ ...mongoFilter, embedding: { $exists: true } }).toArray();
 
         // Perform similarity check on all products
         const similarities = products.map(product => ({
