@@ -76,7 +76,7 @@ app.post('/search', async (req, res) => {
             description: product.description,
             price: product.price,
             image: product.image,
-            url: product.handle
+            url: product.url
         }));
 
         res.json(results);
