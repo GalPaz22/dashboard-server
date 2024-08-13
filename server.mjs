@@ -39,7 +39,7 @@ async function extractFiltersFromQuery(query) {
             model: 'gpt-4o-mini',
             response_format: { type: 'json_object' },
             messages: [
-                { role: 'system', content: 'Extract category and price range from the query in JSON format with the next keys: category, minPrice, maxPrice. If one of the keys is missing, do not return it.' },
+                { role: 'system', content: 'Extract category and price range from the query in JSON format with the next keys: category (can be only red or white), minPrice, maxPrice. If one of the keys is missing, do not return it.' },
                 { role: 'user', content: query }
             ],
             temperature: 0.5,
@@ -106,7 +106,7 @@ app.post('/search', async (req, res) => {
 
         // Build the MongoDB filter
         const mongoFilter = {};
-        if (year !== undefined) {
+        if (category !== undefined) {
             mongoFilter.category = category;
         }
         if (minPrice !== undefined && maxPrice !== undefined) {
