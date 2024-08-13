@@ -118,11 +118,11 @@ app.post('/search', async (req, res) => {
             mongoFilter.price = { $lte: maxPrice };
         }
 
-        // Get all products with embeddings that match the filter
-        const products = await collection.find({ ...mongoFilter, embedding: { $exists: true } }).toArray();
-        console.log('Fetched Products:', products);
+        // Get all products that match the filter
+        const filteredProducts = await collection.find(mongoFilter).toArray();
+        console.log('Filtered Products:', filteredProducts);
 
-        if (products.length === 0) {
+        if (filteredProducts.length === 0) {
             return res.json([]);
         }
 
@@ -133,8 +133,8 @@ app.post('/search', async (req, res) => {
             return res.status(500).json({ error: 'Error generating query embedding' });
         }
 
-        // Perform similarity check on all products
-        const similarities = products.map(product => ({
+        // Perform similarity check on all filtered products
+        const similarities = filteredProducts.map(product => ({
             product,
             similarity: cosineSimilarity(queryEmbedding, product.embedding)
         }));
