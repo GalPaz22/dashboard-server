@@ -81,8 +81,8 @@ function cosineSimilarity(vec1, vec2) {
 app.post('/search', async (req, res) => {
     const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
 
-    if (!query || !mongodbUri || !dbName || !collectionName) {
-        return res.status(400).json({ error: 'Query, MongoDB URI, database name, and collection name are required' });
+    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
+        return res.status(400).json({ error: 'Query, MongoDB URI, database name, collection name, and system prompt are required' });
     }
 
     let client;
@@ -102,6 +102,7 @@ app.post('/search', async (req, res) => {
 
         // Extract filters from the translated query
         const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
+        console.log('Extracted Filters:', filters);
         const { category, minPrice, maxPrice } = filters;
 
         // Build the MongoDB filter
@@ -117,15 +118,20 @@ app.post('/search', async (req, res) => {
             mongoFilter.price = { $lte: maxPrice };
         }
 
+        // Get all products with embeddings that match the filter
+        const products = await collection.find({ ...mongoFilter, embedding: { $exists: true } }).toArray();
+        console.log('Fetched Products:', products);
+
+        if (products.length === 0) {
+            return res.json([]);
+        }
+
         // Get the query embedding
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
 
         if (!queryEmbedding) {
             return res.status(500).json({ error: 'Error generating query embedding' });
         }
-
-        // Get all products with embeddings that match the filter
-        const products = await collection.find({ ...mongoFilter, embedding: { $exists: true } }).toArray();
 
         // Perform similarity check on all products
         const similarities = products.map(product => ({
