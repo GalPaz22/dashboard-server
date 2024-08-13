@@ -11,8 +11,29 @@ const app = express();
 app.use(bodyParser.json());
 app.use(cors({ origin: '*' }));
 
+// Initialize OpenAI client
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// Utility function to translate query from Hebrew to English
+async function translateQuery(query) {
+    try {
+        const response = await openai.chat.completions.create({
+            model: 'gpt-4o-mini', // Adjust the model if necessary
+            messages: [
+                { role: 'system', content: 'Translate the following text from Hebrew to English:' },
+                { role: 'user', content: query }
+            ]
+        });
+        const translatedText = response.choices[0]?.message?.content?.trim();
+        return translatedText || null;
+    } catch (error) {
+        console.error('Error translating query:', error);
+        throw error;
+    }
+}
+
 // Utility function to get the embedding for a query
-async function getQueryEmbedding(query, openai) {
+async function getQueryEmbedding(query) {
     try {
         const response = await openai.embeddings.create({
             model: 'text-embedding-3-large',
@@ -49,10 +70,15 @@ app.post('/search', async (req, res) => {
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
 
-        const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+        // Translate the query from Hebrew to English
+        const translatedQuery = await translateQuery(query);
+
+        if (!translatedQuery) {
+            return res.status(500).json({ error: 'Error translating query' });
+        }
 
         // Get the query embedding
-        const queryEmbedding = await getQueryEmbedding(query, openai);
+        const queryEmbedding = await getQueryEmbedding(translatedQuery);
 
         if (!queryEmbedding) {
             return res.status(500).json({ error: 'Error generating query embedding' });
