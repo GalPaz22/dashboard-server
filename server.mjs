@@ -168,3 +168,42 @@ const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
 });
+
+app.get('/products', async (req, res) => {
+    const { mongodbUri, dbName, collectionName, limit = 10 } = req.query;
+
+    if (!mongodbUri || !dbName || !collectionName) {
+        return res.status(400).json({ error: 'MongoDB URI, database name, and collection name are required' });
+    }
+
+    let client;
+
+    try {
+        client = new MongoClient(mongodbUri);
+        await client.connect();
+        const db = client.db(dbName);
+        const collection = db.collection(collectionName);
+
+        // Fetch a default set of products, e.g., the latest 10 products
+        const products = await collection.find().limit(Number(limit)).toArray();
+        console.log('Fetched Products:', products);
+
+        const results = products.map(product => ({
+            id: product._id,
+            title: product.title,  // Ensure this matches your MongoDB document structure
+            description: product.description,
+            price: product.price,
+            image: product.image,
+            url: product.url
+        }));
+
+        res.json(results);
+    } catch (error) {
+        console.error('Error fetching products:', error);
+        res.status(500).json({ error: 'Server error' });
+    } finally {
+        if (client) {
+            await client.close();
+        }
+    }
+});
