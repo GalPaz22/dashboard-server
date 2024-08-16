@@ -117,11 +117,11 @@ app.post('/search', async (req, res) => {
         } else if (maxPrice !== undefined && maxPrice !== null) {
             mongoFilter.price = { $lte: maxPrice };
         }
-        
+        console.log('MongoDB Filter:', mongoFilter);
 
         // Get all products that match the filter
         const filteredProducts = await collection.find(mongoFilter).toArray();
-        console.log('Filtered Products:', filteredProducts);
+  
 
         if (filteredProducts.length === 0) {
             return res.json([]);
