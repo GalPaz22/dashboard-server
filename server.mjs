@@ -186,7 +186,7 @@ app.get('/products', async (req, res) => {
 
         // Fetch a default set of products, e.g., the latest 10 products
         const products = await collection.find().limit(Number(limit)).toArray();
-        console.log('Fetched Products:', products);
+      
 
         const results = products.map(product => ({
             id: product._id,
