@@ -23,6 +23,11 @@ const buildAggregationPipeline = (queryEmbedding, filters) => {
                 "numCandidates": 150,
                 "limit": 10
             }
+        },
+        {
+            "$set": {
+                "score": { "$meta": "searchScore" }
+            }
         }
     ];
 
@@ -45,7 +50,7 @@ const buildAggregationPipeline = (queryEmbedding, filters) => {
     }
 
     pipeline.push({
-        "$sort": { "score": { "$meta": "vectorSearchScore" } }
+        "$sort": { "score": -1 }
     });
 
     return pipeline;
