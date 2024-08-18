@@ -17,7 +17,7 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
     const pipeline = [
         {
             "$vectorSearch": {
-                "index": "shared_vector_index",
+                "index": "vector_index",
                 "path": "embedding",
                 "queryVector": queryEmbedding,
                 "numCandidates": 150,
