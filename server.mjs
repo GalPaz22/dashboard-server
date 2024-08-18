@@ -13,11 +13,11 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildAggregationPipeline = (queryEmbedding, filters) => {
+const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
     const pipeline = [
         {
             "$vectorSearch": {
-                "index": "vector_index",
+                "index": "shared_vector_index",
                 "path": "embedding",
                 "queryVector": queryEmbedding,
                 "numCandidates": 150,
@@ -25,9 +25,18 @@ const buildAggregationPipeline = (queryEmbedding, filters) => {
             }
         },
         {
+            "$match": {
+                "site_id": siteId
+                // Add other filters here
+            }
+        },
+        {
             "$set": {
                 "score": { "$meta": "searchScore" }
             }
+        },
+        {
+            "$sort": { "score": -1 }
         }
     ];
 
@@ -121,9 +130,9 @@ function cosineSimilarity(vec1, vec2) {
 
 // Route to handle the search endpoint
 app.post('/search', async (req, res) => {
-    const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
+    const { mongodbUri, dbName, collectionName, query, systemPrompt, siteId } = req.body;
 
-    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
+    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt || !siteId) {
         return res.status(400).json({ error: 'Query, MongoDB URI, database name, collection name, and system prompt are required' });
     }
 
@@ -142,7 +151,7 @@ app.post('/search', async (req, res) => {
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
-        const pipeline = buildAggregationPipeline(queryEmbedding, filters);
+        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId);
         const results = await collection.aggregate(pipeline).toArray();
 
         const formattedResults = results.map(product => ({
