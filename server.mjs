@@ -24,11 +24,7 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
                 "limit": 10
             }
         },
-        {
-            "$match": {
-                "site_id": siteId
-            }
-        }
+      
     ];
 
     const matchStage = {};
