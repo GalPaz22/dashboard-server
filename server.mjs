@@ -17,11 +17,12 @@ const buildAggregationPipeline = (queryEmbedding, filters) => {
     const pipeline = [
         {
             "$search": {
-                "index": "vector_index", // Replace with your actual index name
-                "knnBeta": {
-                    "vector": queryEmbedding,
-                    "path": "embedding",
-                    "k": 10 // Number of nearest neighbors to return
+                '$vectorSearch': {
+                    'index': 'vector_index', 
+                    'path': 'embedding', 
+                    'queryVector': queryEmbedding,
+                    'numCandidates': 150, 
+                    'limit': 10
                 }
             }
         }
