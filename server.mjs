@@ -13,7 +13,7 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
+const buildAggregationPipeline = (queryEmbedding, filters) => {
     const pipeline = [
         {
             "$vectorSearch": {
@@ -26,14 +26,22 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
         },
         {
             "$match": {
-                "siteId": siteId
+                "site_id": siteId
+                // Add other filters here
             }
+        },
+        {
+            "$set": {
+                "score": { "$meta": "searchScore" }
+            }
+        },
+        {
+            "$sort": { "score": -1 }
         }
     ];
 
     const matchStage = {};
 
-    // Add filters based on the provided filters
     if (filters.category) {
         matchStage.category = filters.category;
     }
@@ -46,19 +54,10 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
         matchStage.price = { $lte: filters.maxPrice };
     }
 
-    // Add additional filters to the pipeline if any exist
     if (Object.keys(matchStage).length > 0) {
         pipeline.push({ "$match": matchStage });
     }
 
-    // Set the score based on the search results
-    pipeline.push({
-        "$set": {
-            "score": { "$meta": "searchScore" }
-        }
-    });
-
-    // Sort by score in descending order
     pipeline.push({
         "$sort": { "score": -1 }
     });
@@ -131,9 +130,9 @@ function cosineSimilarity(vec1, vec2) {
 
 // Route to handle the search endpoint
 app.post('/search', async (req, res) => {
-    const { mongodbUri, dbName, collectionName, query, systemPrompt, siteId } = req.body;
+    const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
 
-    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt || !siteId) {
+    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
         return res.status(400).json({ error: 'Query, MongoDB URI, database name, collection name, and system prompt are required' });
     }
 
@@ -144,7 +143,6 @@ app.post('/search', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
-        console.log(siteId);
 
         const translatedQuery = await translateQuery(query);
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
@@ -153,7 +151,7 @@ app.post('/search', async (req, res) => {
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
-        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId);
+        const pipeline = buildAggregationPipeline(queryEmbedding, filters);
         const results = await collection.aggregate(pipeline).toArray();
 
         const formattedResults = results.map(product => ({
