@@ -13,6 +13,44 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const buildAggregationPipeline = (queryEmbedding, filters) => {
+    const pipeline = [
+        {
+            "$search": {
+                "index": "vector_index", // Replace with your actual index name
+                "knnBeta": {
+                    "vector": queryEmbedding,
+                    "path": "embedding",
+                    "k": 10 // Number of nearest neighbors to return
+                }
+            }
+        }
+    ];
+
+    const matchStage = {};
+
+    if (filters.category) {
+        matchStage.category = filters.category;
+    }
+
+    if (filters.minPrice && filters.maxPrice) {
+        matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+    } else if (filters.minPrice) {
+        matchStage.price = { $gte: filters.minPrice };
+    } else if (filters.maxPrice) {
+        matchStage.price = { $lte: filters.maxPrice };
+    }
+
+    if (Object.keys(matchStage).length > 0) {
+        pipeline.push({ "$match": matchStage });
+    }
+
+    pipeline.push({
+        "$sort": { "score": -1 } // Sort by similarity score descending
+    });
+
+    return pipeline;
+};
 
 // Utility function to translate query from Hebrew to English
 async function translateQuery(query) {
@@ -47,7 +85,7 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 
         const content = response.choices[0]?.message?.content;
         const filters = JSON.parse(content);
-        console.log('Extracted Filters:', filters);
+ 
         return filters;
     } catch (error) {
         console.error('Error extracting filters:', error);
@@ -93,67 +131,27 @@ app.post('/search', async (req, res) => {
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
 
-        // Translate the query from Hebrew to English
         const translatedQuery = await translateQuery(query);
+        if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
 
-        if (!translatedQuery) {
-            return res.status(500).json({ error: 'Error translating query' });
-        }
-
-        // Extract filters from the translated query
         const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
-        console.log('Extracted Filters:', filters);
-        const { category, minPrice, maxPrice } = filters;
-
-        // Build the MongoDB filter
-        const mongoFilter = {};
-        if (category !== undefined && category !== null) {
-            mongoFilter.category = category;
-        }
-        if (minPrice !== undefined && minPrice !== null && maxPrice !== undefined && maxPrice !== null) {
-            mongoFilter.price = { $gte: minPrice, $lte: maxPrice };
-        } else if (minPrice !== undefined && minPrice !== null) {
-            mongoFilter.price = { $gte: minPrice };
-        } else if (maxPrice !== undefined && maxPrice !== null) {
-            mongoFilter.price = { $lte: maxPrice };
-        }
-        console.log('MongoDB Filter:', mongoFilter);
-
-        // Get all products that match the filter
-        const filteredProducts = await collection.find(mongoFilter).toArray();
-  
-
-        if (filteredProducts.length === 0) {
-            return res.json([]);
-        }
-
-        // Get the query embedding
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
+        if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
-        if (!queryEmbedding) {
-            return res.status(500).json({ error: 'Error generating query embedding' });
-        }
+        const pipeline = buildAggregationPipeline(queryEmbedding, filters);
+        const results = await collection.aggregate(pipeline).toArray();
 
-        // Perform similarity check on all filtered products
-        const similarities = filteredProducts.map(product => ({
-            product,
-            similarity: cosineSimilarity(queryEmbedding, product.embedding)
-        }));
-
-        similarities.sort((a, b) => b.similarity - a.similarity);
-        const topProducts = similarities.slice(0, 10);
-
-        const results = topProducts.map(({ product }) => ({
+        const formattedResults = results.map(product => ({
             id: product._id,
-            title: product.Title,
+            title: product.title,
             description: product.description,
             price: product.price,
             image: product.image,
             url: product.url
         }));
 
-        res.json(results);
-        console.log('Search results:', results);
+        res.json(formattedResults);
+        console.log('Search results:', formattedResults);
     } catch (error) {
         console.error('Error handling search request:', error);
         res.status(500).json({ error: 'Server error' });
