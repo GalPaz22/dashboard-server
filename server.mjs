@@ -27,21 +27,13 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
         {
             "$match": {
                 "site_id": siteId
-                // Add other filters here
             }
-        },
-        {
-            "$set": {
-                "score": { "$meta": "searchScore" }
-            }
-        },
-        {
-            "$sort": { "score": -1 }
         }
     ];
 
     const matchStage = {};
 
+    // Add filters based on the provided filters
     if (filters.category) {
         matchStage.category = filters.category;
     }
@@ -54,10 +46,19 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
         matchStage.price = { $lte: filters.maxPrice };
     }
 
+    // Add additional filters to the pipeline if any exist
     if (Object.keys(matchStage).length > 0) {
         pipeline.push({ "$match": matchStage });
     }
 
+    // Set the score based on the search results
+    pipeline.push({
+        "$set": {
+            "score": { "$meta": "searchScore" }
+        }
+    });
+
+    // Sort by score in descending order
     pipeline.push({
         "$sort": { "score": -1 }
     });
