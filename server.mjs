@@ -16,14 +16,12 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const buildAggregationPipeline = (queryEmbedding, filters) => {
     const pipeline = [
         {
-            "$search": {
-                '$vectorSearch': {
-                    'index': 'vector_index', 
-                    'path': 'embedding', 
-                    'queryVector': queryEmbedding,
-                    'numCandidates': 150, 
-                    'limit': 10
-                }
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "embedding",
+                "queryVector": queryEmbedding,
+                "numCandidates": 150,
+                "limit": 10
             }
         }
     ];
@@ -47,7 +45,7 @@ const buildAggregationPipeline = (queryEmbedding, filters) => {
     }
 
     pipeline.push({
-        "$sort": { "score": -1 } // Sort by similarity score descending
+        "$sort": { "score": { "$meta": "vectorSearchScore" } }
     });
 
     return pipeline;
