@@ -24,7 +24,11 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
                 "limit": 10
             }
         },
-  
+        {
+            "$match": {
+                "siteId": siteId
+            }
+        }
     ];
 
     const matchStage = {};
@@ -32,9 +36,6 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
     // Add filters based on the provided filters
     if (filters.category) {
         matchStage.category = filters.category;
-    }
-    if (siteId) {
-        matchStage.siteId = siteId;
     }
 
     if (filters.minPrice && filters.maxPrice) {
@@ -143,7 +144,8 @@ app.post('/search', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);
-         
+        console.log(siteId);
+
         const translatedQuery = await translateQuery(query);
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
 
