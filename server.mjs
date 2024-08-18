@@ -24,18 +24,23 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
                 "limit": 10
             }
         },
+       
         {
-            "$match": {
-                "siteId": siteId
+            "$set": {
+                "score": { "$meta": "searchScore" }
             }
-        }
+        },
+    
     ];
 
     const matchStage = {};
 
-    // Add filters based on the provided filters
     if (filters.category) {
         matchStage.category = filters.category;
+    }
+    if(siteId)
+    {
+        matchStage.site_id = siteId;
     }
 
     if (filters.minPrice && filters.maxPrice) {
@@ -46,19 +51,10 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
         matchStage.price = { $lte: filters.maxPrice };
     }
 
-    // Add additional filters to the pipeline if any exist
     if (Object.keys(matchStage).length > 0) {
         pipeline.push({ "$match": matchStage });
     }
 
-    // Set the score based on the search results
-    pipeline.push({
-        "$set": {
-            "score": { "$meta": "searchScore" }
-        }
-    });
-
-    // Sort by score in descending order
     pipeline.push({
         "$sort": { "score": -1 }
     });
