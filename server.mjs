@@ -44,7 +44,9 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
     if (filters.category) {
         matchStage.category = { $regex: filters.category, $options: "i" };
     }
-    
+    if (filters.type) {
+        matchStage.type = { $regex: filters.type, $options: "i" };
+    }
 
     if (filters.minPrice && filters.maxPrice) {
         matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
