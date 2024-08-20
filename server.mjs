@@ -100,6 +100,7 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 
         const content = response.choices[0]?.message?.content;
         const filters = JSON.parse(content);
+        console.log('Extracted filters:', filters);
  
         return filters;
     } catch (error) {
@@ -145,7 +146,7 @@ app.post('/search', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);  
-        console.log(siteId)     
+        
 
         const translatedQuery = await translateQuery(query);
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
@@ -167,7 +168,7 @@ app.post('/search', async (req, res) => {
         }));
 
         res.json(formattedResults);
-        console.log('Search results:', formattedResults);
+        
     } catch (error) {
         console.error('Error handling search request:', error);
         res.status(500).json({ error: 'Server error' });
