@@ -107,11 +107,11 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 }
 
 // Utility function to get the embedding for a query
-async function getQueryEmbedding(query) {
+async function getQueryEmbedding(translatedText) {
     try {
         const response = await openai.embeddings.create({
             model: 'text-embedding-3-large',
-            input: query
+            input: translatedText
         });
         return response.data[0]?.embedding || null;
     } catch (error) {
