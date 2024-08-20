@@ -13,7 +13,7 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
+const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
     const pipeline = [
         {
             "$vectorSearch": {
@@ -41,8 +41,8 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
 
     const matchStage = {};
 
-    if ( query ) {
-        query = { $regex: query, $options: "i" };
+    if (filters.category) {
+        matchStage.category = { $regex: filters.category, $options: "i" };
     }
     
 
@@ -152,7 +152,7 @@ app.post('/search', async (req, res) => {
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
-        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId, query);
+        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId);
         const results = await collection.aggregate(pipeline).toArray();
 
         const formattedResults = results.map(product => ({
