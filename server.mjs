@@ -146,13 +146,13 @@ app.post('/search', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);  
-        
+        console.log(query)
 
         const translatedQuery = await translateQuery(query);
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
 
         const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
-        const queryEmbedding = await getQueryEmbedding(translatedQuery, query);
+        const queryEmbedding = await getQueryEmbedding( query);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
         const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId);
