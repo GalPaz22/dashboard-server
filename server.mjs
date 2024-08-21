@@ -73,12 +73,13 @@ async function translateQuery(query) {
         const response = await openai.chat.completions.create({
             model: 'gpt-4o-mini', 
             messages: [
-                { role: 'system', content: 'Translate the following text from Hebrew to English. if you find mispelling in the hebrew words, try to fix it and than translate it. the context is search query in e-commerce sites, so you probably get words attached to products or their descriptions. if you find a word you cant understand or think its out of context, do not translate it but do write it in english literally. for e.g, if you find the words "עגור לבן" write it as "agur lavan"' },
+                { role: 'system', content: 'Translate the following text from Hebrew to English. if you find mispelling in the hebrew words, try to fix it and than translate it. the context is search query in e-commerce sites, so you probably get words attached to products or their descriptions. if you find a word you cant understand or think its out of context, do not translate it but do write it in english literally. for e.g, if you find the words "עגור לבן" write it as "agur lavan. "' },
                 { role: 'user', content: query }
             ]
         });
         const translatedText = response.choices[0]?.message?.content?.trim();
-        return translatedText || null;
+        console.log('Translated query:', translatedText);
+        return translatedText 
     } catch (error) {
         console.error('Error translating query:', error);
         throw error;
