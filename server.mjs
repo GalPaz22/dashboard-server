@@ -110,7 +110,7 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 }
 
 // Utility function to get the embedding for a query
-async function getQueryEmbedding(query, translatedText) {
+async function getQueryEmbedding(translatedText) {
     try {
         const response = await openai.embeddings.create({
             model: 'text-embedding-3-large',
@@ -152,7 +152,7 @@ app.post('/search', async (req, res) => {
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
 
         const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
-        const queryEmbedding = await getQueryEmbedding(query, translatedText);
+        const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
         const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId);
