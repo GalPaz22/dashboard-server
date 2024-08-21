@@ -73,7 +73,7 @@ async function translateQuery(query) {
         const response = await openai.chat.completions.create({
             model: 'gpt-4o-mini', 
             messages: [
-                { role: 'system', content: 'Translate the following text from Hebrew to English:' },
+                { role: 'system', content: 'Translate the following text from Hebrew to English. if you find mispelling in the hebrew words, try to fix it and than translate it. the context is search query in e-commerce sites, so you probably get words attached to products or their descriptions. if you find a word you cant understand or think its out of context, do not translate it but do write it in english literally. for e.g, if you find the words "עגור לבן" write it as "agur lavan"' },
                 { role: 'user', content: query }
             ]
         });
@@ -110,11 +110,11 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 }
 
 // Utility function to get the embedding for a query
-async function getQueryEmbedding( query) {
+async function getQueryEmbedding(translatedText) {
     try {
         const response = await openai.embeddings.create({
             model: 'text-embedding-3-large',
-            input: query
+            input: translatedText
         });
         return response.data[0]?.embedding || null;
     } catch (error) {
@@ -146,13 +146,13 @@ app.post('/search', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);  
-        console.log(query)
+        
 
         const translatedQuery = await translateQuery(query);
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
 
         const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
-        const queryEmbedding = await getQueryEmbedding( query);
+        const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
         const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId);
