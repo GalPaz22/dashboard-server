@@ -17,7 +17,7 @@ const buildFuzzySearchPipeline = (query, siteId) => {
     const pipeline = [
         {
             "$search": {
-                "index": "vector_index",
+                "index": "default",
                 "text": {
                     "query": query,
                     "path": "name",
