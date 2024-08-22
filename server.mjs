@@ -13,23 +13,24 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildFuzzySearchPipeline = (query) => {
-  const pipeline = [
+const buildFuzzySearchPipeline = (translatedText, ) => {
+  const pipeline =[
     {
       $search: {
         index: "default",
         text: {
-          query: query,
+          query: translatedText,
           path: "name",
           fuzzy: {
             maxEdits: 2,
             prefixLength: 0,
-            maxExpansions: 50,
-          },
-        },
+            maxExpansions: 50
+          }
+        }
       },
+       
     },
-  ];
+  ]
 
   return pipeline;
 };
@@ -156,10 +157,12 @@ app.post("/search", async (req, res) => {
     !systemPrompt ||
     !siteId
   ) {
-    return res.status(400).json({
-      error:
-        "Query, MongoDB URI, database name, collection name, system prompt, and siteId are required",
-    });
+    return res
+      .status(400)
+      .json({
+        error:
+          "Query, MongoDB URI, database name, collection name, and system prompt are required",
+      });
   }
 
   let client;
@@ -188,38 +191,27 @@ app.post("/search", async (req, res) => {
         .status(500)
         .json({ error: "Error generating query embedding" });
 
-    // Perform fuzzy search
+    // Perform fuzzy search first
     const fuzzySearchPipeline = buildFuzzySearchPipeline(
-      query,
       translatedQuery,
       filters,
       siteId
     );
-    const fuzzyResults = await collection
-      .aggregate(fuzzySearchPipeline)
-      .toArray();
+    let results = await collection.aggregate(fuzzySearchPipeline).toArray();
+    console.log("Fuzzy search results:", results);
 
-    // Perform vector search
-    const vectorSearchPipeline = buildVectorSearchPipeline(
-      queryEmbedding,
-      filters,
-      siteId
-    );
-    const vectorResults = await collection
-      .aggregate(vectorSearchPipeline)
-      .toArray();
-
-    // Combine and deduplicate results
-    const combinedResults = [...fuzzyResults, ...vectorResults];
-    const uniqueResults = Array.from(
-      new Set(combinedResults.map((r) => r._id.toString()))
-    ).map((id) => combinedResults.find((r) => r._id.toString() === id));
-
-    // Sort combined results (you may want to implement a more sophisticated ranking method)
-    uniqueResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+    // If no results from fuzzy search, perform vector search
+    if (results.length === 0) {
+      const vectorSearchPipeline = buildVectorSearchPipeline(
+        queryEmbedding,
+        filters,
+        siteId
+      );
+      results = await collection.aggregate(vectorSearchPipeline).toArray();
+    }
 
     // Format results
-    const formattedResults = uniqueResults.slice(0, 10).map((product) => ({
+    const formattedResults = results.map((product) => ({
       id: product._id,
       title: product.title,
       description: product.description,
@@ -231,6 +223,53 @@ app.post("/search", async (req, res) => {
     res.json(formattedResults);
   } catch (error) {
     console.error("Error handling search request:", error);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    if (client) {
+      await client.close();
+    }
+  }
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
+
+app.get("/products", async (req, res) => {
+  const { mongodbUri, dbName, collectionName, limit = 10 } = req.query;
+
+  if (!mongodbUri || !dbName || !collectionName) {
+    return res
+      .status(400)
+      .json({
+        error: "MongoDB URI, database name, and collection name are required",
+      });
+  }
+
+  let client;
+
+  try {
+    client = new MongoClient(mongodbUri);
+    await client.connect();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Fetch a default set of products, e.g., the latest 10 products
+    const products = await collection.find().limit(Number(limit)).toArray();
+
+    const results = products.map((product) => ({
+      id: product._id,
+      title: product.title, // Ensure this matches your MongoDB document structure
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+    }));
+
+    res.json(results);
+  } catch (error) {
+    console.error("Error fetching products:", error);
     res.status(500).json({ error: "Server error" });
   } finally {
     if (client) {
