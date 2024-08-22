@@ -114,6 +114,7 @@ async function extractFiltersFromQuery(query, systemPrompt) {
         const content = response.choices[0]?.message?.content;
         const filters = JSON.parse(content);
         console.log('Extracted filters:', filters);
+        console.log(filters.length);
  
         return filters;
     } catch (error) {
