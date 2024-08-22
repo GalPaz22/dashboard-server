@@ -13,16 +13,15 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const performSearch = async (queryEmbedding, filters, siteId, query, collection) => {
-    // Step 1: Perform fuzzy search
-    let fuzzySearchPipeline = [
+const buildFuzzySearchPipeline = (query, filters, siteId) => {
+    const pipeline = [
         {
             "$search": {
                 "text": {
-                    "query": query, 
-                    "path": "name", 
+                    "query": query,
+                    "path": "name",
                     "fuzzy": {
-                        "maxEdits": 2 // Adjust the fuzziness level as needed
+                        "maxEdits": 2
                     }
                 }
             }
@@ -37,7 +36,6 @@ const performSearch = async (queryEmbedding, filters, siteId, query, collection)
         }
     ];
 
-    // Apply additional filters if available
     if (filters && Object.keys(filters).length > 0) {
         const matchStage = {};
 
@@ -56,20 +54,15 @@ const performSearch = async (queryEmbedding, filters, siteId, query, collection)
         }
 
         if (Object.keys(matchStage).length > 0) {
-            fuzzySearchPipeline.push({ "$match": matchStage });
+            pipeline.push({ "$match": matchStage });
         }
     }
 
-    // Execute the fuzzy search query
-    let results = await collection.aggregate(fuzzySearchPipeline).toArray();
+    return pipeline;
+};
 
-    // Step 2: If fuzzy search returns results, return them
-    if (results.length > 0) {
-        return results;
-    }
-
-    // Step 3: Perform vector search if no fuzzy search results are found
-    let vectorSearchPipeline = [
+const buildVectorSearchPipeline = (queryEmbedding, filters, siteId) => {
+    const pipeline = [
         {
             "$vectorSearch": {
                 "index": "vector_index",
@@ -86,7 +79,6 @@ const performSearch = async (queryEmbedding, filters, siteId, query, collection)
         }
     ];
 
-    // Apply the same filters as above
     if (filters && Object.keys(filters).length > 0) {
         const matchStage = {};
 
@@ -105,21 +97,16 @@ const performSearch = async (queryEmbedding, filters, siteId, query, collection)
         }
 
         if (Object.keys(matchStage).length > 0) {
-            vectorSearchPipeline.push({ "$match": matchStage });
+            pipeline.push({ "$match": matchStage });
         }
     }
 
-    vectorSearchPipeline.push({
+    pipeline.push({
         "$sort": { "score": -1 }
     });
 
-    // Execute the vector search query
-    results = await collection.aggregate(vectorSearchPipeline).toArray();
-
     return pipeline;
 };
-
-
 
 // Utility function to translate query from Hebrew to English
 async function translateQuery(query) {
@@ -133,7 +120,7 @@ async function translateQuery(query) {
         });
         const translatedText = response.choices[0]?.message?.content?.trim();
         console.log('Translated query:', translatedText);
-        return translatedText 
+        return translatedText;
     } catch (error) {
         console.error('Error translating query:', error);
         throw error;
@@ -179,14 +166,6 @@ async function getQueryEmbedding(translatedText) {
     }
 }
 
-// Function to calculate cosine similarity between two vectors
-function cosineSimilarity(vec1, vec2) {
-    const dotProduct = vec1.reduce((sum, v, i) => sum + v * vec2[i], 0);
-    const magnitude1 = Math.sqrt(vec1.reduce((sum, v) => sum + v * v, 0));
-    const magnitude2 = Math.sqrt(vec2.reduce((sum, v) => sum + v * v, 0));
-    return dotProduct / (magnitude1 * magnitude2);
-}
-
 // Route to handle the search endpoint
 app.post('/search', async (req, res) => {
     const { mongodbUri, dbName, collectionName, query, systemPrompt, siteId } = req.body;
@@ -202,18 +181,29 @@ app.post('/search', async (req, res) => {
         await client.connect();
         const db = client.db(dbName);
         const collection = db.collection(collectionName);  
-        
 
+        // Translate query
         const translatedQuery = await translateQuery(query);
         if (!translatedQuery) return res.status(500).json({ error: 'Error translating query' });
 
+        // Extract filters from the translated query
         const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
+
+        // Get query embedding
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
-        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId, query, collection);
-        const results = await collection.aggregate(pipeline).toArray();
+        // Perform fuzzy search first
+        const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, siteId);
+        let results = await collection.aggregate(fuzzySearchPipeline).toArray();
 
+        // If no results from fuzzy search, perform vector search
+        if (results.length === 0) {
+            const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters, siteId);
+            results = await collection.aggregate(vectorSearchPipeline).toArray();
+        }
+
+        // Format results
         const formattedResults = results.map(product => ({
             id: product._id,
             title: product.title,
