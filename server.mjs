@@ -14,7 +14,7 @@ app.use(cors({ origin: "*" }));
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const buildFuzzySearchPipeline = (query, siteId) => {
-  const pipeline = [
+  const pipeline =[
     {
       $search: {
         index: "default",
@@ -22,19 +22,14 @@ const buildFuzzySearchPipeline = (query, siteId) => {
           query: query,
           path: "name",
           fuzzy: {
-            maxEdits: 2, // Adjust to 1 or 2 based on how much error tolerance you want
-            prefixLength: 1, // Number of initial characters that must match
-            maxExpansions: 100,
-          },
-        },
-      },
-    },
-    {
-      $match: {
-        siteId: siteId,
-      },
-    },
-  ];
+            maxEdits: 2,
+            prefixLength: 0,
+            maxExpansions: 50
+          }
+        }
+      }
+    }
+  ]
 
   return pipeline;
 };
