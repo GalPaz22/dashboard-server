@@ -13,43 +13,34 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
-    const pipeline = [];
-
-    // If no filters, start with fuzzy search
-   
-        pipeline.push({
+const performSearch = async (queryEmbedding, filters, siteId, query, collection) => {
+    // Step 1: Perform fuzzy search
+    let fuzzySearchPipeline = [
+        {
             "$search": {
                 "text": {
-                    "query": query, // assuming queryEmbedding contains the text query
-                    "path": "name", // or the field you want to perform fuzzy search on
+                    "query": query, 
+                    "path": "name", 
                     "fuzzy": {
                         "maxEdits": 2 // Adjust the fuzziness level as needed
                     }
                 }
             }
-        });
-   
-        // Otherwise, start with vector search
-        pipeline.push({
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "embedding",
-                "queryVector": queryEmbedding,
-                "numCandidates": 150,
-                "limit": 10
-            }
-        });
-
-        pipeline.push({
+        },
+        {
             "$match": {
                 "siteId": siteId
             }
-        });
+        },
+        {
+            "$sort": { "score": -1 }
+        }
+    ];
 
+    // Apply additional filters if available
+    if (filters && Object.keys(filters).length > 0) {
         const matchStage = {};
 
-        // Build matchStage based on extracted filters
         if (filters.category) {
             matchStage.category = { $regex: filters.category, $options: "i" };
         }
@@ -64,19 +55,70 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
             matchStage.price = { $lte: filters.maxPrice };
         }
 
-        // Add $match stage if there are filter conditions
         if (Object.keys(matchStage).length > 0) {
-            pipeline.push({ "$match": matchStage });
+            fuzzySearchPipeline.push({ "$match": matchStage });
         }
-    
+    }
 
-    // Finalize with score sorting
-    pipeline.push({
+    // Execute the fuzzy search query
+    let results = await collection.aggregate(fuzzySearchPipeline).toArray();
+
+    // Step 2: If fuzzy search returns results, return them
+    if (results.length > 0) {
+        return results;
+    }
+
+    // Step 3: Perform vector search if no fuzzy search results are found
+    let vectorSearchPipeline = [
+        {
+            "$vectorSearch": {
+                "index": "vector_index",
+                "path": "embedding",
+                "queryVector": queryEmbedding,
+                "numCandidates": 150,
+                "limit": 10
+            }
+        },
+        {
+            "$match": {
+                "siteId": siteId
+            }
+        }
+    ];
+
+    // Apply the same filters as above
+    if (filters && Object.keys(filters).length > 0) {
+        const matchStage = {};
+
+        if (filters.category) {
+            matchStage.category = { $regex: filters.category, $options: "i" };
+        }
+        if (filters.type) {
+            matchStage.type = { $regex: filters.type, $options: "i" };
+        }
+        if (filters.minPrice && filters.maxPrice) {
+            matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+        } else if (filters.minPrice) {
+            matchStage.price = { $gte: filters.minPrice };
+        } else if (filters.maxPrice) {
+            matchStage.price = { $lte: filters.maxPrice };
+        }
+
+        if (Object.keys(matchStage).length > 0) {
+            vectorSearchPipeline.push({ "$match": matchStage });
+        }
+    }
+
+    vectorSearchPipeline.push({
         "$sort": { "score": -1 }
     });
 
+    // Execute the vector search query
+    results = await collection.aggregate(vectorSearchPipeline).toArray();
+
     return pipeline;
 };
+
 
 
 // Utility function to translate query from Hebrew to English
@@ -169,7 +211,7 @@ app.post('/search', async (req, res) => {
         const queryEmbedding = await getQueryEmbedding(translatedQuery);
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
-        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId, query);
+        const pipeline = buildAggregationPipeline(queryEmbedding, filters, siteId, query, collection);
         const results = await collection.aggregate(pipeline).toArray();
 
         const formattedResults = results.map(product => ({
