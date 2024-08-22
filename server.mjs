@@ -20,13 +20,13 @@ function calculateRRFScore(fuzzyRank, vectorRank) {
   return 1 / (RRF_CONSTANT + fuzzyRank) + 1 / (RRF_CONSTANT + vectorRank);
 }
 
-const buildFuzzySearchPipeline = (translatedText, filters) => {
+const buildFuzzySearchPipeline = (query, filters) => {
   const pipeline = [
     {
       $search: {
         index: "default",
         text: {
-          query: translatedText,
+          query: query,
           path: "name",
           fuzzy: {
             maxEdits: 2,
@@ -195,7 +195,7 @@ app.post("/search", async (req, res) => {
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
     // Perform fuzzy search
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters);
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, query);
     const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
 
     // Perform vector search
