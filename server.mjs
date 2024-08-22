@@ -24,30 +24,27 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
                 "limit": 10
             }
         },
-
         {
             "$match": {
                 "siteId": siteId
             }
         },
-       
         {
             "$set": {
                 "score": { "$meta": "searchScore" }
             }
-        },
-    
+        }
     ];
 
     const matchStage = {};
 
+    // Build matchStage based on extracted filters
     if (filters.category) {
         matchStage.category = { $regex: filters.category, $options: "i" };
     }
     if (filters.type) {
         matchStage.type = { $regex: filters.type, $options: "i" };
     }
-
     if (filters.minPrice && filters.maxPrice) {
         matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
     } else if (filters.minPrice) {
@@ -56,8 +53,22 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId) => {
         matchStage.price = { $lte: filters.maxPrice };
     }
 
+    // If filters are present, add the $match stage
     if (Object.keys(matchStage).length > 0) {
         pipeline.push({ "$match": matchStage });
+    } else {
+        // If no filters, use fuzzy search
+        pipeline.push({
+            "$search": {
+                "text": {
+                    "query": queryEmbedding, // assuming queryEmbedding contains the text query
+                    "path": "description", // or the field you want to perform fuzzy search on
+                    "fuzzy": {
+                        "maxEdits": 2 // Adjust the fuzziness level as needed
+                    }
+                }
+            }
+        });
     }
 
     pipeline.push({
@@ -73,7 +84,7 @@ async function translateQuery(query) {
         const response = await openai.chat.completions.create({
             model: 'gpt-4o-mini', 
             messages: [
-                { role: 'system', content: 'Translate the following text from Hebrew to English. if you find mispelling in the hebrew words, try to fix it and than translate it. the context is search query in e-commerce sites, so you probably get words attached to products or their descriptions. if you find a word you cant understand or think its out of context, do not translate it but do write it in english literally. for e.g, if you find the words "עגור לבן" write it as "agur lavan". respond with the the answer only, w/o explanations' },
+                { role: 'system', content: 'Translate the following text from Hebrew to English. if its already in English, leace it as it is. if you find mispelling in the hebrew words, try to fix it and than translate it. the context is search query in e-commerce sites, so you probably get words attached to products or their descriptions. if you find a word you cant understand or think its out of context, do not translate it but do write it in english literally. for e.g, if you find the words "עגור לבן" write it as "agur lavan". respond with the the answer only, w/o explanations' },
                 { role: 'user', content: query }
             ]
         });
