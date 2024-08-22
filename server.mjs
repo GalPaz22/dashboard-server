@@ -34,9 +34,6 @@ const buildFuzzySearchPipeline = (query, siteId) => {
                 "siteId": siteId
             }
         },
-        {
-            "$sort": { "score": -1 }
-        }
     ];
 
     
