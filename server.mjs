@@ -40,52 +40,7 @@ const buildFuzzySearchPipeline = (query, siteId) => {
     return pipeline;
 };
 
-const buildVectorSearchPipeline = (queryEmbedding, filters, siteId) => {
-    const pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector_index",
-                "path": "embedding",
-                "queryVector": queryEmbedding,
-                "numCandidates": 150,
-                "limit": 10
-            }
-        },
-        {
-            "$match": {
-                "siteId": siteId
-            }
-        }
-    ];
 
-    if (filters && Object.keys(filters).length > 0) {
-        const matchStage = {};
-
-        if (filters.category) {
-            matchStage.category = { $regex: filters.category, $options: "i" };
-        }
-        if (filters.type) {
-            matchStage.type = { $regex: filters.type, $options: "i" };
-        }
-        if (filters.minPrice && filters.maxPrice) {
-            matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-        } else if (filters.minPrice) {
-            matchStage.price = { $gte: filters.minPrice };
-        } else if (filters.maxPrice) {
-            matchStage.price = { $lte: filters.maxPrice };
-        }
-
-        if (Object.keys(matchStage).length > 0) {
-            pipeline.push({ "$match": matchStage });
-        }
-    }
-
-    pipeline.push({
-        "$sort": { "score": -1 }
-    });
-
-    return pipeline;
-};
 
 // Utility function to translate query from Hebrew to English
 async function translateQuery(query) {
