@@ -28,6 +28,11 @@ const buildFuzzySearchPipeline = (query, siteId) => {
           }
         }
       }
+    },
+    {
+      $match: {
+        siteId: siteId
+      }
     }
   ]
 
