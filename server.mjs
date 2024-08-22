@@ -196,6 +196,8 @@ app.post('/search', async (req, res) => {
         // Perform fuzzy search first
         const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, siteId);
         let results = await collection.aggregate(fuzzySearchPipeline).toArray();
+        console.log('Fuzzy search results:', results.length);
+        
 
         // If no results from fuzzy search, perform vector search
         if (results.length === 0) {
