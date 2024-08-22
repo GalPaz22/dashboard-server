@@ -1,4 +1,4 @@
-import express, { query } from "express";
+import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient } from "mongodb";
 import { OpenAI } from "openai";
@@ -13,8 +13,15 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildFuzzySearchPipeline = (translatedText, ) => {
-  const pipeline =[
+
+const RRF_CONSTANT = 60; // You can adjust this constant
+
+function calculateRRFScore(fuzzyRank, vectorRank) {
+  return 1 / (RRF_CONSTANT + fuzzyRank) + 1 / (RRF_CONSTANT + vectorRank);
+}
+
+const buildFuzzySearchPipeline = (translatedText, filters) => {
+  const pipeline = [
     {
       $search: {
         index: "default",
@@ -27,15 +34,38 @@ const buildFuzzySearchPipeline = (translatedText, ) => {
             maxExpansions: 50
           }
         }
-      },
-       
-    },
-  ]
+      }
+    }
+  ];
+
+  if (filters && Object.keys(filters).length > 0) {
+    const matchStage = {};
+
+    if (filters.category) {
+      matchStage.category = { $regex: filters.category, $options: "i" };
+    }
+    if (filters.type) {
+      matchStage.type = { $regex: filters.type, $options: "i" };
+    }
+    if (filters.minPrice && filters.maxPrice) {
+      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+    } else if (filters.minPrice) {
+      matchStage.price = { $gte: filters.minPrice };
+    } else if (filters.maxPrice) {
+      matchStage.price = { $lte: filters.maxPrice };
+    }
+
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
+  }
+
+  pipeline.push({ $limit: 100 }); // Increase limit for better RRF results
 
   return pipeline;
 };
 
-const buildVectorSearchPipeline = (queryEmbedding, filters, siteId) => {
+const buildVectorSearchPipeline = (queryEmbedding, filters) => {
   const pipeline = [
     {
       $vectorSearch: {
@@ -43,12 +73,7 @@ const buildVectorSearchPipeline = (queryEmbedding, filters, siteId) => {
         path: "embedding",
         queryVector: queryEmbedding,
         numCandidates: 150,
-        limit: 10,
-      },
-    },
-    {
-      $match: {
-        siteId: siteId,
+        limit: 100, // Increase limit for better RRF results
       },
     },
   ];
@@ -74,10 +99,6 @@ const buildVectorSearchPipeline = (queryEmbedding, filters, siteId) => {
       pipeline.push({ $match: matchStage });
     }
   }
-
-  pipeline.push({
-    $sort: { score: -1 },
-  });
 
   return pipeline;
 };
@@ -146,23 +167,12 @@ async function getQueryEmbedding(translatedText) {
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, query, systemPrompt, siteId } =
-    req.body;
+  const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
 
-  if (
-    !query ||
-    !mongodbUri ||
-    !dbName ||
-    !collectionName ||
-    !systemPrompt ||
-    !siteId
-  ) {
-    return res
-      .status(400)
-      .json({
-        error:
-          "Query, MongoDB URI, database name, collection name, and system prompt are required",
-      });
+  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
+    return res.status(400).json({
+      error: "Query, MongoDB URI, database name, collection name, and system prompt are required"
+    });
   }
 
   let client;
@@ -175,49 +185,58 @@ app.post("/search", async (req, res) => {
 
     // Translate query
     const translatedQuery = await translateQuery(query);
-    if (!translatedQuery)
-      return res.status(500).json({ error: "Error translating query" });
+    if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
 
     // Extract filters from the translated query
-    const filters = await extractFiltersFromQuery(
-      translatedQuery,
-      systemPrompt
-    );
+    const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
 
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(translatedQuery);
-    if (!queryEmbedding)
-      return res
-        .status(500)
-        .json({ error: "Error generating query embedding" });
+    if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
-    // Perform fuzzy search first
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(
-      translatedQuery,
-      filters,
-      siteId
-    );
-    let results = await collection.aggregate(fuzzySearchPipeline).toArray();
-    console.log("Fuzzy search results:", results);
+    // Perform fuzzy search
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters);
+    const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
 
-    // If no results from fuzzy search, perform vector search
-    if (results.length === 0) {
-      const vectorSearchPipeline = buildVectorSearchPipeline(
-        queryEmbedding,
-        filters,
-        siteId
-      );
-      results = await collection.aggregate(vectorSearchPipeline).toArray();
-    }
+    // Perform vector search
+    const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
+    const vectorResults = await collection.aggregate(vectorSearchPipeline).toArray();
+
+    // Create a map to store the best rank for each document
+    const documentRanks = new Map();
+
+    // Process fuzzy search results
+    fuzzyResults.forEach((doc, index) => {
+      documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+    });
+
+    // Process vector search results
+    vectorResults.forEach((doc, index) => {
+      const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+      documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+    });
+
+    // Calculate RRF scores and create the final result set
+    const combinedResults = Array.from(documentRanks.entries())
+      .map(([id, ranks]) => {
+        const doc = fuzzyResults.find(d => d._id.toString() === id) || vectorResults.find(d => d._id.toString() === id);
+        return {
+          ...doc,
+          rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank)
+        };
+      })
+      .sort((a, b) => b.rrf_score - a.rrf_score)
+      .slice(0, 10);
 
     // Format results
-    const formattedResults = results.map((product) => ({
+    const formattedResults = combinedResults.map((product) => ({
       id: product._id,
       title: product.title,
       description: product.description,
       price: product.price,
       image: product.image,
       url: product.url,
+      rrf_score: product.rrf_score
     }));
 
     res.json(formattedResults);
@@ -240,11 +259,9 @@ app.get("/products", async (req, res) => {
   const { mongodbUri, dbName, collectionName, limit = 10 } = req.query;
 
   if (!mongodbUri || !dbName || !collectionName) {
-    return res
-      .status(400)
-      .json({
-        error: "MongoDB URI, database name, and collection name are required",
-      });
+    return res.status(400).json({
+      error: "MongoDB URI, database name, and collection name are required"
+    });
   }
 
   let client;
@@ -260,7 +277,7 @@ app.get("/products", async (req, res) => {
 
     const results = products.map((product) => ({
       id: product._id,
-      title: product.title, // Ensure this matches your MongoDB document structure
+      title: product.title,
       description: product.description,
       price: product.price,
       image: product.image,
