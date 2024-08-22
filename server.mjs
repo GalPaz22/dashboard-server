@@ -17,7 +17,7 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
     const pipeline = [];
 
     // If no filters, start with fuzzy search
-    if (!filters || Object.keys(filters).length === 0) {
+   
         pipeline.push({
             "$search": {
                 "text": {
@@ -29,7 +29,7 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
                 }
             }
         });
-    } else {
+   
         // Otherwise, start with vector search
         pipeline.push({
             "$vectorSearch": {
@@ -68,7 +68,7 @@ const buildAggregationPipeline = (queryEmbedding, filters, siteId, query) => {
         if (Object.keys(matchStage).length > 0) {
             pipeline.push({ "$match": matchStage });
         }
-    }
+    
 
     // Finalize with score sorting
     pipeline.push({
