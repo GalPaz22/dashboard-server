@@ -13,10 +13,11 @@ app.use(cors({ origin: '*' }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildFuzzySearchPipeline = (query, filters, siteId) => {
+const buildFuzzySearchPipeline = (query, siteId) => {
     const pipeline = [
         {
             "$search": {
+                "index": "vector_index",
                 "text": {
                     "query": query,
                     "path": "name",
@@ -36,28 +37,7 @@ const buildFuzzySearchPipeline = (query, filters, siteId) => {
         }
     ];
 
-    if (filters && Object.keys(filters).length > 0) {
-        const matchStage = {};
-
-        if (filters.category) {
-            matchStage.category = { $regex: filters.category, $options: "i" };
-        }
-        if (filters.type) {
-            matchStage.type = { $regex: filters.type, $options: "i" };
-        }
-        if (filters.minPrice && filters.maxPrice) {
-            matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-        } else if (filters.minPrice) {
-            matchStage.price = { $gte: filters.minPrice };
-        } else if (filters.maxPrice) {
-            matchStage.price = { $lte: filters.maxPrice };
-        }
-
-        if (Object.keys(matchStage).length > 0) {
-            pipeline.push({ "$match": matchStage });
-        }
-    }
-
+    
     return pipeline;
 };
 
