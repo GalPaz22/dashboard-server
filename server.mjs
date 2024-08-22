@@ -17,7 +17,7 @@ const buildFuzzySearchPipeline = (query, siteId) => {
     const pipeline = [
         {
             "$search": {
-                "index": "vector_index",
+                
                 "text": {
                     "query": query,
                     "path": "name",
@@ -174,7 +174,7 @@ app.post('/search', async (req, res) => {
         if (!queryEmbedding) return res.status(500).json({ error: 'Error generating query embedding' });
 
         // Perform fuzzy search first
-        const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, siteId);
+        const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters, siteId);
         let results = await collection.aggregate(fuzzySearchPipeline).toArray();
         console.log('Fuzzy search results:', results.length);
         
