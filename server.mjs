@@ -29,11 +29,6 @@ const buildFuzzySearchPipeline = (translatedText, siteId) => {
         }
       }
     },
-    {
-      $match: {
-        siteId: siteId
-      }
-    }
   ]
 
   return pipeline;
