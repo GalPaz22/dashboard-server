@@ -13,27 +13,23 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const buildFuzzySearchPipeline = (translatedText, ) => {
-  const pipeline =[
+const buildFuzzySearchPipeline = (query) => {
+  const pipeline = [
     {
-      '$search': {
-        'index': 'default', 
-        'text': {
-          'query': 'italian red wine', 
-          'path': 'name', 
-          'fuzzy': {
-            'maxEdits': 2, 
-            'prefixLength': 0, 
-            'maxExpansions': 50
-          }
-        }
-      }
-    }, {
-      '$match': {
-        'siteId': 'wine'
-      }
-    }
-  ]
+      $search: {
+        index: "default",
+        text: {
+          query: query,
+          path: "name",
+          fuzzy: {
+            maxEdits: 2,
+            prefixLength: 0,
+            maxExpansions: 50,
+          },
+        },
+      },
+    },
+  ];
 
   return pipeline;
 };
@@ -149,66 +145,96 @@ async function getQueryEmbedding(translatedText) {
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-    const { mongodbUri, dbName, collectionName, query, systemPrompt, siteId } = req.body;
-  
-    if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt || !siteId) {
-      return res.status(400).json({
-        error: "Query, MongoDB URI, database name, collection name, system prompt, and siteId are required"
-      });
+  const { mongodbUri, dbName, collectionName, query, systemPrompt, siteId } =
+    req.body;
+
+  if (
+    !query ||
+    !mongodbUri ||
+    !dbName ||
+    !collectionName ||
+    !systemPrompt ||
+    !siteId
+  ) {
+    return res.status(400).json({
+      error:
+        "Query, MongoDB URI, database name, collection name, system prompt, and siteId are required",
+    });
+  }
+
+  let client;
+
+  try {
+    client = new MongoClient(mongodbUri);
+    await client.connect();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Translate query
+    const translatedQuery = await translateQuery(query);
+    if (!translatedQuery)
+      return res.status(500).json({ error: "Error translating query" });
+
+    // Extract filters from the translated query
+    const filters = await extractFiltersFromQuery(
+      translatedQuery,
+      systemPrompt
+    );
+
+    // Get query embedding
+    const queryEmbedding = await getQueryEmbedding(translatedQuery);
+    if (!queryEmbedding)
+      return res
+        .status(500)
+        .json({ error: "Error generating query embedding" });
+
+    // Perform fuzzy search
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(
+      query,
+      translatedQuery,
+      filters,
+      siteId
+    );
+    const fuzzyResults = await collection
+      .aggregate(fuzzySearchPipeline)
+      .toArray();
+
+    // Perform vector search
+    const vectorSearchPipeline = buildVectorSearchPipeline(
+      queryEmbedding,
+      filters,
+      siteId
+    );
+    const vectorResults = await collection
+      .aggregate(vectorSearchPipeline)
+      .toArray();
+
+    // Combine and deduplicate results
+    const combinedResults = [...fuzzyResults, ...vectorResults];
+    const uniqueResults = Array.from(
+      new Set(combinedResults.map((r) => r._id.toString()))
+    ).map((id) => combinedResults.find((r) => r._id.toString() === id));
+
+    // Sort combined results (you may want to implement a more sophisticated ranking method)
+    uniqueResults.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    // Format results
+    const formattedResults = uniqueResults.slice(0, 10).map((product) => ({
+      id: product._id,
+      title: product.title,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+    }));
+
+    res.json(formattedResults);
+  } catch (error) {
+    console.error("Error handling search request:", error);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    if (client) {
+      await client.close();
     }
-  
-    let client;
-  
-    try {
-      client = new MongoClient(mongodbUri);
-      await client.connect();
-      const db = client.db(dbName);
-      const collection = db.collection(collectionName);
-  
-      // Translate query
-      const translatedQuery = await translateQuery(query);
-      if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
-  
-      // Extract filters from the translated query
-      const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
-  
-      // Get query embedding
-      const queryEmbedding = await getQueryEmbedding(translatedQuery);
-      if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
-  
-      // Perform fuzzy search
-      const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, siteId);
-      const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
-  
-      // Perform vector search
-      const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters, siteId);
-      const vectorResults = await collection.aggregate(vectorSearchPipeline).toArray();
-  
-      // Combine and deduplicate results
-      const combinedResults = [...fuzzyResults, ...vectorResults];
-      const uniqueResults = Array.from(new Set(combinedResults.map(r => r._id.toString())))
-        .map(id => combinedResults.find(r => r._id.toString() === id));
-  
-      // Sort combined results (you may want to implement a more sophisticated ranking method)
-      uniqueResults.sort((a, b) => (b.score || 0) - (a.score || 0));
-  
-      // Format results
-      const formattedResults = uniqueResults.slice(0, 10).map((product) => ({
-        id: product._id,
-        title: product.title,
-        description: product.description,
-        price: product.price,
-        image: product.image,
-        url: product.url,
-      }));
-  
-      res.json(formattedResults);
-    } catch (error) {
-      console.error("Error handling search request:", error);
-      res.status(500).json({ error: "Server error" });
-    } finally {
-      if (client) {
-        await client.close();
-      }
-    }
-  });
+  }
+});
