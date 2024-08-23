@@ -73,7 +73,7 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
         path: "embedding",
         queryVector: queryEmbedding,
         numCandidates: 150,
-        limit: 100, // Increase limit for better RRF results
+        limit: 20, // Increase limit for better RRF results
       },
     },
   ];
@@ -231,7 +231,7 @@ app.post("/search", async (req, res) => {
     // Format results
     const formattedResults = combinedResults.map((product) => ({
       id: product._id,
-      title: product.title,
+      name: product.name,
       description: product.description,
       price: product.price,
       image: product.image,
