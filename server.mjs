@@ -15,7 +15,7 @@ app.use(cors({ origin: "*" }));
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const RRF_CONSTANT = 60; // Base constant
-const VECTOR_WEIGHT = 1.2; // Weight for vector search
+const VECTOR_WEIGHT = 1; // Weight for vector search
 
 function calculateRRFScore(fuzzyRank, vectorRank) {
   return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
