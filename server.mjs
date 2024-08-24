@@ -14,7 +14,7 @@ app.use(cors({ origin: "*" }));
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const RRF_CONSTANT = 80; // You can adjust this constant
+const RRF_CONSTANT = 60; // You can adjust this constant
 
 function calculateRRFScore(fuzzyRank, vectorRank) {
   return 1 / (RRF_CONSTANT + fuzzyRank) + 1 / (RRF_CONSTANT + vectorRank);
