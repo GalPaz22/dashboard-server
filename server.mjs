@@ -190,7 +190,7 @@ app.post("/search", async (req, res) => {
     
     const RRF_CONSTANT = 60;
     console.log('query- ' + query.length) // Base constant
-    const VECTOR_WEIGHT = query.length > 7 ? 2 : 0; // E
+    const VECTOR_WEIGHT = query.length > 7 ? 2 : 0; 
     
     function calculateRRFScore(fuzzyRank, vectorRank) {
       return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
@@ -218,17 +218,16 @@ app.post("/search", async (req, res) => {
     });
 
     // Calculate RRF scores and create the final result set
-    const combinedResults = Array.from(documentRanks.entries())
-      .map(([id, ranks]) => {
-        const doc = fuzzyResults.find(d => d._id.toString() === id) || vectorResults.find(d => d._id.toString() === id);
-        return {
-          ...doc,
-          rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank)
-        };
-      })
-      .sort((a, b) => b.rrf_score - a.rrf_score)
-      .slice(0, 10);
-
+     const combinedResults = Array.from(documentRanks.entries())
+    .map(([id, ranks]) => {
+      const doc = fuzzyResults.find(d => d._id.toString() === id) || vectorResults.find(d => d._id.toString() === id);
+      return {
+        ...doc,
+        rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT)
+      };
+    })
+    .sort((a, b) => b.rrf_score - a.rrf_score)
+    .slice(0, 10);
     // Format results
     const formattedResults = combinedResults.map((product) => ({
       id: product._id,
