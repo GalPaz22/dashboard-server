@@ -14,13 +14,6 @@ app.use(cors({ origin: "*" }));
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const RRF_CONSTANT = 60; // Base constant
-const VECTOR_WEIGHT = 1; // Weight for vector search
-
-function calculateRRFScore(fuzzyRank, vectorRank) {
-  return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
-}
-
 const buildFuzzySearchPipeline = (query, filters) => {
   const pipeline = [
     {
@@ -194,7 +187,13 @@ app.post("/search", async (req, res) => {
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(translatedQuery);
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
-
+    
+    const RRF_CONSTANT = 60; // Base constant
+    const VECTOR_WEIGHT = query.length > 7 ? 2 : 0.5; // E
+    
+    function calculateRRFScore(fuzzyRank, vectorRank) {
+      return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
+    }
     // Perform fuzzy search
     const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, query);
     const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
