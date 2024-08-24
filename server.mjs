@@ -25,30 +25,30 @@ const buildFuzzySearchPipeline = (query, filters) => {
           fuzzy: {
             maxEdits: 2,
             prefixLength: 0,
-            maxExpansions: 50
-          }
-        }
-      }
-    }
+            maxExpansions: 50,
+          },
+        },
+      },
+    },
   ];
 
   if (filters && Object.keys(filters).length > 0) {
     const matchStage = {};
 
     if (filters.category ?? null) {
-        matchStage.category = { $regex: filters.category, $options: "i" };
-      }
-      if (filters.type ?? null) {
-        matchStage.type = { $regex: filters.type, $options: "i" };
-      }
-      if ((filters.minPrice ?? null) && (filters.maxPrice ?? null)) {
-        matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-      } else if (filters.minPrice ?? null) {
-        matchStage.price = { $gte: filters.minPrice };
-      } else if (filters.maxPrice ?? null) {
-        matchStage.price = { $lte: filters.maxPrice };
-      }
-      
+      matchStage.category = { $regex: filters.category, $options: "i" };
+    }
+    if (filters.type ?? null) {
+      matchStage.type = { $regex: filters.type, $options: "i" };
+    }
+    if (filters.minPrice && filters.maxPrice) {
+      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+    } else if (filters.minPrice) {
+      matchStage.price = { $gte: filters.minPrice };
+    } else if (filters.maxPrice) {
+      matchStage.price = { $lte: filters.maxPrice };
+    }
+
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
     }
@@ -76,19 +76,19 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
     const matchStage = {};
 
     if (filters.category ?? null) {
-        matchStage.category = { $regex: filters.category, $options: "i" };
-      }
-      if (filters.type ?? null) {
-        matchStage.type = { $regex: filters.type, $options: "i" };
-      }
-      if ((filters.minPrice ?? null) && (filters.maxPrice ?? null)) {
-        matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-      } else if (filters.minPrice ?? null) {
-        matchStage.price = { $gte: filters.minPrice };
-      } else if (filters.maxPrice ?? null) {
-        matchStage.price = { $lte: filters.maxPrice };
-      }
-      
+      matchStage.category = { $regex: filters.category, $options: "i" };
+    }
+    if (filters.type ?? null) {
+      matchStage.type = { $regex: filters.type, $options: "i" };
+    }
+    if (filters.minPrice && filters.maxPrice) {
+      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+    } else if (filters.minPrice) {
+      matchStage.price = { $gte: filters.minPrice };
+    } else if (filters.maxPrice) {
+      matchStage.price = { $lte: filters.maxPrice };
+    }
+
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
     }
@@ -106,7 +106,7 @@ async function translateQuery(query) {
         {
           role: "system",
           content:
-            'Translate the following text from Hebrew to English. if its already in English, leave it as it is. if you find mispelling in the hebrew words, try to fix it and than translate it. the context is search query in e-commerce sites, so you probably get words attached to products or their descriptions. if you find a word you cant understand or think its out of context, do not translate it but do write it in english literally. for e.g, if you find the words "עגור לבן" write it as "agur lavan". respond with the the answer only, w/o explanations',
+            'Translate the following text from Hebrew to English. If it\'s already in English, leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. If you find a word you can\'t understand or think it\'s out of context, do not translate it but do write it in English literally. For example, if you find the words "עגור לבן" write it as "agur lavan". Respond with the answer only, without explanations.',
         },
         { role: "user", content: query },
       ],
@@ -165,7 +165,7 @@ app.post("/search", async (req, res) => {
 
   if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
     return res.status(400).json({
-      error: "Query, MongoDB URI, database name, collection name, and system prompt are required"
+      error: "Query, MongoDB URI, database name, collection name, and system prompt are required",
     });
   }
 
@@ -187,16 +187,16 @@ app.post("/search", async (req, res) => {
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(translatedQuery);
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
-    
+
     const RRF_CONSTANT = 60;
-    console.log('query- ' + query.length) // Base constant
-    const VECTOR_WEIGHT = query.length > 7 ? 2 : 0; 
-    
-    function calculateRRFScore(fuzzyRank, vectorRank) {
-      return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
+    const VECTOR_WEIGHT = query.length > 7 ? 2 : 1;
+
+    function calculateRRFScore(fuzzyRank, vectorRank, vectorWeight) {
+      return 1 / (RRF_CONSTANT + fuzzyRank) + vectorWeight * (1 / (RRF_CONSTANT + vectorRank));
     }
+
     // Perform fuzzy search
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters, query);
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters);
     const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
 
     // Perform vector search
@@ -218,16 +218,17 @@ app.post("/search", async (req, res) => {
     });
 
     // Calculate RRF scores and create the final result set
-     const combinedResults = Array.from(documentRanks.entries())
-    .map(([id, ranks]) => {
-      const doc = fuzzyResults.find(d => d._id.toString() === id) || vectorResults.find(d => d._id.toString() === id);
-      return {
-        ...doc,
-        rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT)
-      };
-    })
-    .sort((a, b) => b.rrf_score - a.rrf_score)
-    .slice(0, 10);
+    const combinedResults = Array.from(documentRanks.entries())
+      .map(([id, ranks]) => {
+        const doc = fuzzyResults.find((d) => d._id.toString() === id) || vectorResults.find((d) => d._id.toString() === id);
+        return {
+          ...doc,
+          rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT),
+        };
+      })
+      .sort((a, b) => b.rrf_score - a.rrf_score)
+      .slice(0, 10);
+
     // Format results
     const formattedResults = combinedResults.map((product) => ({
       id: product._id,
@@ -236,7 +237,7 @@ app.post("/search", async (req, res) => {
       price: product.price,
       image: product.image,
       url: product.url,
-      rrf_score: product.rrf_score
+      rrf_score: product.rrf_score,
     }));
 
     res.json(formattedResults);
