@@ -61,7 +61,7 @@ const buildFuzzySearchPipeline = (query, filters) => {
     }
   }
 
-  pipeline.push({ $limit: 100 }); // Increase limit for better RRF results
+  pipeline.push({ $limit: 20 }); // Increase limit for better RRF results
 
   return pipeline;
 };
