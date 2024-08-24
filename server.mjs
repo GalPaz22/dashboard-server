@@ -42,20 +42,20 @@ const buildFuzzySearchPipeline = (query, filters) => {
   if (filters && Object.keys(filters).length > 0) {
     const matchStage = {};
 
-    if (filters.category) {
-      matchStage.category = { $regex: filters.category, $options: "i" };
-    }
-    if (filters.type) {
-      matchStage.type = { $regex: filters.type, $options: "i" };
-    }
-    if (filters.minPrice && filters.maxPrice) {
-      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-    } else if (filters.minPrice) {
-      matchStage.price = { $gte: filters.minPrice };
-    } else if (filters.maxPrice) {
-      matchStage.price = { $lte: filters.maxPrice };
-    }
-
+    if (filters.category ?? null) {
+        matchStage.category = { $regex: filters.category, $options: "i" };
+      }
+      if (filters.type ?? null) {
+        matchStage.type = { $regex: filters.type, $options: "i" };
+      }
+      if ((filters.minPrice ?? null) && (filters.maxPrice ?? null)) {
+        matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+      } else if (filters.minPrice ?? null) {
+        matchStage.price = { $gte: filters.minPrice };
+      } else if (filters.maxPrice ?? null) {
+        matchStage.price = { $lte: filters.maxPrice };
+      }
+      
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
     }
@@ -82,20 +82,20 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
   if (filters && Object.keys(filters).length > 0) {
     const matchStage = {};
 
-    if (filters.category) {
-      matchStage.category = { $regex: filters.category, $options: "i" };
-    }
-    if (filters.type) {
-      matchStage.type = { $regex: filters.type, $options: "i" };
-    }
-    if (filters.minPrice && filters.maxPrice) {
-      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-    } else if (filters.minPrice) {
-      matchStage.price = { $gte: filters.minPrice };
-    } else if (filters.maxPrice) {
-      matchStage.price = { $lte: filters.maxPrice };
-    }
-
+    if (filters.category ?? null) {
+        matchStage.category = { $regex: filters.category, $options: "i" };
+      }
+      if (filters.type ?? null) {
+        matchStage.type = { $regex: filters.type, $options: "i" };
+      }
+      if ((filters.minPrice ?? null) && (filters.maxPrice ?? null)) {
+        matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+      } else if (filters.minPrice ?? null) {
+        matchStage.price = { $gte: filters.minPrice };
+      } else if (filters.maxPrice ?? null) {
+        matchStage.price = { $lte: filters.maxPrice };
+      }
+      
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
     }
