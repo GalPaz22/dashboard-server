@@ -27,7 +27,7 @@ const buildFuzzySearchPipeline = (query, filters) => {
         index: "default",
         text: {
           query: query,
-          path: "name",
+          path: ["name","description"],
           fuzzy: {
             maxEdits: 2,
             prefixLength: 0,
