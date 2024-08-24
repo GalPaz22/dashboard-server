@@ -14,10 +14,11 @@ app.use(cors({ origin: "*" }));
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const RRF_CONSTANT = 60; // You can adjust this constant
+const RRF_CONSTANT = 60; // Base constant
+const VECTOR_WEIGHT = 2; // Weight for vector search
 
 function calculateRRFScore(fuzzyRank, vectorRank) {
-  return 1 / (RRF_CONSTANT + fuzzyRank) + 1 / (RRF_CONSTANT + vectorRank);
+  return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
 }
 
 const buildFuzzySearchPipeline = (query, filters) => {
@@ -27,7 +28,7 @@ const buildFuzzySearchPipeline = (query, filters) => {
         index: "default",
         text: {
           query: query,
-          path: ["name","description"],
+          path: "name",
           fuzzy: {
             maxEdits: 2,
             prefixLength: 0,
