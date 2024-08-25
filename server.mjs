@@ -75,7 +75,7 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
         path: "embedding",
         queryVector: queryEmbedding,
         numCandidates: 150,
-        limit: 20, // Increase limit for better RRF results
+        limit: 50, // Increase limit for better RRF results
       },
     },
   ];
@@ -196,15 +196,16 @@ app.post("/search", async (req, res) => {
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
     const RRF_CONSTANT = 60;
-    const VECTOR_WEIGHT = 0;
+    const VECTOR_WEIGHT = query.length > 7 ? 2 : 1;
 
     function calculateRRFScore(fuzzyRank, vectorRank, VECTOR_WEIGHT) {
       return 1 / (RRF_CONSTANT + fuzzyRank) +  VECTOR_WEIGHT* (1 / (RRF_CONSTANT + vectorRank));
     }
 
     // Perform fuzzy search
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(translatedQuery, filters);
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters);
     const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
+
 
     // Perform vector search
     const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
