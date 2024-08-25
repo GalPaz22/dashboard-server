@@ -13,7 +13,15 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let client;
 
+async function connectToMongoDB(mongodbUri) {
+  if (!client) {
+    client = new MongoClient(mongodbUri, { useNewUrlParser: true, useUnifiedTopology: true });
+    await client.connect();
+  }
+  return client;
+}
 const buildFuzzySearchPipeline = (query, filters) => {
   const pipeline = [
     {
@@ -172,8 +180,7 @@ app.post("/search", async (req, res) => {
   let client;
 
   try {
-    client = new MongoClient(mongodbUri);
-    await client.connect();
+    const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
@@ -268,8 +275,7 @@ app.get("/products", async (req, res) => {
   let client;
 
   try {
-    client = new MongoClient(mongodbUri);
-    await client.connect();
+    const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
