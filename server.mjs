@@ -196,7 +196,7 @@ app.post("/search", async (req, res) => {
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
     const RRF_CONSTANT = 60;
-    const VECTOR_WEIGHT = query.length > 7 ? 2 : 1;
+    const VECTOR_WEIGHT = 0;
 
     function calculateRRFScore(fuzzyRank, vectorRank, VECTOR_WEIGHT) {
       return 1 / (RRF_CONSTANT + fuzzyRank) +  VECTOR_WEIGHT* (1 / (RRF_CONSTANT + vectorRank));
