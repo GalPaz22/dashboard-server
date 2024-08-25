@@ -235,7 +235,7 @@ app.post("/search", async (req, res) => {
         };
       })
       .sort((a, b) => b.rrf_score - a.rrf_score)
-      .slice(0, 10);
+      .slice(0, 12);
 
     // Format results
     const formattedResults = combinedResults.map((product) => ({
