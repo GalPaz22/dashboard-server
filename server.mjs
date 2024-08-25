@@ -193,20 +193,20 @@ app.post("/search", async (req, res) => {
 
   try {
     // Remove the word 'wine' from the query
-    const cleanQuery = removeNoWord(translatedQuery);
-    console.log("Cleaned query:", cleanQuery);
     
     client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
-
+    
     // Translate query
     const translatedQuery = await translateQuery(query);
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
-
+    
+    const cleanQuery = removeNoWord(translatedQuery);
+    console.log("Cleaned query:", cleanQuery);
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
-
+    
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(cleanQuery);
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
