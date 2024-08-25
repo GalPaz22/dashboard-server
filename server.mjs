@@ -180,7 +180,8 @@ app.post("/search", async (req, res) => {
   let client;
 
   try {
-    const client = await connectToMongoDB(mongodbUri);
+    client = new MongoClient(mongodbUri);
+    await client.connect();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
@@ -275,7 +276,8 @@ app.get("/products", async (req, res) => {
   let client;
 
   try {
-    const client = await connectToMongoDB(mongodbUri);
+    client = new MongoClient(mongodbUri);
+    await client.connect();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
