@@ -172,9 +172,9 @@ async function getQueryEmbedding(translatedText) {
 }
 
 // Function to remove the word 'wine' from the query
-function removeNoWord(query) {
+function removeNoWord(translatedQuery) {
   const noWord = "wine";
-  const queryWords = query.split(" ");
+  const queryWords = translatedQuery.split(" ");
   const filteredWords = queryWords.filter(word => word.toLowerCase() !== noWord.toLowerCase());
   return filteredWords.join(" ");
 }
@@ -193,21 +193,22 @@ app.post("/search", async (req, res) => {
 
   try {
     // Remove the word 'wine' from the query
-    const cleanQuery = removeNoWord(query);
+    const cleanQuery = removeNoWord(translatedQuery);
+    console.log("Cleaned query:", cleanQuery);
     
     client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
     // Translate query
-    const translatedQuery = await translateQuery(cleanQuery);
+    const translatedQuery = await translateQuery(query);
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
 
     // Extract filters from the translated query
-    const filters = await extractFiltersFromQuery(cleanQuery, systemPrompt);
+    const filters = await extractFiltersFromQuery(query, systemPrompt);
 
     // Get query embedding
-    const queryEmbedding = await getQueryEmbedding(translatedQuery);
+    const queryEmbedding = await getQueryEmbedding(cleanQuery);
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
     const RRF_CONSTANT = 60;
