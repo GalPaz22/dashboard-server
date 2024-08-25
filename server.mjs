@@ -130,8 +130,8 @@ async function translateQuery(query) {
 }
 
 // New function to remove 'wine' from the query
-function removeWineFromQuery(query) {
-  return query.replace(/\bwine\b/gi, '').trim();
+function removeWineFromQuery(translatedQuery) {
+  return translatedQuery.replace(/\bwine\b/gi, '').trim();
 }
 
 // Utility function to extract filters from query using LLM
@@ -197,7 +197,7 @@ app.post("/search", async (req, res) => {
     const translatedQuery = await translateQuery(query);
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
 
-    const cleanedText = removeWineFromQuery(translatedText);
+    const cleanedText = removeWineFromQuery(translatedQuery);
     console.log("Cleaned query for embedding:", cleanedText);
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
