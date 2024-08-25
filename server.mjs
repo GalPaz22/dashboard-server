@@ -14,12 +14,15 @@ app.use(cors({ origin: "*" }));
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 let client;
+let isConnected = false;
 
 // Function to connect to MongoDB
 async function connectToMongoDB(mongodbUri) {
-  if (!client) {
+  if (!isConnected) {
     client = new MongoClient(mongodbUri, { useNewUrlParser: true, useUnifiedTopology: true });
     await client.connect();
+    isConnected = true;
+    console.log("Connected to MongoDB");
   }
   return client;
 }
