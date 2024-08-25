@@ -284,7 +284,7 @@ app.get("/products", async (req, res) => {
 
     const results = products.map((product) => ({
       id: product._id,
-      title: product.title,
+      name: product.name,
       description: product.description,
       price: product.price,
       image: product.image,
