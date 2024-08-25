@@ -180,8 +180,7 @@ app.post("/search", async (req, res) => {
   let client;
 
   try {
-    client = new MongoClient(mongodbUri);
-    await client.connect();
+    const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
@@ -190,7 +189,7 @@ app.post("/search", async (req, res) => {
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
 
     // Extract filters from the translated query
-    const filters = await extractFiltersFromQuery(translatedQuery, systemPrompt);
+    const filters = await extractFiltersFromQuery(query, systemPrompt);
 
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(translatedQuery);
@@ -276,8 +275,7 @@ app.get("/products", async (req, res) => {
   let client;
 
   try {
-    client = new MongoClient(mongodbUri);
-    await client.connect();
+    const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
