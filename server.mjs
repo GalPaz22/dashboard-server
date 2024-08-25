@@ -22,6 +22,7 @@ async function connectToMongoDB(mongodbUri) {
   }
   return client;
 }
+
 const buildFuzzySearchPipeline = (query, filters) => {
   const pipeline = [
     {
@@ -128,6 +129,11 @@ async function translateQuery(query) {
   }
 }
 
+// New function to remove 'wine' from the query
+function removeWineFromQuery(query) {
+  return query.replace(/\bwine\b/gi, '').trim();
+}
+
 // Utility function to extract filters from query using LLM
 async function extractFiltersFromQuery(query, systemPrompt) {
   try {
@@ -156,9 +162,13 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 // Utility function to get the embedding for a query
 async function getQueryEmbedding(translatedText) {
   try {
+    // Remove 'wine' from the translated text
+    const cleanedText = removeWineFromQuery(translatedText);
+    console.log("Cleaned query for embedding:", cleanedText);
+
     const response = await openai.embeddings.create({
       model: "text-embedding-3-large",
-      input: translatedText,
+      input: cleanedText,
     });
     return response.data[0]?.embedding || null;
   } catch (error) {
@@ -205,7 +215,6 @@ app.post("/search", async (req, res) => {
     // Perform fuzzy search
     const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters);
     const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
-
 
     // Perform vector search
     const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
