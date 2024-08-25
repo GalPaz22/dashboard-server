@@ -160,11 +160,10 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 }
 
 // Utility function to get the embedding for a query
-async function getQueryEmbedding(translatedText) {
+async function getQueryEmbedding(cleanedText) {
   try {
     // Remove 'wine' from the translated text
-    const cleanedText = removeWineFromQuery(translatedText);
-    console.log("Cleaned query for embedding:", cleanedText);
+  
 
     const response = await openai.embeddings.create({
       model: "text-embedding-3-large",
@@ -198,11 +197,13 @@ app.post("/search", async (req, res) => {
     const translatedQuery = await translateQuery(query);
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
 
+    const cleanedText = removeWineFromQuery(translatedText);
+    console.log("Cleaned query for embedding:", cleanedText);
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
 
     // Get query embedding
-    const queryEmbedding = await getQueryEmbedding(translatedQuery);
+    const queryEmbedding = await getQueryEmbedding(cleanedText);
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
     const RRF_CONSTANT = 60;
