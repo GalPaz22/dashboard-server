@@ -14,20 +14,14 @@ app.use(cors({ origin: "*" }));
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 let client;
-let isConnected = false;
 
-// Function to connect to MongoDB
 async function connectToMongoDB(mongodbUri) {
-  if (!isConnected) {
+  if (!client) {
     client = new MongoClient(mongodbUri, { useNewUrlParser: true, useUnifiedTopology: true });
     await client.connect();
-    isConnected = true;
-    console.log("Connected to MongoDB");
   }
   return client;
 }
-
-// Function to build the fuzzy search pipeline
 const buildFuzzySearchPipeline = (query, filters) => {
   const pipeline = [
     {
@@ -73,7 +67,6 @@ const buildFuzzySearchPipeline = (query, filters) => {
   return pipeline;
 };
 
-// Function to build the vector search pipeline
 const buildVectorSearchPipeline = (queryEmbedding, filters) => {
   const pipeline = [
     {
@@ -112,7 +105,7 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
   return pipeline;
 };
 
-// Utility function to translate the query from Hebrew to English
+// Utility function to translate query from Hebrew to English
 async function translateQuery(query) {
   try {
     const response = await openai.chat.completions.create({
@@ -135,7 +128,7 @@ async function translateQuery(query) {
   }
 }
 
-// Utility function to extract filters from the query using LLM
+// Utility function to extract filters from query using LLM
 async function extractFiltersFromQuery(query, systemPrompt) {
   try {
     const response = await openai.chat.completions.create({
@@ -174,14 +167,6 @@ async function getQueryEmbedding(translatedText) {
   }
 }
 
-// Function to remove the word 'wine' from the query
-function removeNoWord(translatedQuery) {
-  const noWord = "wine";
-  const queryWords = translatedQuery.split(" ");
-  const filteredWords = queryWords.filter(word => word.toLowerCase() !== noWord.toLowerCase());
-  return filteredWords.join(" ");
-}
-
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
   const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
@@ -195,35 +180,32 @@ app.post("/search", async (req, res) => {
   let client;
 
   try {
-    // Remove the word 'wine' from the query
-    
-    client = await connectToMongoDB(mongodbUri);
+    const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
-    
+
     // Translate query
     const translatedQuery = await translateQuery(query);
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
-    
-    const cleanQuery = removeNoWord(translatedQuery);
-    console.log("Cleaned query:", cleanQuery);
+
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
-    
+
     // Get query embedding
-    const queryEmbedding = await getQueryEmbedding(cleanQuery);
+    const queryEmbedding = await getQueryEmbedding(translatedQuery);
     if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
 
     const RRF_CONSTANT = 60;
     const VECTOR_WEIGHT = query.length > 7 ? 2 : 1;
 
     function calculateRRFScore(fuzzyRank, vectorRank, VECTOR_WEIGHT) {
-      return 1 / (RRF_CONSTANT + fuzzyRank) + VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
+      return 1 / (RRF_CONSTANT + fuzzyRank) +  VECTOR_WEIGHT* (1 / (RRF_CONSTANT + vectorRank));
     }
 
     // Perform fuzzy search
     const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters);
     const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
+
 
     // Perform vector search
     const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
@@ -255,7 +237,18 @@ app.post("/search", async (req, res) => {
       .sort((a, b) => b.rrf_score - a.rrf_score)
       .slice(0, 12);
 
-    res.json(combinedResults);
+    // Format results
+    const formattedResults = combinedResults.map((product) => ({
+      id: product._id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      rrf_score: product.rrf_score,
+    }));
+
+    res.json(formattedResults);
   } catch (error) {
     console.error("Error handling search request:", error);
     res.status(500).json({ error: "Server error" });
@@ -266,7 +259,46 @@ app.post("/search", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server is running on port ${PORT}`);
+});
+
+app.get("/products", async (req, res) => {
+  const { mongodbUri, dbName, collectionName, limit = 10 } = req.query;
+
+  if (!mongodbUri || !dbName || !collectionName) {
+    return res.status(400).json({
+      error: "MongoDB URI, database name, and collection name are required"
+    });
+  }
+
+  let client;
+
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Fetch a default set of products, e.g., the latest 10 products
+    const products = await collection.find().limit(Number(limit)).toArray();
+
+    const results = products.map((product) => ({
+      id: product._id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+    }));
+
+    res.json(results);
+  } catch (error) {
+    console.error("Error fetching products:", error);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    if (client) {
+      await client.close();
+    }
+  }
 });
