@@ -135,15 +135,17 @@ async function translateQuery(query) {
 // New function to remove 'wine' from the query
 // New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
-  if (!noWord) return translatedQuery;
-  else {
+    if (!noWord) return translatedQuery;
+  
     const queryWords = translatedQuery.split(" ");
-    const filteredWords = queryWords.filter(
-      (word) => !noWord.includes(word.toLowerCase())
-    );
+    const filteredWords = queryWords.filter((word) => {
+      // Remove the word if it's in the noWord list or if it's a number
+      return !noWord.includes(word.toLowerCase()) && isNaN(Number(word));
+    });
+  
     return filteredWords.join(" ");
   }
-}
+  
 
 // Utility function to extract filters from query using LLM
 async function extractFiltersFromQuery(query, systemPrompt) {
