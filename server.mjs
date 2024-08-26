@@ -131,8 +131,7 @@ async function translateQuery(query) {
 
 // New function to remove 'wine' from the query
 // New function to remove 'wine' from the query
-function removeWineFromQuery(translatedQuery) {
-    const noWord = ["wine", "white","red", "rose"];
+function removeWineFromQuery(translatedQuery, noWord) {
     const queryWords = translatedQuery.split(" ");
     const filteredWords = queryWords.filter(word => !noWord.includes(word.toLowerCase()));
     return filteredWords.join(" ");
@@ -182,9 +181,9 @@ async function getQueryEmbedding(cleanedText) {
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, query, systemPrompt } = req.body;
+  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord } = req.body;
 
-  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
+  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt || !noWord) {
     return res.status(400).json({
       error: "Query, MongoDB URI, database name, collection name, and system prompt are required",
     });
@@ -201,7 +200,7 @@ app.post("/search", async (req, res) => {
     const translatedQuery = await translateQuery(query);
     if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
 
-    const cleanedText = removeWineFromQuery(translatedQuery);
+    const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     console.log("Cleaned query for embedding:", cleanedText);
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
