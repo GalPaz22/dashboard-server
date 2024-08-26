@@ -130,10 +130,11 @@ async function translateQuery(query) {
 }
 
 // New function to remove 'wine' from the query
+// New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery) {
     const noWord = ["wine", "white","red"];
     const queryWords = translatedQuery.split(" ");
-    const filteredWords = queryWords.filter(word => word.toLowerCase() !== noWord.toLowerCase());
+    const filteredWords = queryWords.filter(word => !noWord.includes(word.toLowerCase()));
     return filteredWords.join(" ");
 }
 
