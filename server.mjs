@@ -183,7 +183,7 @@ async function getQueryEmbedding(cleanedText) {
 app.post("/search", async (req, res) => {
   const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord } = req.body;
 
-  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt || !noWord) {
+  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt ) {
     return res.status(400).json({
       error: "Query, MongoDB URI, database name, collection name, and system prompt are required",
     });
