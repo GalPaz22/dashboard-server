@@ -211,6 +211,7 @@ app.post("/search", async (req, res) => {
       return res.status(500).json({ error: "Error translating query" });
 
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
+    console.log(noWord);
     console.log("Cleaned query for embedding:", cleanedText);
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
