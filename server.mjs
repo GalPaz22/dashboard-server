@@ -131,7 +131,10 @@ async function translateQuery(query) {
 
 // New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery) {
-  return translatedQuery.replace(/\bwine\b/gi, '').trim();
+    const noWord = ["wine", "white","red"];
+    const queryWords = translatedQuery.split(" ");
+    const filteredWords = queryWords.filter(word => word.toLowerCase() !== noWord.toLowerCase());
+    return filteredWords.join(" ");
 }
 
 // Utility function to extract filters from query using LLM
