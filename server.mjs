@@ -135,7 +135,7 @@ async function translateQuery(query) {
 // New function to remove 'wine' from the query
 // New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
-  if (noWord.length === 0) return translatedQuery;
+  if (!noWord) return translatedQuery;
   else {
     const queryWords = translatedQuery.split(" ");
     const filteredWords = queryWords.filter(
