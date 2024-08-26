@@ -17,7 +17,10 @@ let client;
 
 async function connectToMongoDB(mongodbUri) {
   if (!client) {
-    client = new MongoClient(mongodbUri, { useNewUrlParser: true, useUnifiedTopology: true });
+    client = new MongoClient(mongodbUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
     await client.connect();
   }
   return client;
@@ -132,9 +135,14 @@ async function translateQuery(query) {
 // New function to remove 'wine' from the query
 // New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
+  if (noWord.length === 0) return translatedQuery;
+  else {
     const queryWords = translatedQuery.split(" ");
-    const filteredWords = queryWords.filter(word => !noWord.includes(word.toLowerCase()));
+    const filteredWords = queryWords.filter(
+      (word) => !noWord.includes(word.toLowerCase())
+    );
     return filteredWords.join(" ");
+  }
 }
 
 // Utility function to extract filters from query using LLM
@@ -166,7 +174,6 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 async function getQueryEmbedding(cleanedText) {
   try {
     // Remove 'wine' from the translated text
-  
 
     const response = await openai.embeddings.create({
       model: "text-embedding-3-large",
@@ -181,11 +188,13 @@ async function getQueryEmbedding(cleanedText) {
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord } = req.body;
+  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord } =
+    req.body;
 
-  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt ) {
+  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
     return res.status(400).json({
-      error: "Query, MongoDB URI, database name, collection name, and system prompt are required",
+      error:
+        "Query, MongoDB URI, database name, collection name, and system prompt are required",
     });
   }
 
@@ -198,7 +207,8 @@ app.post("/search", async (req, res) => {
 
     // Translate query
     const translatedQuery = await translateQuery(query);
-    if (!translatedQuery) return res.status(500).json({ error: "Error translating query" });
+    if (!translatedQuery)
+      return res.status(500).json({ error: "Error translating query" });
 
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     console.log("Cleaned query for embedding:", cleanedText);
@@ -207,44 +217,72 @@ app.post("/search", async (req, res) => {
 
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(cleanedText);
-    if (!queryEmbedding) return res.status(500).json({ error: "Error generating query embedding" });
+    if (!queryEmbedding)
+      return res
+        .status(500)
+        .json({ error: "Error generating query embedding" });
 
     const RRF_CONSTANT = 60;
     const VECTOR_WEIGHT = query.length > 7 ? 2 : 1;
 
     function calculateRRFScore(fuzzyRank, vectorRank, VECTOR_WEIGHT) {
-      return 1 / (RRF_CONSTANT + fuzzyRank) +  VECTOR_WEIGHT* (1 / (RRF_CONSTANT + vectorRank));
+      return (
+        1 / (RRF_CONSTANT + fuzzyRank) +
+        VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank))
+      );
     }
 
     // Perform fuzzy search
     const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters);
-    const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
+    const fuzzyResults = await collection
+      .aggregate(fuzzySearchPipeline)
+      .toArray();
 
     // Perform vector search
-    const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
-    const vectorResults = await collection.aggregate(vectorSearchPipeline).toArray();
+    const vectorSearchPipeline = buildVectorSearchPipeline(
+      queryEmbedding,
+      filters
+    );
+    const vectorResults = await collection
+      .aggregate(vectorSearchPipeline)
+      .toArray();
 
     // Create a map to store the best rank for each document
     const documentRanks = new Map();
 
     // Process fuzzy search results
     fuzzyResults.forEach((doc, index) => {
-      documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+      documentRanks.set(doc._id.toString(), {
+        fuzzyRank: index,
+        vectorRank: Infinity,
+      });
     });
 
     // Process vector search results
     vectorResults.forEach((doc, index) => {
-      const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-      documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+      const existingRanks = documentRanks.get(doc._id.toString()) || {
+        fuzzyRank: Infinity,
+        vectorRank: Infinity,
+      };
+      documentRanks.set(doc._id.toString(), {
+        ...existingRanks,
+        vectorRank: index,
+      });
     });
 
     // Calculate RRF scores and create the final result set
     const combinedResults = Array.from(documentRanks.entries())
       .map(([id, ranks]) => {
-        const doc = fuzzyResults.find((d) => d._id.toString() === id) || vectorResults.find((d) => d._id.toString() === id);
+        const doc =
+          fuzzyResults.find((d) => d._id.toString() === id) ||
+          vectorResults.find((d) => d._id.toString() === id);
         return {
           ...doc,
-          rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT),
+          rrf_score: calculateRRFScore(
+            ranks.fuzzyRank,
+            ranks.vectorRank,
+            VECTOR_WEIGHT
+          ),
         };
       })
       .sort((a, b) => b.rrf_score - a.rrf_score)
@@ -282,7 +320,7 @@ app.get("/products", async (req, res) => {
 
   if (!mongodbUri || !dbName || !collectionName) {
     return res.status(400).json({
-      error: "MongoDB URI, database name, and collection name are required"
+      error: "MongoDB URI, database name, and collection name are required",
     });
   }
 
