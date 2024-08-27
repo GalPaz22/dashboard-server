@@ -13,17 +13,28 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-let client;
 
+
+let client;
 async function connectToMongoDB(mongodbUri) {
   if (!client) {
     client = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
+      maxPoolSize: 10, // Adjust the pool size as needed
     });
     await client.connect();
+    console.log("Connected to MongoDB");
   }
   return client;
+}
+
+// Helper function to close the connection when the server shuts down
+async function closeMongoDBConnection() {
+  if (client) {
+    await client.close();
+    console.log("MongoDB connection closed");
+  }
 }
 
 const buildFuzzySearchPipeline = (query, filters) => {
@@ -312,7 +323,11 @@ app.post("/search", async (req, res) => {
     }
   }
 });
-
+process.on("SIGINT", async () => {
+    await closeMongoDBConnection();
+    process.exit(0);
+  });
+  
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
