@@ -323,10 +323,6 @@ app.post("/search", async (req, res) => {
     }
   }
 });
-process.on("SIGINT", async () => {
-    await closeMongoDBConnection();
-    process.exit(0);
-  });
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
