@@ -13,11 +13,13 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const mongodbUri = process.env.MONGODB_URI;
 let client;
 
+// Function to connect to MongoDB
 async function connectToMongoDB() {
   if (!client) {
-    client = new MongoClient(process.env.MONGODB_URI, {
+    client = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
@@ -25,89 +27,6 @@ async function connectToMongoDB() {
   }
   return client;
 }
-
-const buildFuzzySearchPipeline = (query, filters) => {
-  const pipeline = [
-    {
-      $search: {
-        index: "default",
-        text: {
-          query: query,
-          path: "name",
-          fuzzy: {
-            maxEdits: 2,
-            prefixLength: 0,
-            maxExpansions: 50,
-          },
-        },
-      },
-    },
-  ];
-
-  if (filters && Object.keys(filters).length > 0) {
-    const matchStage = {};
-
-    if (filters.category ?? null) {
-      matchStage.category = { $regex: filters.category, $options: "i" };
-    }
-    if (filters.type ?? null) {
-      matchStage.type = { $regex: filters.type, $options: "i" };
-    }
-    if (filters.minPrice && filters.maxPrice) {
-      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-    } else if (filters.minPrice) {
-      matchStage.price = { $gte: filters.minPrice };
-    } else if (filters.maxPrice) {
-      matchStage.price = { $lte: filters.maxPrice };
-    }
-
-    if (Object.keys(matchStage).length > 0) {
-      pipeline.push({ $match: matchStage });
-    }
-  }
-
-  pipeline.push({ $limit: 20 }); // Increase limit for better RRF results
-
-  return pipeline;
-};
-
-const buildVectorSearchPipeline = (queryEmbedding, filters) => {
-  const pipeline = [
-    {
-      $vectorSearch: {
-        index: "vector_index",
-        path: "embedding",
-        queryVector: queryEmbedding,
-        numCandidates: 150,
-        limit: 50, // Increase limit for better RRF results
-      },
-    },
-  ];
-
-  if (filters && Object.keys(filters).length > 0) {
-    const matchStage = {};
-
-    if (filters.category ?? null) {
-      matchStage.category = { $regex: filters.category, $options: "i" };
-    }
-    if (filters.type ?? null) {
-      matchStage.type = { $regex: filters.type, $options: "i" };
-    }
-    if (filters.minPrice && filters.maxPrice) {
-      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-    } else if (filters.minPrice) {
-      matchStage.price = { $gte: filters.minPrice };
-    } else if (filters.maxPrice) {
-      matchStage.price = { $lte: filters.maxPrice };
-    }
-
-    if (Object.keys(matchStage).length > 0) {
-      pipeline.push({ $match: matchStage });
-    }
-  }
-
-  return pipeline;
-};
 
 // Utility function to translate query from Hebrew to English
 async function translateQuery(query) {
@@ -132,13 +51,12 @@ async function translateQuery(query) {
   }
 }
 
-// New function to remove 'wine' from the query
+// Function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
   if (!noWord) return translatedQuery;
 
   const queryWords = translatedQuery.split(" ");
   const filteredWords = queryWords.filter((word) => {
-    // Remove the word if it's in the noWord list or if it's a number
     return !noWord.includes(word.toLowerCase()) && isNaN(Number(word));
   });
 
@@ -184,21 +102,114 @@ async function getQueryEmbedding(cleanedText) {
   }
 }
 
+// Build fuzzy search pipeline
+const buildFuzzySearchPipeline = (query, filters) => {
+  const pipeline = [
+    {
+      $search: {
+        index: "default",
+        text: {
+          query: query,
+          path: "name",
+          fuzzy: {
+            maxEdits: 2,
+            prefixLength: 0,
+            maxExpansions: 50,
+          },
+        },
+      },
+    },
+  ];
+
+  if (filters && Object.keys(filters).length > 0) {
+    const matchStage = {};
+
+    if (filters.category ?? null) {
+      matchStage.category = { $regex: filters.category, $options: "i" };
+    }
+    if (filters.type ?? null) {
+      matchStage.type = { $regex: filters.type, $options: "i" };
+    }
+    if (filters.minPrice && filters.maxPrice) {
+      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+    } else if (filters.minPrice) {
+      matchStage.price = { $gte: filters.minPrice };
+    } else if (filters.maxPrice) {
+      matchStage.price = { $lte: filters.maxPrice };
+    }
+
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
+  }
+
+  pipeline.push({ $limit: 20 });
+
+  return pipeline;
+};
+
+// Build vector search pipeline
+const buildVectorSearchPipeline = (queryEmbedding, filters) => {
+  const pipeline = [
+    {
+      $vectorSearch: {
+        index: "vector_index",
+        path: "embedding",
+        queryVector: queryEmbedding,
+        numCandidates: 150,
+        limit: 50,
+      },
+    },
+  ];
+
+  if (filters && Object.keys(filters).length > 0) {
+    const matchStage = {};
+
+    if (filters.category ?? null) {
+      matchStage.category = { $regex: filters.category, $options: "i" };
+    }
+    if (filters.type ?? null) {
+      matchStage.type = { $regex: filters.type, $options: "i" };
+    }
+    if (filters.minPrice && filters.maxPrice) {
+      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
+    } else if (filters.minPrice) {
+      matchStage.price = { $gte: filters.minPrice };
+    } else if (filters.maxPrice) {
+      matchStage.price = { $lte: filters.maxPrice };
+    }
+
+    if (Object.keys(matchStage).length > 0) {
+      pipeline.push({ $match: matchStage });
+    }
+  }
+
+  return pipeline;
+};
+
+// Calculate Reciprocal Rank Fusion score
+function calculateRRFScore(fuzzyRank, vectorRank, VECTOR_WEIGHT) {
+  const RRF_CONSTANT = 60;
+  return (
+    1 / (RRF_CONSTANT + fuzzyRank) +
+    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank))
+  );
+}
+
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
   const { dbName, collectionName, query, systemPrompt, noWord } = req.body;
 
   if (!query || !dbName || !collectionName || !systemPrompt) {
     return res.status(400).json({
-      error:
-        "Query, database name, collection name, and system prompt are required",
+      error: "Query, database name, collection name, and system prompt are required",
     });
   }
 
   let client;
 
   try {
-    const client = await connectToMongoDB();
+    client = await connectToMongoDB();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
@@ -210,40 +221,24 @@ app.post("/search", async (req, res) => {
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     console.log(noWord);
     console.log("Cleaned query for embedding:", cleanedText);
+
     // Extract filters from the translated query
     const filters = await extractFiltersFromQuery(query, systemPrompt);
 
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(cleanedText);
     if (!queryEmbedding)
-      return res
-        .status(500)
-        .json({ error: "Error generating query embedding" });
+      return res.status(500).json({ error: "Error generating query embedding" });
 
-    const RRF_CONSTANT = 60;
     const VECTOR_WEIGHT = query.length > 10 ? 2 : 1;
-
-    function calculateRRFScore(fuzzyRank, vectorRank, VECTOR_WEIGHT) {
-      return (
-        1 / (RRF_CONSTANT + fuzzyRank) +
-        VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank))
-      );
-    }
 
     // Perform fuzzy search
     const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters);
-    const fuzzyResults = await collection
-      .aggregate(fuzzySearchPipeline)
-      .toArray();
+    const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
 
     // Perform vector search
-    const vectorSearchPipeline = buildVectorSearchPipeline(
-      queryEmbedding,
-      filters
-    );
-    const vectorResults = await collection
-      .aggregate(vectorSearchPipeline)
-      .toArray();
+    const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
+    const vectorResults = await collection.aggregate(vectorSearchPipeline).toArray();
 
     // Create a map to store the best rank for each document
     const documentRanks = new Map();
@@ -276,27 +271,43 @@ app.post("/search", async (req, res) => {
           vectorResults.find((d) => d._id.toString() === id);
         return {
           ...doc,
-          RRFScore: calculateRRFScore(
-            ranks.fuzzyRank,
-            ranks.vectorRank,
-            VECTOR_WEIGHT
-          ),
+          rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT),
         };
       })
-      .sort((a, b) => a.RRFScore - b.RRFScore)
-      .slice(0, 10);
+      .sort((a, b) => b.rrf_score - a.rrf_score);
 
-    res.json(combinedResults);
+    res.json({ results: combinedResults });
   } catch (error) {
-    console.error("Error during search:", error);
-    res.status(500).json({ error: "Error during search" });
-  } finally {
-    if (client) await client.close();
+    console.error("Error handling search request:", error);
+    res.status(500).json({ error: "Error handling search request" });
   }
 });
 
-const port = process.env.PORT || 3000;
+// Route to handle the /products endpoint
+app.get("/products", async (req, res) => {
+  const { dbName, collectionName } = req.query;
 
+  if (!dbName || !collectionName) {
+    return res.status(400).json({
+      error: "Database name and collection name are required",
+    });
+  }
+
+  try {
+    const client = await connectToMongoDB();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    const products = await collection.find({}).toArray();
+    res.json({ products });
+  } catch (error) {
+    console.error("Error fetching products:", error);
+    res.status(500).json({ error: "Error fetching products" });
+  }
+});
+
+// Start the server
+const port = process.env.PORT || 3000;
 app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
+  console.log(`Server is running on port ${port}`);
 });
