@@ -15,9 +15,9 @@ app.use(cors({ origin: "*" }));
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 let client;
 
-async function connectToMongoDB(mongodbUri) {
+async function connectToMongoDB() {
   if (!client) {
-    client = new MongoClient(mongodbUri, {
+    client = new MongoClient(process.env.MONGODB_URI, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
     });
@@ -133,19 +133,17 @@ async function translateQuery(query) {
 }
 
 // New function to remove 'wine' from the query
-// New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
-    if (!noWord) return translatedQuery;
-  
-    const queryWords = translatedQuery.split(" ");
-    const filteredWords = queryWords.filter((word) => {
-      // Remove the word if it's in the noWord list or if it's a number
-      return !noWord.includes(word.toLowerCase()) && isNaN(Number(word));
-    });
-  
-    return filteredWords.join(" ");
-  }
-  
+  if (!noWord) return translatedQuery;
+
+  const queryWords = translatedQuery.split(" ");
+  const filteredWords = queryWords.filter((word) => {
+    // Remove the word if it's in the noWord list or if it's a number
+    return !noWord.includes(word.toLowerCase()) && isNaN(Number(word));
+  });
+
+  return filteredWords.join(" ");
+}
 
 // Utility function to extract filters from query using LLM
 async function extractFiltersFromQuery(query, systemPrompt) {
@@ -175,8 +173,6 @@ async function extractFiltersFromQuery(query, systemPrompt) {
 // Utility function to get the embedding for a query
 async function getQueryEmbedding(cleanedText) {
   try {
-    // Remove 'wine' from the translated text
-
     const response = await openai.embeddings.create({
       model: "text-embedding-3-large",
       input: cleanedText,
@@ -190,20 +186,19 @@ async function getQueryEmbedding(cleanedText) {
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord } =
-    req.body;
+  const { dbName, collectionName, query, systemPrompt, noWord } = req.body;
 
-  if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
+  if (!query || !dbName || !collectionName || !systemPrompt) {
     return res.status(400).json({
       error:
-        "Query, MongoDB URI, database name, collection name, and system prompt are required",
+        "Query, database name, collection name, and system prompt are required",
     });
   }
 
   let client;
 
   try {
-    const client = await connectToMongoDB(mongodbUri);
+    const client = await connectToMongoDB();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
@@ -281,78 +276,27 @@ app.post("/search", async (req, res) => {
           vectorResults.find((d) => d._id.toString() === id);
         return {
           ...doc,
-          rrf_score: calculateRRFScore(
+          RRFScore: calculateRRFScore(
             ranks.fuzzyRank,
             ranks.vectorRank,
             VECTOR_WEIGHT
           ),
         };
       })
-      .sort((a, b) => b.rrf_score - a.rrf_score)
-      .slice(0, 12);
+      .sort((a, b) => a.RRFScore - b.RRFScore)
+      .slice(0, 10);
 
-    // Format results
-    const formattedResults = combinedResults.map((product) => ({
-      id: product._id,
-      name: product.name,
-      description: product.description,
-      price: product.price,
-      image: product.image,
-      url: product.url,
-      rrf_score: product.rrf_score,
-    }));
-
-    res.json(formattedResults);
+    res.json(combinedResults);
   } catch (error) {
-    console.error("Error handling search request:", error);
-    res.status(500).json({ error: "Server error" });
+    console.error("Error during search:", error);
+    res.status(500).json({ error: "Error during search" });
   } finally {
-    if (client) {
-      await client.close();
-    }
+    if (client) await client.close();
   }
 });
 
-const PORT = process.env.PORT || 8080;
-app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
-});
+const port = process.env.PORT || 3000;
 
-app.get("/products", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, limit = 10 } = req.query;
-
-  if (!mongodbUri || !dbName || !collectionName) {
-    return res.status(400).json({
-      error: "MongoDB URI, database name, and collection name are required",
-    });
-  }
-
-  let client;
-
-  try {
-    const client = await connectToMongoDB(mongodbUri);
-    const db = client.db(dbName);
-    const collection = db.collection(collectionName);
-
-    // Fetch a default set of products, e.g., the latest 10 products
-    const products = await collection.find().limit(Number(limit)).toArray();
-
-    const results = products.map((product) => ({
-      id: product._id,
-      name: product.name,
-      description: product.description,
-      price: product.price,
-      image: product.image,
-      url: product.url,
-    }));
-
-    res.json(results);
-  } catch (error) {
-    console.error("Error fetching products:", error);
-    res.status(500).json({ error: "Server error" });
-  } finally {
-    if (client) {
-      await client.close();
-    }
-  }
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
 });
