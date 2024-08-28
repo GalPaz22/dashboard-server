@@ -129,7 +129,7 @@ async function translateQuery(query) {
         {
           role: "system",
           content:
-            'Translate the following text from Hebrew to English. If it\'s already in English, leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. If you find a word you can\'t understand or think it\'s out of context, do not translate it but do write it in English literally. For example, if you find the words "עגור לבן" write it as "agur lavan". Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
+            'Translate the following text from Hebrew to English. If it\'s already in English, leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
         },
         { role: "user", content: query },
       ],
@@ -327,7 +327,7 @@ process.on("SIGINT", async () => {
     await closeMongoDBConnection();
     process.exit(0);
   });
-  
+
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, () => {
   console.log(`Server is running on port ${PORT}`);
