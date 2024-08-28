@@ -13,28 +13,17 @@ app.use(cors({ origin: "*" }));
 
 // Initialize OpenAI client
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-
 let client;
+
 async function connectToMongoDB(mongodbUri) {
   if (!client) {
     client = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
-      maxPoolSize: 10, // Adjust the pool size as needed
     });
     await client.connect();
-    console.log("Connected to MongoDB");
   }
   return client;
-}
-
-// Helper function to close the connection when the server shuts down
-async function closeMongoDBConnection() {
-  if (client) {
-    await client.close();
-    console.log("MongoDB connection closed");
-  }
 }
 
 const buildFuzzySearchPipeline = (query, filters) => {
@@ -129,7 +118,7 @@ async function translateQuery(query) {
         {
           role: "system",
           content:
-            'Translate the following text from Hebrew to English. If it\'s already in English, leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
+            'Translate the following text from Hebrew to English. If it\'s already in English, leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. If you find a word you can\'t understand or think it\'s out of context, do not translate it but do write it in English literally. For example, if you find the words "עגור לבן" write it as "agur lavan". Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
         },
         { role: "user", content: query },
       ],
