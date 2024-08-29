@@ -119,7 +119,7 @@ async function translateQuery(query) {
         {
           role: "system",
           content:
-            'Translate the following text from Hebrew to English. If it\'s already in English, leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
+            'Translate the following text from Hebrew to English. If it\'s already in English, keep it in english and leave it as it is. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
         },
         { role: "user", content: query },
       ],
