@@ -111,28 +111,44 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
 };
 
 // Utility function to translate query from Hebrew to English
-async function translateQuery(query) {
-  try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content:
-            'Translate the following text from Hebrew to English. If it\'s already in English, keep it in english and dont translate it to hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. pay attention to the word שכלי or שאבלי- those ment to be chablis',
-        },
-        { role: "user", content: query },
-      ],
-    });
-    const translatedText = response.choices[0]?.message?.content?.trim();
-    console.log("Translated query:", translatedText);
-    return translatedText;
-  } catch (error) {
-    console.error("Error translating query:", error);
-    throw error;
+async function isHebrew(query) {
+    // Hebrew characters range in Unicode
+    const hebrewPattern = /[\u0590-\u05FF]/;
+    return hebrewPattern.test(query);
   }
-}
-
+  
+  async function translateQuery(query) {
+    try {
+      // Check if the query is in Hebrew
+      const needsTranslation = await isHebrew(query);
+  
+      if (!needsTranslation) {
+        // If the query is already in English, return it as is
+        return query;
+      }
+  
+      // Proceed with translation if the query is in Hebrew
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        messages: [
+          {
+            role: "system",
+            content:
+              'Translate the following text from Hebrew to English. If it\'s already in English, keep it in English and don\'t translate it to Hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.',
+          },
+          { role: "user", content: query },
+        ],
+      });
+  
+      const translatedText = response.choices[0]?.message?.content?.trim();
+      console.log("Translated query:", translatedText);
+      return translatedText;
+    } catch (error) {
+      console.error("Error translating query:", error);
+      throw error;
+    }
+  }
+  
 // New function to remove 'wine' from the query
 // New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
