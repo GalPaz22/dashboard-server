@@ -169,7 +169,7 @@ function removeWineFromQuery(translatedQuery, noWord) {
     const queryWords = query.split(" ");
     const filteredWords = queryWords.filter((word) => {
       // Remove the word if it's in the noWords list or if it's a number
-      return !noWords.includes(word.toLowerCase()) && isNaN(Number(word));
+      return !noHebrewWord.includes(word.toLowerCase()) && isNaN(Number(word));
     });
   
     return filteredWords.join(" ");
@@ -265,6 +265,7 @@ app.post("/search", async (req, res) => {
 
     // Perform fuzzy search
     const cleanedHebrewText = removeWordsFromQuery(query, noHebrewWord);
+    console.log(noHebrewWord);
     console.log("Cleaned query for fuzzy search:", cleanedHebrewText); // Check if cleanedText
     const fuzzySearchPipeline = buildFuzzySearchPipeline(cleanedHebrewText, filters);
     const fuzzyResults = await collection
