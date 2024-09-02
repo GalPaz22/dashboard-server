@@ -112,43 +112,43 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
 
 // Utility function to translate query from Hebrew to English
 async function isHebrew(query) {
-    // Hebrew characters range in Unicode
-    const hebrewPattern = /[\u0590-\u05FF]/;
-    return hebrewPattern.test(query);
-  }
-  
-  async function translateQuery(query) {
-    try {
-      // Check if the query is in Hebrew
-      const needsTranslation = await isHebrew(query);
-  
-      if (!needsTranslation) {
-        // If the query is already in English, return it as is
-        return query;
-      }
-  
-      // Proceed with translation if the query is in Hebrew
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              'Translate the following text from Hebrew to English. If it\'s already in English, keep it in English and don\'t translate it to Hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.',
-          },
-          { role: "user", content: query },
-        ],
-      });
-  
-      const translatedText = response.choices[0]?.message?.content?.trim();
-      console.log("Translated query:", translatedText);
-      return translatedText;
-    } catch (error) {
-      console.error("Error translating query:", error);
-      throw error;
+  // Hebrew characters range in Unicode
+  const hebrewPattern = /[\u0590-\u05FF]/;
+  return hebrewPattern.test(query);
+}
+
+async function translateQuery(query) {
+  try {
+    // Check if the query is in Hebrew
+    const needsTranslation = await isHebrew(query);
+
+    if (!needsTranslation) {
+      // If the query is already in English, return it as is
+      return query;
     }
+
+    // Proceed with translation if the query is in Hebrew
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: [
+        {
+          role: "system",
+          content:
+            'Translate the following text from Hebrew to English. If it\'s already in English, keep it in English and don\'t translate it to Hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.',
+        },
+        { role: "user", content: query },
+      ],
+    });
+
+    const translatedText = response.choices[0]?.message?.content?.trim();
+    console.log("Translated query:", translatedText);
+    return translatedText;
+  } catch (error) {
+    console.error("Error translating query:", error);
+    throw error;
   }
-  
+}
+
 // New function to remove 'wine' from the query
 // New function to remove 'wine' from the query
 function removeWineFromQuery(translatedQuery, noWord) {
@@ -163,6 +163,17 @@ function removeWineFromQuery(translatedQuery, noWord) {
     return filteredWords.join(" ");
   }
   
+  function removeWordsFromQuery(query, noHebrewWord) {
+    if (!noHebrewWord) return query;
+  
+    const queryWords = query.split(" ");
+    const filteredWords = queryWords.filter((word) => {
+      // Remove the word if it's in the noWords list or if it's a number
+      return !noWords.includes(word.toLowerCase()) && isNaN(Number(word));
+    });
+  
+    return filteredWords.join(" ");
+  }
 
 // Utility function to extract filters from query using LLM
 async function extractFiltersFromQuery(query, systemPrompt) {
@@ -207,7 +218,7 @@ async function getQueryEmbedding(cleanedText) {
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord } =
+  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord, noHebrewWord } =
     req.body;
 
   if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
@@ -253,7 +264,9 @@ app.post("/search", async (req, res) => {
     }
 
     // Perform fuzzy search
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(query, filters);
+    const cleanedHebrewText = removeWordsFromQuery(query, noHebrewWord);
+    console.log("Cleaned query for fuzzy search:", cleanedHebrewText); // Check if cleanedText
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(cleanedHebrewText, filters);
     const fuzzyResults = await collection
       .aggregate(fuzzySearchPipeline)
       .toArray();
