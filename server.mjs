@@ -134,7 +134,7 @@ async function translateQuery(query) {
         {
           role: "system",
           content:
-            'Translate the following text from Hebrew to English. If it\'s already in English, keep it in English and don\'t translate it to Hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.',
+            "Translate the following text from Hebrew to English. If it's already in English, keep it in English and don't translate it to Hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.",
         },
         { role: "user", content: query },
       ],
@@ -149,31 +149,30 @@ async function translateQuery(query) {
   }
 }
 
-
 // New function to remove words from the query
 function removeWineFromQuery(translatedQuery, noWord) {
-    if (!noWord) return translatedQuery;
-  
-    const queryWords = translatedQuery.split(" ");
-    const filteredWords = queryWords.filter((word) => {
-      // Remove the word if it's in the noWord list or if it's a number
-      return !noWord.includes(word.toLowerCase()) && isNaN(Number(word));
-    });
-  
-    return filteredWords.join(" ");
-  }
-  
-  function removeWordsFromQuery(query, noHebrewWord) {
-    if (!noHebrewWord) return query;
-  
-    const queryWords = query.split(" ");
-    const filteredWords = queryWords.filter((word) => {
-      // Remove the word if it's in the noWords list or if it's a number
-      return !noHebrewWord.includes(word.toLowerCase()) && isNaN(Number(word));
-    });
-  
-    return filteredWords.join(" ");
-  }
+  if (!noWord) return translatedQuery;
+
+  const queryWords = translatedQuery.split(" ");
+  const filteredWords = queryWords.filter((word) => {
+    // Remove the word if it's in the noWord list or if it's a number
+    return !noWord.includes(word.toLowerCase()) && isNaN(Number(word));
+  });
+
+  return filteredWords.join(" ");
+}
+
+function removeWordsFromQuery(query, noHebrewWord) {
+  if (!noHebrewWord) return query;
+
+  const queryWords = query.split(" ");
+  const filteredWords = queryWords.filter((word) => {
+    // Remove the word if it's in the noWords list or if it's a number
+    return !noHebrewWord.includes(word.toLowerCase()) && isNaN(Number(word));
+  });
+
+  return filteredWords.join(" ");
+}
 
 // Utility function to extract filters from query using LLM
 async function extractFiltersFromQuery(query, systemPrompt) {
@@ -217,31 +216,38 @@ async function getQueryEmbedding(cleanedText) {
 }
 
 async function logQuery(queryCollection, query, filters) {
-    const timestamp = new Date(); // Current timestamp
-  
-    // Combine filters.category and filters.type to form the 'entity'
-    const entity = `${filters.category || 'unknown'} ${filters.type || 'unknown'}`;
-  
-    // Build the query document to insert
-    const queryDocument = {
-      query: query,
-      timestamp: timestamp,
-      filters: {
-        category: filters.category || 'unknown',
-        price: filters.price || 'unknown',
-        type: filters.type || 'unknown',
-      },
-      entity: entity.trim(),
-    };
-  
-    // Insert the query document into the queries collection
-    await queryCollection.insertOne(queryDocument);
-  }
+  const timestamp = new Date(); // Current timestamp
+
+  // Combine filters.category and filters.type to form the 'entity'
+  const entity = `${filters.category || "unknown"} ${
+    filters.type || "unknown"
+  }`;
+
+  // Build the query document to insert
+  const queryDocument = {
+    query: query,
+    timestamp: timestamp,
+    category: filters.category || "unknown",
+    price: filters.price || "unknown",
+    type: filters.type || "unknown",
+    entity: entity.trim(),
+  };
+
+  // Insert the query document into the queries collection
+  await queryCollection.insertOne(queryDocument);
+}
 
 // Route to handle the search endpoint
 app.post("/search", async (req, res) => {
-  const { mongodbUri, dbName, collectionName, query, systemPrompt, noWord, noHebrewWord } =
-    req.body;
+  const {
+    mongodbUri,
+    dbName,
+    collectionName,
+    query,
+    systemPrompt,
+    noWord,
+    noHebrewWord,
+  } = req.body;
 
   if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
     return res.status(400).json({
@@ -257,7 +263,6 @@ app.post("/search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
     const querycollection = db.collection("queries");
-    
 
     // Translate query
     const translatedQuery = await translateQuery(query);
@@ -271,7 +276,7 @@ app.post("/search", async (req, res) => {
     const filters = await extractFiltersFromQuery(query, systemPrompt);
 
     logQuery(querycollection, query, filters);
-    
+
     // Get query embedding
     const queryEmbedding = await getQueryEmbedding(cleanedText);
     if (!queryEmbedding)
@@ -293,7 +298,10 @@ app.post("/search", async (req, res) => {
     const cleanedHebrewText = removeWordsFromQuery(query, noHebrewWord);
     console.log(noHebrewWord);
     console.log("Cleaned query for fuzzy search:", cleanedHebrewText); // Check if cleanedText
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(cleanedHebrewText, filters);
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(
+      cleanedHebrewText,
+      filters
+    );
     const fuzzyResults = await collection
       .aggregate(fuzzySearchPipeline)
       .toArray();
@@ -368,120 +376,116 @@ app.post("/search", async (req, res) => {
       await client.close();
     }
   }
-
-
-  
 });
 
-
 app.get("/products", async (req, res) => {
-    const {  dbName, collectionName, limit = 10 } = req.query;
-    
-    if ( !dbName || !collectionName) {
+  const { dbName, collectionName, limit = 10 } = req.query;
+
+  if (!dbName || !collectionName) {
     return res.status(400).json({
       error: "MongoDB URI, database name, and collection name are required",
     });
   }
-  
-  let client;
-  
-  try {
-      const client = await connectToMongoDB(mongodbUri);
-      const db = client.db(dbName);
-      const collection = db.collection(collectionName);
-      
-      // Fetch a default set of products, e.g., the latest 10 products
-      const products = await collection.find().limit(Number(limit)).toArray();
-      
-      const results = products.map((product) => ({
-          id: product._id,
-          name: product.name,
-          description: product.description,
-          price: product.price,
-          image: product.image,
-          url: product.url,
-        }));
-        
-        res.json(results);
-    } catch (error) {
-        console.error("Error fetching products:", error);
-        res.status(500).json({ error: "Server error" });
-    } finally {
-        if (client) {
-            await client.close();
-        }
-    }
-});
-app.post('/recommend', async (req, res) => {
-    const { productName, dbName, collectionName } = req.body;
-  
-    if (!productName) {
-      return res.status(400).json({ error: 'Product URL is required' });
-    }
-  
-    let client;
-  
-    try {
-      client = await connectToMongoDB(mongodbUri);
-      const db = client.db(dbName);
-      const collection = db.collection(collectionName);
-  
-      // Find the product by URL
-      const product = await collection.findOne({ name: productName });
-  
-      if (!product) {
-        return res.status(404).json({ error: 'Product not found' });
-      }
-  
-      // Extract the embedding and price range from the product
-      const { embedding, price } = product;
-  
-      // Define a price range (e.g., ±10% of the product's price)
-      const minPrice = price * 0.9;
-      const maxPrice = price * 1.1;
-  
-      // Build the pipeline to find similar products based on embedding and price range
-      const pipeline = [
-        {
-          $vectorSearch: {
-            index: 'vector_index',
-            path: 'embedding',
-            queryVector: embedding,
-            numCandidates: 100,
-            limit: 10,
-          },
-        },
-        {
-          $match: {
-            price: { $gte: minPrice, $lte: maxPrice },
-          },
-        },
-      ];
-  
-      const similarProducts = await collection.aggregate(pipeline).toArray();
-  
-      const results = similarProducts.map((product) => ({
-        id: product._id,
-        name: product.name,
-        description: product.description,
-        price: product.price,
-        image: product.image,
-        url: product.url,
-        rrf_score: product.rrf_score,
-      }));
-  
-      res.json(results);
-    } catch (error) {
-      console.error('Error fetching recommendations:', error);
-      res.status(500).json({ error: 'Server error' });
-    } finally {
-      if (client) {
-        await client.close();
-      }
-    }
-  });
 
-    const PORT = process.env.PORT || 8080;
-    app.listen(PORT, () => {
-      console.log(`Server is running on port ${PORT}`);
-    });
+  let client;
+
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Fetch a default set of products, e.g., the latest 10 products
+    const products = await collection.find().limit(Number(limit)).toArray();
+
+    const results = products.map((product) => ({
+      id: product._id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+    }));
+
+    res.json(results);
+  } catch (error) {
+    console.error("Error fetching products:", error);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    if (client) {
+      await client.close();
+    }
+  }
+});
+app.post("/recommend", async (req, res) => {
+  const { productName, dbName, collectionName } = req.body;
+
+  if (!productName) {
+    return res.status(400).json({ error: "Product URL is required" });
+  }
+
+  let client;
+
+  try {
+    client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Find the product by URL
+    const product = await collection.findOne({ name: productName });
+
+    if (!product) {
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    // Extract the embedding and price range from the product
+    const { embedding, price } = product;
+
+    // Define a price range (e.g., ±10% of the product's price)
+    const minPrice = price * 0.9;
+    const maxPrice = price * 1.1;
+
+    // Build the pipeline to find similar products based on embedding and price range
+    const pipeline = [
+      {
+        $vectorSearch: {
+          index: "vector_index",
+          path: "embedding",
+          queryVector: embedding,
+          numCandidates: 100,
+          limit: 10,
+        },
+      },
+      {
+        $match: {
+          price: { $gte: minPrice, $lte: maxPrice },
+        },
+      },
+    ];
+
+    const similarProducts = await collection.aggregate(pipeline).toArray();
+
+    const results = similarProducts.map((product) => ({
+      id: product._id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      rrf_score: product.rrf_score,
+    }));
+
+    res.json(results);
+  } catch (error) {
+    console.error("Error fetching recommendations:", error);
+    res.status(500).json({ error: "Server error" });
+  } finally {
+    if (client) {
+      await client.close();
+    }
+  }
+});
+
+const PORT = process.env.PORT || 8080;
+app.listen(PORT, () => {
+  console.log(`Server is running on port ${PORT}`);
+});
