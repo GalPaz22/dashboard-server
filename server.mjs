@@ -27,13 +27,13 @@ async function connectToMongoDB() {
   return client;
 }
 
-const buildFuzzySearchPipeline = (query, filters) => {
+const buildFuzzySearchPipeline = (cleanedHebrewText, filters) => {
   const pipeline = [
     {
       $search: {
         index: "default",
         text: {
-          query: query,
+          query: cleanedHebrewText,
           path: "name",
           fuzzy: {
             maxEdits: 2,
