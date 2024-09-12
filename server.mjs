@@ -61,6 +61,11 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, filters) => {
     } else if (filters.maxPrice) {
       matchStage.price = { $lte: filters.maxPrice };
     }
+    if (filters.price) {
+        const price = filters.price;
+        const priceRange = price * 0.15; // 15% of the price
+        matchStage.price = { $gte: price - priceRange, $lte: price + priceRange };
+      }
 
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
@@ -101,6 +106,11 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
     } else if (filters.maxPrice) {
       matchStage.price = { $lte: filters.maxPrice };
     }
+    if (filters.price) {
+        const price = filters.price;
+        const priceRange = price * 0.15; // 15% of the price
+        matchStage.price = { $gte: price - priceRange, $lte: price + priceRange };
+      }
 
     if (Object.keys(matchStage).length > 0) {
       pipeline.push({ $match: matchStage });
