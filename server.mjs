@@ -238,7 +238,9 @@ async function logQuery(queryCollection, query, filters) {
     query: query,
     timestamp: timestamp,
     category: filters.category || "unknown",
-    price: filters.minPrice - filters.maxPrice || "unknown",
+    price: filters.price || "unknown",
+    minPrice: filters.minPrice || "unknown",
+    maxPrice: filters.maxPrice || "unknown",
     type: filters.type || "unknown",
     entity: entity.trim(),
   };
