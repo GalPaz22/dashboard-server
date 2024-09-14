@@ -188,7 +188,7 @@ function removeWordsFromQuery(query, noHebrewWord) {
 async function extractFiltersFromQuery(query, systemPrompt) {
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: systemPrompt },
