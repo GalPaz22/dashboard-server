@@ -84,7 +84,7 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
         index: "vector_index",
         path: "embedding",
         queryVector: queryEmbedding,
-        numCandidates: 150,
+        numCandidates: 300,
         limit: 50, // Increase limit for better RRF results
       },
     },
