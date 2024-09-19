@@ -139,7 +139,7 @@ async function translateQuery(query) {
 
     // Proceed with translation if the query is in Hebrew
     const response = await openai.chat.completions.create({
-      model: "gpt-4-1106-preview",
+      model: "gpt-4o-mini",
       messages: [
         {
           role: "system",
@@ -188,7 +188,7 @@ function removeWordsFromQuery(query, noHebrewWord) {
 async function extractFiltersFromQuery(query, systemPrompt) {
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4-1106-preview",
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: systemPrompt },
