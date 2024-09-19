@@ -139,7 +139,7 @@ async function translateQuery(query) {
 
     // Proceed with translation if the query is in Hebrew
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4-1106-preview",
       messages: [
         {
           role: "system",
