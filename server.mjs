@@ -49,7 +49,10 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, filters) => {
     const matchStage = {};
 
     if (filters.category ?? null) {
-      matchStage.category = { $in: filters.category }; // Use $in operator for array
+      // Check if the category is an array or a single string
+      matchStage.category = Array.isArray(filters.category)
+        ? { $in: filters.category } // If it's an array, use $in
+        : filters.category; // Otherwise, just match the single value
     }
     if (filters.type ?? null) {
       matchStage.type = { $regex: filters.type, $options: "i" };
@@ -94,7 +97,10 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
     const matchStage = {};
 
     if (filters.category ?? null) {
-      matchStage.category = { $in: filters.category }; // Use $in operator for array
+      // Check if the category is an array or a single string
+      matchStage.category = Array.isArray(filters.category)
+        ? { $in: filters.category } // If it's an array, use $in
+        : filters.category; // Otherwise, just match the single value
     }
     if (filters.type ?? null) {
       matchStage.type = { $regex: filters.type, $options: "i" };
