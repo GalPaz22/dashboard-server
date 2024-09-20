@@ -49,7 +49,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, filters) => {
     const matchStage = {};
 
     if (filters.category ?? null) {
-      matchStage.category = { $regex: filters.category, $options: "i" };
+      matchStage.category = { $in: filters.category }; // Use $in operator for array
     }
     if (filters.type ?? null) {
       matchStage.type = { $regex: filters.type, $options: "i" };
@@ -94,7 +94,7 @@ const buildVectorSearchPipeline = (queryEmbedding, filters) => {
     const matchStage = {};
 
     if (filters.category ?? null) {
-      matchStage.category = { $regex: filters.category, $options: "i" };
+      matchStage.category = { $in: filters.category }; // Use $in operator for array
     }
     if (filters.type ?? null) {
       matchStage.type = { $regex: filters.type, $options: "i" };
