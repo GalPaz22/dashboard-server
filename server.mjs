@@ -133,7 +133,7 @@ async function isHebrew(query) {
   return hebrewPattern.test(query);
 }
 
-async function translateQuery(query) {
+async function translateQuery(query, context) {
   try {
     // Check if the query is in Hebrew
     const needsTranslation = await isHebrew(query);
@@ -150,7 +150,7 @@ async function translateQuery(query) {
         {
           role: "system",
           content:
-            "Translate the following text from Hebrew to English. If it's already in English, keep it in English and don't translate it to Hebrew. If you find misspelling in the Hebrew words, try to fix it and then translate it. The context is a search query in e-commerce sites, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.",
+            `Translate the following text from Hebrew to English. If it's already in English, keep it in English and don't translate it to Hebrew. The context is a search query in ${context}, so you probably get words attached to products or their descriptions. Respond with the answer only, without explanations. Pay attention to the word שכלי or שאבלי- those are meant to be chablis.`,
         },
         { role: "user", content: query },
       ],
@@ -265,6 +265,7 @@ app.post("/search", async (req, res) => {
     systemPrompt,
     noWord,
     noHebrewWord,
+    context
   } = req.body;
 
   if (!query || !mongodbUri || !dbName || !collectionName || !systemPrompt) {
@@ -283,7 +284,7 @@ app.post("/search", async (req, res) => {
     const querycollection = db.collection("queries");
 
     // Translate query
-    const translatedQuery = await translateQuery(query);
+    const translatedQuery = await translateQuery(query, context);
     if (!translatedQuery)
       return res.status(500).json({ error: "Error translating query" });
 
