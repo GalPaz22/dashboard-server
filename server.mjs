@@ -34,7 +34,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, filters) => {
         index: "default",
         text: {
           query: cleanedHebrewText,
-          path: "name",
+          path: ["name","description"],
           fuzzy: {
             maxEdits: 2,
             prefixLength: 0,
