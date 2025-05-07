@@ -40,17 +40,7 @@ app.use(express.json());
 
 let client;  // Declare client for connectToMongoDB
 
-async function connectToMongoDB(mongodbUri) {
-  if (!client) {
-    client = new MongoClient(mongodbUri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    await client.connect();
-    console.log("Connected to MongoDB");
-  }
-  return client;
-}
+
 
 // ...existing code...
 // Use a cached MongoDB client to avoid reconnecting on every request.
@@ -96,6 +86,8 @@ app.post('/queries', async (req, res) => {
    📦  STORE CONFIG LOOK-UP – one place, reused by all routes
 \* =========================================================== */
 
+// ...existing code above...
+
 async function getStoreConfigByApiKey (apiKey) {
   // short-circuit if no key was supplied
   if (!apiKey) return null;
@@ -140,6 +132,8 @@ async function authenticate(req, res, next) {
 }
 
 app.use(authenticate);
+
+
 
 
 
