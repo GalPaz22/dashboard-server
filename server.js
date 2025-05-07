@@ -36,7 +36,23 @@ let mongodbUri =  process.env.MONGODB_URI;
 
 // Middleware to parse JSON bodies.
 app.use(express.json());
+// ...existing code...
 
+let client;  // Declare client for connectToMongoDB
+
+async function connectToMongoDB(mongodbUri) {
+  if (!client) {
+    client = new MongoClient(mongodbUri, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+    });
+    await client.connect();
+    console.log("Connected to MongoDB");
+  }
+  return client;
+}
+
+// ...existing code...
 // Use a cached MongoDB client to avoid reconnecting on every request.
 let cachedClient;
 let cachedPromise;
