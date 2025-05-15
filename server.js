@@ -9,8 +9,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 
 
-const genAI = new GoogleGenerativeAI( process.env.GOOGLE_API_KEY );
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-001" });
+
 // Voyage AI API configuration
 
 
@@ -20,6 +19,8 @@ const app = express();
 app.use(bodyParser.json());
 app.use(cors({ origin: "*" }));
 
+const genAI = new GoogleGenerativeAI( process.env.GOOGLE_API_KEY );
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-001" });
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
