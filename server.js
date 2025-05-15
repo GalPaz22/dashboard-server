@@ -673,11 +673,6 @@ async function reorderResultsWithGPT(
     const geminiResponse = await genAI.models.generateContent({
       contents: messages,
       model: "gemini-2.0-flash",
-      config: {
-       thinkingConfig: {
-         thinkingBudget: 300,
-       },
-     },
     });
  
  
@@ -1036,7 +1031,8 @@ console.log("Final filters:", filters);
           url: product.url,
           highlight: true,
           onSale: product.onSale,
-          type: product.type
+          type: product.type,
+          
         })),
         ...remainingResults.map((r) => ({
           id: r._id.toString(),
@@ -1148,6 +1144,58 @@ app.post("/recommend", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+
+app.post("/search-to-cart", async (req, res) => {
+  try {
+    // Get API key from header
+    const apiKey = req.get("x-api-key");
+    
+    // Validate API key using existing authentication function
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    // Get DB name from store config
+    const { dbName } = store;
+    
+    // Get data from request body
+    const { document } = req.body;
+    
+    // Validate required fields
+    if (!document || !document.search_query || !document.product_id) {
+      return res.status(400).json({ error: "Missing required fields in document" });
+    }
+    
+    // Connect to MongoDB
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const cartCollection = db.collection('cart');
+    
+    // Add timestamp if not provided
+    if (!document.timestamp) {
+      document.timestamp = Math.floor(Date.now() / 1000);
+    }
+    
+    // Insert the document into the cart collection
+    const result = await cartCollection.insertOne(document);
+    
+    // Return success response
+    res.status(201).json({
+      success: true,
+      message: "Search-to-cart event saved successfully",
+      id: result.insertedId
+    });
+    
+  } catch (error) {
+    console.error("Error saving search-to-cart event:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+
 
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
