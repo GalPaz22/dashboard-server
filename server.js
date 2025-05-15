@@ -9,7 +9,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 
 
 
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+const genAI = new GoogleGenerativeAI( process.env.GOOGLE_API_KEY );
 const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-001" });
 // Voyage AI API configuration
 
@@ -669,13 +669,12 @@ async function reorderResultsWithGPT(
       },
     ];
     
-    const geminiResponse = await model.generateContent({
-      contents: messages,
-    });
-    
- 
-      const responseText = geminiResponse.text
-      console.log("Gemini image Reordered IDs text:", responseText);
+     const geminiResponse = await model.generateContent({
+          contents: messages,
+        });
+
+
+    const response = await geminiResponse.response;
    const  reorderedText = response.text();
     console.log("Reordered IDs text:", reorderedText);
 
@@ -772,17 +771,17 @@ example: [ "id1", "id2", "id3", "id4" ]
      },
    ];
 
-  
+ 
+
 
 
    const geminiResponse = await model.generateContent({
-    contents: messages,
-  });
-  
+     contents: messages,
+   });
 
 
-     const responseText = geminiResponse.text
-     console.log("Gemini image Reordered IDs text:", responseText);
+     const responseText = geminiResponse.response.text()
+     console.log("Gemini Reordered IDs text:", responseText);
  
 
 
@@ -820,6 +819,7 @@ example: [ "id1", "id2", "id3", "id4" ]
    throw error;
  }
 }
+
 
 async function getProductsByIds(ids, dbName, collectionName) {
   if (!ids || !Array.isArray(ids)) {
