@@ -4,14 +4,13 @@ import { MongoClient, ObjectId } from "mongodb";
 import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
-
-import { GoogleGenAI } from "@google/genai";
-
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 
 
-const genAI = new GoogleGenAI({apiKey: process.env.GOOGLE_API_KEY});
-//const model = genAI.getGenerativeModel({ model: "	gemini-2.5-flash-preview-04-17" });
+
+const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-001" });
 // Voyage AI API configuration
 
 
@@ -670,11 +669,10 @@ async function reorderResultsWithGPT(
       },
     ];
     
-    const geminiResponse = await genAI.models.generateContent({
+    const geminiResponse = await model.generateContent({
       contents: messages,
-      model: "gemini-2.0-flash",
     });
- 
+    
  
       const responseText = geminiResponse.text
       console.log("Gemini image Reordered IDs text:", responseText);
@@ -777,15 +775,10 @@ example: [ "id1", "id2", "id3", "id4" ]
   
 
 
-   const geminiResponse = await genAI.models.generateContent({
-     contents: messages,
-     model: "gemini-2.5-flash-preview-04-17",
-     config: {
-      thinkingConfig: {
-        thinkingBudget: 300,
-      },
-    },
-   });
+   const geminiResponse = await model.generateContent({
+    contents: messages,
+  });
+  
 
 
      const responseText = geminiResponse.text
