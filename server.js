@@ -655,14 +655,13 @@ async function reorderResultsWithGPT(
     const messages = [
       {
         role: "user",
-        parts: [{ text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given an english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
+        parts: [{ text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
 
 ### Key Instructions:
 1. you will get the original language query as well- ${query}- pay attention to match keyword based searches (other than semantic searches).
 2. Ignore pricing details (already filtered).
 3. Output must be a plain array of IDs, no extra text.
 4. ONLY return the most relevant products related to the query ranked in the right order, but **never more that 10**.
-
 ` }],
       },
       {
@@ -670,32 +669,30 @@ async function reorderResultsWithGPT(
         parts: [{ text: JSON.stringify(productData, null, 4) }],
       },
     ];
-    
+
     const geminiResponse = await genAI.models.generateContent({
       contents: messages,
       model: "gemini-2.0-flash",
     });
- 
- 
-      const responseText = geminiResponse.text
-      console.log("Gemini image Reordered IDs text:", responseText);
-   const  reorderedText = response.text();
-    console.log("Reordered IDs text:", reorderedText);
 
-    if (!reorderedText) {
+    // Use geminiResponse.text() instead of response.text()
+    const responseText = geminiResponse.text();
+    console.log("Gemini image Reordered IDs text:", responseText);
+
+    if (!responseText) {
       throw new Error("No content returned from Gemini");
     }
 
-      const cleanedText = reorderedText
+    const cleanedText = responseText
       .trim()
       .replace(/[^,\[\]"'\w]/g, "")
       .replace(/json/gi, "");
     try {
-        const reorderedIds = JSON.parse(cleanedText);
-        if (!Array.isArray(reorderedIds)) {
-            throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
-        }
-        return reorderedIds;
+      const reorderedIds = JSON.parse(cleanedText);
+      if (!Array.isArray(reorderedIds)) {
+        throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
+      }
+      return reorderedIds;
     } catch (parseError) {
       console.error(
         "Failed to parse Gemini response:",
