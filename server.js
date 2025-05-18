@@ -651,9 +651,6 @@ async function getProductsByIds(ids, dbName, collectionName) {
   }
 }
 
-async function extractFiltersFromQuery(query, categories, types, example) {
-  return {};
-}
 
 app.post("/search", async (req, res) => {
   const { query, types, example, noWord, noHebrewWord, context, useImages } = req.body;
