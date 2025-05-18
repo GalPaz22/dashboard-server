@@ -4,7 +4,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenerativeAI } from "@google/generative-ai";
+import {  GoogleGenAI } from "@google/genai";
 
 dotenv.config();
 
@@ -13,7 +13,7 @@ app.use(bodyParser.json());
 app.use(cors({ origin: "*" }));
 
 // Initialize Google Generative AI client
-const genAI = new GoogleGenerativeAI(process.env.GOOGLE_API_KEY);
+const genAI = new GoogleGenAI(process.env.GOOGLE_API_KEY);
 const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-001" });
 
 // Initialize OpenAI client
