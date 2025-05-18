@@ -403,22 +403,20 @@ function removeWordsFromQuery(query, noHebrewWord) {
   return filteredWords.join(" ");
 }
 
-async function classifyCategoryAndType(enrichedText, productName) {
+async function classifyCategoryAndType(categories, types, example) {
   const messages = [
     {
       role: "user",
       parts: [
         {
-          text: `You are an advanced AI model specialized in e-commerce.
-Given the following product details:
-${enrichedText}
-Determine which category the product should belong to from the following list:
-"יין לבן, יין אדום, יין רוזה, יין מבעבע, יין כתום, ליקר, וויסקי, וודקה, טקילה, מזקל, קוניאק, בירה, קוקטייל, רום, ג׳ין, סאקה, אפריטיף, דג׳יסטיף, ביטר, מארז, יין, קוקטייל".
-Also, determine whether the product qualifies as "כשר" and/or "מבצע", and return those as an array.
-Output must be a JSON object with two keys: "category" and "type". For example:
-{"category": "יין אדום", "type": ["כשר"]}
-If no category matches, return null for "category" and an empty array for "type".
-Product name: ${productName}`
+          text: `Extract the following filters from the query if they exist:
+                  1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
+                  2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
+                  3. maxPrice (maximum price, indicated by the word 'עד').
+                  4. category - one of the following Hebrew words: ${categories}. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה').
+                  5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query.
+                Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
+               {category: [" יין אדום" ,"יין"], type: "יין רוזה", minPrice: 20, maxPrice: 50}.`
         }
       ]
     }
