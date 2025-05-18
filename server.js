@@ -426,7 +426,7 @@ async function classifyCategoryAndType(categories, types, example) {
       contents: messages,
     });
     //const responseText = await geminiResponse.text();
-    const responseText = geminiResponse.response.text();
+    const responseText = geminiResponse.text();
     return JSON.parse(responseText);
   } catch (error) {
     console.error("Google Gemini category/type extraction failed:", error);
@@ -484,9 +484,15 @@ async function reorderResultsWithGPT(
       {
         role: "user",
         parts: [{
-          text: `You are an advanced AI model specializing in e-commerce queries.
-Analyze the English-translated query "${query}" along with the provided product data below and return a plain JSON array of the most relevant product IDs sorted by relevance.
-Do not include any extra text.`
+          text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given an english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
+
+### Key Instructions:
+1. you will get the original language query as well- ${query}- pay attention to match keyword based searches (other than semantic searches).
+2. Ignore pricing details (already filtered).
+3. Output must be a plain array of IDs, no extra text.
+4. ONLY return the most relevant products related to the query ranked in the right order, but **never more that 10**.
+
+`
         }]
       },
       {
@@ -498,7 +504,7 @@ Do not include any extra text.`
       contents: messages,
     });
     //const responseText = await geminiResponse.text();
-   const responseText = geminiResponse.response.text();
+   const responseText = geminiResponse.text();
     console.log("Gemini reordered IDs text:", responseText);
     if (!responseText) throw new Error("No content returned from Gemini");
     const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
@@ -565,7 +571,7 @@ Example: [ "id1", "id2", "id3", "id4" ]`
       contents: messages,
     });
    // const responseText = await geminiResponse.text();
-   const responseText = geminiResponse.response.text();
+   const responseText = geminiResponse.text();
     console.log("Gemini image Reordered IDs text:", responseText);
     if (!responseText) throw new Error("No content returned from Gemini");
     const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
