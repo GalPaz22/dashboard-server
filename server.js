@@ -4,7 +4,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
-import {  GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 dotenv.config();
 
@@ -13,8 +13,8 @@ app.use(bodyParser.json());
 app.use(cors({ origin: "*" }));
 
 // Initialize Google Generative AI client
-const genAI = new GoogleGenAI(process.env.GOOGLE_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-2.0-flash-001" });
+const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY});
+
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -403,36 +403,7 @@ function removeWordsFromQuery(query, noHebrewWord) {
   return filteredWords.join(" ");
 }
 
-async function classifyCategoryAndType(categories, types, example) {
-  const messages = [
-    {
-      role: "user",
-      parts: [
-        {
-          text: `Extract the following filters from the query if they exist:
-                  1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
-                  2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
-                  3. maxPrice (maximum price, indicated by the word 'עד').
-                  4. category - one of the following Hebrew words: ${categories}. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה').
-                  5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query.
-                Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
-               {category: [" יין אדום" ,"יין"], type: "יין רוזה", minPrice: 20, maxPrice: 50}.`
-        }
-      ]
-    }
-  ];
-  try {
-    const geminiResponse = await model.generateContent({
-      contents: messages,
-    });
-    //const responseText = await geminiResponse.text();
-    const responseText = geminiResponse.text();
-    return JSON.parse(responseText);
-  } catch (error) {
-    console.error("Google Gemini category/type extraction failed:", error);
-    return { category: null, type: [] };
-  }
-}
+
 
 async function getQueryEmbedding(cleanedText) {
   try {
@@ -444,6 +415,63 @@ async function getQueryEmbedding(cleanedText) {
   } catch (error) {
     console.error("Error fetching query embedding:", error);
     throw error;
+  }
+}
+async function extractFiltersFromQuery(query, categories, types) {
+  try {
+    const response = await model.generateContent({
+      contents: [{
+        role: "user",
+        parts: [{
+          text: `Extract price and category information from this query: ${query}`
+        }]
+      }],
+      generationConfig: {
+        temperature: 0.1,
+        topK: 1,
+        topP: 1,
+      },
+      responseSchema: {
+        type: Type.OBJECT,
+        properties: {
+          price: {
+            type: Type.NUMBER,
+            description: "Exact price if mentioned with 'ב' or 'באיזור ה-'",
+            optional: true
+          },
+          minPrice: {
+            type: Type.NUMBER,
+            description: "Minimum price if mentioned with 'החל מ' or 'מ'",
+            optional: true
+          },
+          maxPrice: {
+            type: Type.NUMBER,
+            description: "Maximum price if mentioned with 'עד'",
+            optional: true
+          },
+          category: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.STRING,
+              enum: categories.split(",").map(c => c.trim())
+            },
+            description: "Matched categories from the provided list",
+            optional: true
+          },
+          type: {
+            type: Type.STRING,
+            enum: types.split(",").map(t => t.trim()),
+            description: "Matched type from the provided list",
+            optional: true
+          }
+        }
+      }
+    });
+
+    return JSON.parse(response.response.text());
+  } catch (error) {
+    console.error("Error extracting filters:", error);
+    return {};
   }
 }
 
@@ -502,6 +530,8 @@ async function reorderResultsWithGPT(
     ];
     const geminiResponse = await model.generateContent({
       contents: messages,
+      model:"gemini-2.0-flash" 
+
     });
     //const responseText = await geminiResponse.text();
    const responseText = geminiResponse.text();
@@ -569,6 +599,7 @@ Example: [ "id1", "id2", "id3", "id4" ]`
     ];
     const geminiResponse = await model.generateContent({
       contents: messages,
+      model:"gemini-2.0-flash" 
     });
    // const responseText = await geminiResponse.text();
    const responseText = geminiResponse.text();
