@@ -498,12 +498,12 @@ Example format: ["id1", "id2", "id3"]`
       }
     ];
 
-    const geminiResponse = await model.generateContent({
+    const geminiResponse = genAI.models.generateContent({
       model: "gemini-2.0-flash",
       contents: messages,
     });
 
-    const responseText = geminiResponse.response.text();
+    const responseText = geminiResponse.text;
     console.log("Gemini Reordered IDs text:", responseText);
     
     if (!responseText) {
