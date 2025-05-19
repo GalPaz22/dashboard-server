@@ -13,7 +13,7 @@ app.use(bodyParser.json());
 app.use(cors({ origin: "*" }));
 
 // Initialize Google Generative AI client
-const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY});
+const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
 
 
 // Initialize OpenAI client
@@ -22,7 +22,6 @@ const openai = new OpenAI({
 });
 
 let mongodbUri = process.env.MONGODB_URI;
-
 // Middleware to parse JSON bodies.
 app.use(express.json());
 
@@ -75,7 +74,7 @@ async function getStoreConfigByApiKey(apiKey) {
     products: userDoc.collections?.products || "products",
     queries: userDoc.collections?.queries || "queries",
     categories: userDoc.credentials?.categories || "",
-    types: userDoc.credentials?.types || ""
+    types: userDoc.credentials?.type || ""
   };
 }
 
@@ -286,7 +285,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
   if (filters && Object.keys(filters).length > 0) {
     const matchStage = {};
     if (filters.type) {
-      matchStage.type = { $regex: filters.type, $options: "i" };
+      filters.type = Array.isArray(filters.type) ? { $in: filters.type } : filters.type;
     }
     if (filters.minPrice && filters.maxPrice) {
       matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
@@ -318,7 +317,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
     filter.category = Array.isArray(filters.category) ? { $in: filters.category } : filters.category;
   }
   if (filters.type) {
-    filter.type = filters.type;
+    filter.type = Array.isArray(filters.type) ? { $in: filters.type } : filters.type;
   }
   if (filters.minPrice && filters.maxPrice) {
     filter.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
@@ -364,7 +363,7 @@ async function translateQuery(query, context) {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4.1-mini",
       messages: [
         {
           role: "system",
@@ -417,64 +416,34 @@ async function getQueryEmbedding(cleanedText) {
     throw error;
   }
 }
-async function extractFiltersFromQuery(query, categories, types) {
+async function extractFiltersFromQuery(query, categories, types, example) {
   try {
-    const response = await model.generateContent({
-      contents: [{
-        role: "user",
-        parts: [{
-          text: `Extract price and category information from this query: ${query}`
-        }]
-      }],
-      generationConfig: {
-        temperature: 0.1,
-        topK: 1,
-        topP: 1,
-      },
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          price: {
-            type: Type.NUMBER,
-            description: "Exact price if mentioned with 'ב' or 'באיזור ה-'",
-            optional: true
-          },
-          minPrice: {
-            type: Type.NUMBER,
-            description: "Minimum price if mentioned with 'החל מ' or 'מ'",
-            optional: true
-          },
-          maxPrice: {
-            type: Type.NUMBER,
-            description: "Maximum price if mentioned with 'עד'",
-            optional: true
-          },
-          category: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.STRING,
-              enum: categories.split(",").map(c => c.trim())
-            },
-            description: "Matched categories from the provided list",
-            optional: true
-          },
-          type: {
-            type: Type.STRING,
-            enum: types.split(",").map(t => t.trim()),
-            description: "Matched type from the provided list",
-            optional: true
-          }
-        }
-      }
+    const response = await openai.chat.completions.create({
+      model: "gpt-4.1-mini",
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: `Extract the following filters from the query if they exist:
+                  1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
+                  2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
+                  3. maxPrice (maximum price, indicated by the word 'עד').
+                  4. category - one of the following Hebrew words: ${categories}. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה').
+                  5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query.
+                Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
+               ${example}.` },
+        { role: "user", content: query },
+      ],
+      temperature: 0.5,
     });
 
-    return JSON.parse(response.response.text());
+    const content = response.choices[0]?.message?.content;
+    const filters = JSON.parse(content);
+    console.log("Extracted filters:", filters);
+    return filters;
   } catch (error) {
     console.error("Error extracting filters:", error);
-    return {};
+    throw error;
   }
 }
-
 async function logQuery(queryCollection, query, filters) {
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
@@ -491,6 +460,7 @@ async function logQuery(queryCollection, query, filters) {
   await queryCollection.insertOne(queryDocument);
 }
 
+// --- 2) reorderResultsWithGPT ---
 async function reorderResultsWithGPT(
   combinedResults,
   translatedQuery,
@@ -498,21 +468,17 @@ async function reorderResultsWithGPT(
   alreadyDelivered = []
 ) {
   try {
-    if (!Array.isArray(alreadyDelivered)) alreadyDelivered = [];
-    const filteredResults = combinedResults.filter(
-      (product) => !alreadyDelivered.includes(product._id.toString())
+    const filtered = combinedResults.filter(
+      (p) => !alreadyDelivered.includes(p._id.toString())
     );
-    const productData = filteredResults.map((product) => ({
-      id: product._id.toString(),
-      name: product.name || "No name",
-      description: product.description1 || "No description",
+    const productData = filtered.map((p) => ({
+      id: p._id.toString(),
+      name: p.name || "No name",
+      description: p.description1 || "No description",
     }));
-    console.log("Product data for reorder:", JSON.stringify(productData.slice(0, 4)));
-    const messages = [
-      {
-        role: "user",
-        parts: [{
-          text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given an english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
+
+    const systemInstruction = `
+You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given an english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
 
 ### Key Instructions:
 1. you will get the original language query as well- ${query}- pay attention to match keyword based searches (other than semantic searches).
@@ -520,34 +486,20 @@ async function reorderResultsWithGPT(
 3. Output must be a plain array of IDs, no extra text.
 4. ONLY return the most relevant products related to the query ranked in the right order, but **never more that 10**.
 
-`
-        }]
-      },
-      {
-        role: "user",
-        parts: [{ text: JSON.stringify(productData, null, 4) }]
-      }
-    ];
-    const geminiResponse = await model.generateContent({
-      contents: messages,
-      model:"gemini-2.0-flash" 
+    `.trim();
 
+    const userContent = JSON.stringify(productData, null, 4);
+
+    const response = await genAI.models.generateContent({
+      model: "gemini-2.0-flash",
+      contents: userContent,
+      config: { systemInstruction }
     });
-    //const responseText = await geminiResponse.text();
-   const responseText = geminiResponse.text();
-    console.log("Gemini reordered IDs text:", responseText);
-    if (!responseText) throw new Error("No content returned from Gemini");
-    const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
-    try {
-      const reorderedIds = JSON.parse(cleanedText);
-      if (!Array.isArray(reorderedIds)) {
-        throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
-      }
-      return reorderedIds;
-    } catch (parseError) {
-      console.error("Failed to parse Gemini response:", parseError, "Cleaned Text:", cleanedText);
-      throw new Error("Response from Gemini could not be parsed as a valid array.");
-    }
+
+    const text = response.text.trim();
+    const ids = JSON.parse(text);
+    if (!Array.isArray(ids)) throw new Error("Unexpected format");
+    return ids;
   } catch (error) {
     console.error("Error reordering results with Gemini:", error);
     throw error;
@@ -579,7 +531,7 @@ async function reorderImagesWithGPT(
         role: "user",
         parts: [
           {
-            text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze the given "${translatedQuery}" along with a list of products (each including only an image), and return the most relevant product IDs based solely on how well the product images match the query.
+            text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze the given "${query}" along with a list of products (each including only an image), and return the most relevant product IDs based solely on how well the product images match the query.
             
 Key Instructions:
 1. Ignore pricing details.
@@ -597,12 +549,12 @@ Example: [ "id1", "id2", "id3", "id4" ]`
         ],
       },
     ];
-    const geminiResponse = await model.generateContent({
+    const geminiResponse = genAI.models.generateContent({
       contents: messages,
       model:"gemini-2.0-flash" 
     });
    // const responseText = await geminiResponse.text();
-   const responseText = geminiResponse.text();
+   const responseText = geminiResponse.text;
     console.log("Gemini image Reordered IDs text:", responseText);
     if (!responseText) throw new Error("No content returned from Gemini");
     const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
@@ -653,9 +605,10 @@ async function getProductsByIds(ids, dbName, collectionName) {
 
 
 app.post("/search", async (req, res) => {
-  const { query, types, example, noWord, noHebrewWord, context, useImages } = req.body;
-  const { dbName, products: collectionName, categories } = req.store;
+  const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
+  const { dbName, products: collectionName, categories, types } = req.store;
   console.log("categories", categories);
+  console.log("types", types);
   if (!query || !dbName || !collectionName) {
     return res.status(400).json({
       error: "Either apiKey **or** (dbName & collectionName) must be provided",
@@ -747,41 +700,34 @@ app.post("/search", async (req, res) => {
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
     const reorderedProductIds = new Set(reorderedIds);
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
-    const formattedResults = [];
+     
+    const formattedResults = [
+      ...orderedProducts.map((product) => ({
+        id: product._id.toString(),
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        highlight: true,
+        type: product.type,
+        specialSales: product.specialSales,
+        ItemID: product.ItemID,
 
-    for (const product of [...orderedProducts, ...remainingResults]) {
-      try {
-           const enrichedText = `${product.name}\n${product.description}`;
-           const classification = await classifyCategoryAndType(enrichedText, product.name);
-
-           formattedResults.push({
-              id: product._id.toString(),
-              name: product.name,
-              description: product.description,
-              price: product.price,
-              image: product.image,
-              url: product.url,
-              onSale: product.onSale,
-              type: product.type,
-              category: classification?.category || null,
-              geminiTypes: classification?.type || [],
-           });
-      } catch (classificationError) {
-           console.error("Classification error:", classificationError);
-           formattedResults.push({
-              id: product._id.toString(),
-              name: product.name,
-              description: product.description,
-              price: product.price,
-              image: product.image,
-              url: product.url,
-              onSale: product.onSale,
-              type: product.type,
-              category: null,
-              geminiTypes: [],
-           });
-      }
-    }
+      })),
+      ...remainingResults.map((r) => ({
+        id: r._id.toString(),
+        name: r.name,
+        description: r.description,
+        price: r.price,
+        image: r.image,
+        url: r.url,
+        type: r.type,
+        specialSales: r.specialSales,
+        ItemID: r.ItemID,
+        highlight: false,
+      })),
+    ];
 
     res.json(formattedResults);
   } catch (error) {
