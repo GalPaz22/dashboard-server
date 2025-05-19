@@ -504,20 +504,17 @@ Example format: ["id1", "id2", "id3"]`
     });
 
     const responseText = geminiResponse.text;
-    console.log("Gemini Reordered IDs text:", responseText);
-    
-    if (!responseText) {
-      throw new Error("No content returned from Gemini");
-    }
-
+    console.log("Gemini image Reordered IDs text:", responseText);
+    if (!responseText) throw new Error("No content returned from Gemini");
+    const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
     try {
-      const reorderedIds = JSON.parse(responseText);
+      const reorderedIds = JSON.parse(cleanedText);
       if (!Array.isArray(reorderedIds)) {
         throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
       }
       return reorderedIds;
     } catch (parseError) {
-      console.error("Failed to parse Gemini response:", parseError);
+      console.error("Failed to parse Gemini response:", parseError, "Cleaned Text:", cleanedText);
       throw new Error("Response from Gemini could not be parsed as a valid array.");
     }
   } catch (error) {
