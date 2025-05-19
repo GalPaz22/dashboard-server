@@ -468,121 +468,70 @@ async function reorderResultsWithGPT(
   alreadyDelivered = []
 ) {
   try {
-    if (!Array.isArray(alreadyDelivered)) alreadyDelivered = [];
+    if (!Array.isArray(alreadyDelivered)) {
+      alreadyDelivered = [];
+    }
     const filteredResults = combinedResults.filter(
       (product) => !alreadyDelivered.includes(product._id.toString())
     );
-    const productData = filteredResults.map(product => ({
+
+    const productData = filteredResults.map((product) => ({
       id: product._id.toString(),
       name: product.name || "No name",
       description: product.description1 || "No description",
     }));
 
+    console.log(JSON.stringify(productData.slice(0, 4)));
+
     const messages = [
       {
         role: "user",
-        parts: [
-          {
-            text: `You are an advanced AI model specializing in e-commerce queries. Analyze these inputs:
+        parts: [{ text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given an english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
 
-1. Original query: "${query}"
-2. Translated query: "${translatedQuery}"
-3. Product list: ${JSON.stringify(productData, null, 2)}
+### Key Instructions:
+1. you will get the original language query as well- ${query}- pay attention to match keyword based searches (other than semantic searches).
+2. Ignore pricing details (already filtered).
+3. Output must be a plain array of IDs, no extra text.
+4. ONLY return the most relevant products related to the query ranked in the right order, but **never more that 10**.
 
-Return a JSON array of the most relevant product IDs, ordered by relevance to the query.
-Consider both the original and translated queries for matching.
-Maximum 10 results, minimum 5 if available.
-Example format: ["id1", "id2", "id3"]`
-          }
-        ]
-      }
-    ];
-
-    const geminiResponse = genAI.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: messages,
-    });
-
-    const responseText = geminiResponse.text;
-    console.log("Gemini image Reordered IDs text:", responseText);
-    if (!responseText) throw new Error("No content returned from Gemini");
-    const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
-    try {
-      const reorderedIds = JSON.parse(cleanedText);
-      if (!Array.isArray(reorderedIds)) {
-        throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
-      }
-      return reorderedIds;
-    } catch (parseError) {
-      console.error("Failed to parse Gemini response:", parseError, "Cleaned Text:", cleanedText);
-      throw new Error("Response from Gemini could not be parsed as a valid array.");
-    }
-  } catch (error) {
-    console.error("Error reordering results with Gemini:", error);
-    throw error;
-  }
-}
-
-async function reorderImagesWithGPT(
-  combinedResults,
-  translatedQuery,
-  query,
-  alreadyDelivered = []
-) {
-  try {
-    if (!Array.isArray(alreadyDelivered)) alreadyDelivered = [];
-    const filteredResults = combinedResults.filter(
-      (product) => !alreadyDelivered.includes(product._id.toString())
-    );
-    const productData = combinedResults.map(product => ({
-      id: product._id.toString(),
-      name: product.name,
-      image: product.image,
-      description: product.description1,
-    }));
-    const imagesToSend = combinedResults.map(product => ({
-      imageUrl: product.image || "No image"
-    }));
-    const messages = [
+` }],
+      },
       {
         role: "user",
-        parts: [
-          {
-            text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze the given "${query}" along with a list of products (each including only an image), and return the most relevant product IDs based solely on how well the product images match the query.
-            
-Key Instructions:
-1. Ignore pricing details.
-2. Output must be a JSON array of IDs with no extra text.
-3. Rank strictly by image relevance.
-4. Return at least 5 but no more than 8 product IDs.
-Example: [ "id1", "id2", "id3", "id4" ]`
-          },
-          {
-            text: JSON.stringify(productData, null, 4),
-          },
-          {
-            text: JSON.stringify({ type: "image_url", images: imagesToSend }, null, 4),
-          },
-        ],
+        parts: [{ text: JSON.stringify(productData, null, 4) }],
       },
     ];
-    const geminiResponse = genAI.models.generateContent({
-      contents: messages,
-      model:"gemini-2.0-flash" 
-    });
-   // const responseText = await geminiResponse.text();
-   const responseText = geminiResponse.text;
-    console.log("Gemini image Reordered IDs text:", responseText);
-    if (!responseText) throw new Error("No content returned from Gemini");
-    const cleanedText = responseText.trim().replace(/[^,\[\]"'\w]/g, "").replace(/json/gi, "");
+    
+     const geminiResponse = await model.generateContent({
+          contents: messages,
+        });
+
+
+    const response = await geminiResponse.response;
+   const  reorderedText = response.text();
+    console.log("Reordered IDs text:", reorderedText);
+
+    if (!reorderedText) {
+      throw new Error("No content returned from Gemini");
+    }
+
+      const cleanedText = reorderedText
+      .trim()
+      .replace(/[^,\[\]"'\w]/g, "")
+      .replace(/json/gi, "");
     try {
-      const reorderedIds = JSON.parse(cleanedText);
-      if (!Array.isArray(reorderedIds)) {
-        throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
-      }
-      return reorderedIds;
+        const reorderedIds = JSON.parse(cleanedText);
+        if (!Array.isArray(reorderedIds)) {
+            throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
+        }
+        return reorderedIds;
     } catch (parseError) {
-      console.error("Failed to parse Gemini response:", parseError, "Cleaned Text:", cleanedText);
+      console.error(
+        "Failed to parse Gemini response:",
+        parseError,
+        "Cleaned Text:",
+        cleanedText
+      );
       throw new Error("Response from Gemini could not be parsed as a valid array.");
     }
   } catch (error) {
@@ -590,6 +539,120 @@ Example: [ "id1", "id2", "id3", "id4" ]`
     throw error;
   }
 }
+
+
+
+async function reorderImagesWithGPT(
+ combinedResults,
+ translatedQuery,
+ query,
+ alreadyDelivered = []
+) {
+ try {
+   if (!Array.isArray(alreadyDelivered)) {
+     alreadyDelivered = [];
+   }
+
+   const filteredResults = combinedResults.filter(
+     (product) => !alreadyDelivered.includes(product._id.toString())
+   );
+
+   const productData = combinedResults.map(product => ({
+     id: product._id.toString(),
+     name: product.name,
+     image: product.image,
+     description: product.description1,
+   }));
+
+   const imagesToSend = combinedResults.map(product => ({
+     imageUrl: product.image || "No image"
+   }));
+
+
+   const messages = [
+     {
+       role: "user",
+       parts: [
+         {
+           text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given "${translatedQuery}", from an e-commerce site, along with a provided list of products (each including only an image), and return the **most relevant product IDs** based on how well the product images match the query.
+
+### Key Instructions:
+1. Ignore pricing details (already filtered).
+2. Output must be a JSON array of IDs, with no extra text or formatting.
+3. Rank strictly according to the product images.
+4. Return at least 5 but no more than 8 product IDs.
+5. Answer ONLY with the Array, do not add any other text beside it- NEVER!
+
+example: [ "id1", "id2", "id3", "id4" ]
+
+`,
+         },
+         {
+             text:  JSON.stringify(productData, null, 4),
+           },
+         {
+           text: JSON.stringify(
+             {
+               type: "image_url",
+               images: imagesToSend,
+             },
+             null,
+             4
+           ),
+         },
+         ]
+     },
+   ];
+
+ 
+
+
+
+   const geminiResponse = await model.generateContent({
+     contents: messages,
+   });
+
+
+     const responseText = geminiResponse.response.text()
+     console.log("Gemini Reordered IDs text:", responseText);
+ 
+
+
+   if (!responseText) {
+     throw new Error("No content returned from Gemini");
+   }
+
+  // If you want usage details:
+   // console.log(geminiResponse.usage);
+
+
+   const cleanedText = responseText
+   .trim()
+   .replace(/[^,\[\]"'\w]/g, "")
+   .replace(/json/gi, "");
+
+
+   try {
+     const reorderedIds = JSON.parse(cleanedText);
+     if (!Array.isArray(reorderedIds)) {
+       throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
+     }
+     return reorderedIds;
+   } catch (parseError) {
+     console.error(
+       "Failed to parse Gemini response:",
+       parseError,
+       "Cleaned Text:",
+       cleanedText
+     );
+     throw new Error("Response from Gemini could not be parsed as a valid array.");
+   }
+ } catch (error) {
+   console.error("Error reordering results with Gemini:", error);
+   throw error;
+ }
+}
+
 
 async function getProductsByIds(ids, dbName, collectionName) {
   if (!ids || !Array.isArray(ids)) {
