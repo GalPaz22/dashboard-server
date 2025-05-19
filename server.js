@@ -499,14 +499,8 @@ Example format: ["id1", "id2", "id3"]`
     ];
 
     const geminiResponse = await model.generateContent({
+      model: "gemini-2.0-flash",
       contents: messages,
-      generationConfig: {
-        temperature: 0.1,
-        topK: 1,
-        topP: 1,
-        maxOutputTokens: 200,
-        responseMimeType: "application/json",
-      }
     });
 
     const responseText = geminiResponse.response.text();
