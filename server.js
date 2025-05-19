@@ -468,38 +468,64 @@ async function reorderResultsWithGPT(
   alreadyDelivered = []
 ) {
   try {
-    const filtered = combinedResults.filter(
-      (p) => !alreadyDelivered.includes(p._id.toString())
+    if (!Array.isArray(alreadyDelivered)) alreadyDelivered = [];
+    const filteredResults = combinedResults.filter(
+      (product) => !alreadyDelivered.includes(product._id.toString())
     );
-    const productData = filtered.map((p) => ({
-      id: p._id.toString(),
-      name: p.name || "No name",
-      description: p.description1 || "No description",
+    const productData = filteredResults.map(product => ({
+      id: product._id.toString(),
+      name: product.name || "No name",
+      description: product.description1 || "No description",
     }));
 
-    const systemInstruction = `
-You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given an english-translated query "${query}" from an e-commerce site, along with a provided list of products (each including a name and description), and return the **most relevant product IDs** based solely on how well the product names and descriptions match the query.
+    const messages = [
+      {
+        role: "user",
+        parts: [
+          {
+            text: `You are an advanced AI model specializing in e-commerce queries. Analyze these inputs:
 
-### Key Instructions:
-1. you will get the original language query as well- ${query}- pay attention to match keyword based searches (other than semantic searches).
-2. Ignore pricing details (already filtered).
-3. Output must be a plain array of IDs, no extra text.
-4. ONLY return the most relevant products related to the query ranked in the right order, but **never more that 10**.
+1. Original query: "${query}"
+2. Translated query: "${translatedQuery}"
+3. Product list: ${JSON.stringify(productData, null, 2)}
 
-    `;
+Return a JSON array of the most relevant product IDs, ordered by relevance to the query.
+Consider both the original and translated queries for matching.
+Maximum 10 results, minimum 5 if available.
+Example format: ["id1", "id2", "id3"]`
+          }
+        ]
+      }
+    ];
 
-    const userContent = JSON.stringify(productData, null, 4);
-
-    const response = await genAI.models.generateContent({
-      model: "gemini-2.0-flash",
-      contents: userContent,
-      config: { systemInstruction }
+    const geminiResponse = await model.generateContent({
+      contents: messages,
+      generationConfig: {
+        temperature: 0.1,
+        topK: 1,
+        topP: 1,
+        maxOutputTokens: 200,
+        responseMimeType: "application/json",
+      }
     });
 
-    const text = response.text.trim();
-    const ids = JSON.parse(text);
-    if (!Array.isArray(ids)) throw new Error("Unexpected format");
-    return ids;
+    const responseText = geminiResponse.response.text();
+    console.log("Gemini Reordered IDs text:", responseText);
+    
+    if (!responseText) {
+      throw new Error("No content returned from Gemini");
+    }
+
+    try {
+      const reorderedIds = JSON.parse(responseText);
+      if (!Array.isArray(reorderedIds)) {
+        throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
+      }
+      return reorderedIds;
+    } catch (parseError) {
+      console.error("Failed to parse Gemini response:", parseError);
+      throw new Error("Response from Gemini could not be parsed as a valid array.");
+    }
   } catch (error) {
     console.error("Error reordering results with Gemini:", error);
     throw error;
