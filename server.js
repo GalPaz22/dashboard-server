@@ -184,58 +184,83 @@ app.get("/autocomplete", async (req, res) => {
 });
 
 function extractCategoriesUsingRegex(query, categories) {
+  // Safely handle input categories
   let catArray = [];
   if (Array.isArray(categories)) {
     catArray = categories;
   } else if (typeof categories === "string") {
     catArray = categories.split(",").map(cat => cat.trim()).filter(cat => cat.length > 0);
   }
+  
+  // Sort by length (longest first) to match most specific categories first
   catArray.sort((a, b) => b.length - a.length);
-  const fullMatches = [];
+
+  // First try exact matches
   for (const cat of catArray) {
-    const regexFull = new RegExp(`(^|[^\\p{L}])${cat}($|[^\\p{L}])`, "iu");
+    // Use word boundaries and escaped category string
+    const escapedCat = cat.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regexFull = new RegExp(`(^|\\s)${escapedCat}($|\\s)`, "iu");
     if (regexFull.test(query)) {
-      fullMatches.push(cat);
       return [cat];
     }
   }
-  if (fullMatches.length > 0) return fullMatches;
+
+  // If no exact matches, try partial matches with whole words only
   const partialMatches = [];
-  const matchedWords = new Set();
+  const matchedPhrases = new Set();
+
   for (const cat of catArray) {
     const words = cat.split(/\s+/);
     let matchedWordsCount = 0;
-    let alreadyMatchedWord = false;
-    for (const word of words) {
-      if (word.length < 2) continue;
-      const regexPartial = new RegExp(`(^|[^\\p{L}])${word}($|[^\\p{L}])`, "iu");
-      if (regexPartial.test(query)) {
-        matchedWordsCount++;
-        if (matchedWords.has(word)) {
-          alreadyMatchedWord = true;
-        } else {
-          matchedWords.add(word);
+    const matchedWords = [];
+
+    // Only process categories with multiple words
+    if (words.length > 1) {
+      for (const word of words) {
+        if (word.length < 2) continue;
+        
+        // Escape special characters in the word
+        const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        // Use word boundaries to match whole words only
+        const regexPartial = new RegExp(`(^|\\s)${escapedWord}($|\\s)`, "iu");
+        
+        if (regexPartial.test(query)) {
+          matchedWordsCount++;
+          matchedWords.push(word);
+        }
+      }
+
+      // Calculate match quality
+      const matchRatio = matchedWordsCount / words.length;
+      if (matchRatio >= 0.5) {  // At least half of the words must match
+        const matchedPhrase = matchedWords.sort().join(" ");
+        if (!matchedPhrases.has(matchedPhrase)) {
+          matchedPhrases.add(matchedPhrase);
+          partialMatches.push({
+            category: cat,
+            matchRatio,
+            specificity: words.length
+          });
         }
       }
     }
-    if (matchedWordsCount > 0 && (matchedWordsCount / words.length > 0.5 || !alreadyMatchedWord)) {
-      partialMatches.push({
-        category: cat,
-        matchRatio: matchedWordsCount / words.length,
-        specificity: words.length
-      });
-    }
   }
+
+  // Sort partial matches by match ratio and specificity
   partialMatches.sort((a, b) => {
     if (b.matchRatio !== a.matchRatio) return b.matchRatio - a.matchRatio;
     return b.specificity - a.specificity;
   });
+
+  // Return best partial match if it's significantly better than others
   if (partialMatches.length > 0 &&
       partialMatches[0].matchRatio >= 0.7 &&
       (partialMatches.length === 1 || partialMatches[0].matchRatio > partialMatches[1].matchRatio)) {
     return [partialMatches[0].category];
   }
-  return partialMatches.map(match => match.category);
+
+  // If no good matches found, return empty array
+  return [];
 }
 
 const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
