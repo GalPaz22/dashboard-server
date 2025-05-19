@@ -74,7 +74,8 @@ async function getStoreConfigByApiKey(apiKey) {
     products: userDoc.collections?.products || "products",
     queries: userDoc.collections?.queries || "queries",
     categories: userDoc.credentials?.categories || "",
-    types: userDoc.credentials?.type || ""
+    types: userDoc.credentials?.type || "",
+    syncMode: userDoc.syncMode || "text",
   };
 }
 
@@ -338,9 +339,13 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
 
 function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
   const filter = {};
+
   if (filters.category) {
-    filter.category = Array.isArray(filters.category) ? { $in: filters.category } : filters.category;
+    filter.category = Array.isArray(filters.category)
+      ? { $in: filters.category }
+      : filters.category;
   }
+
   if (filters.type) {
     filter.type = Array.isArray(filters.type)
       ? { $in: filters.type }
@@ -353,11 +358,13 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
   } else if (filters.maxPrice) {
     filter.price = { $lte: filters.maxPrice };
   }
+
   if (filters.price) {
     const price = filters.price;
     const priceRange = price * 0.15;
     filter.price = { $gte: price - priceRange, $lte: price + priceRange };
   }
+
   const pipeline = [
     {
       $vectorSearch: {
@@ -365,18 +372,24 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
         path: "embedding",
         queryVector: queryEmbedding,
         exact: true,
-        limit: 15,
+        limit: 16,
         ...(Object.keys(filter).length && { filter }),
       },
     },
   ];
+  
   const postMatchClauses = [];
   postMatchClauses.push({
-    $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }],
+    $or: [
+      { stockStatus: "instock" },
+      { stockStatus: { $exists: false } },
+    ],
   });
+
   if (postMatchClauses.length > 0) {
     pipeline.push({ $match: { $and: postMatchClauses } });
   }
+
   return pipeline;
 }
 
@@ -676,7 +689,7 @@ async function getProductsByIds(ids, dbName, collectionName) {
 
 app.post("/search", async (req, res) => {
   const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
-  const { dbName, products: collectionName, categories, types } = req.store;
+  const { dbName, products: collectionName, categories, types, syncMode } = req.store;
   console.log("categories", categories);
   console.log("types", types);
   if (!query || !dbName || !collectionName) {
@@ -761,7 +774,7 @@ app.post("/search", async (req, res) => {
       .sort((a, b) => b.rrf_score - a.rrf_score);
     let reorderedIds;
     try {
-      const reorderFn = useImages ? reorderImagesWithGPT : reorderResultsWithGPT;
+      const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
       reorderedIds = await reorderFn(combinedResults, translatedQuery, query);
     } catch (error) {
       console.error("LLM reordering failed, falling back to default ordering:", error);
