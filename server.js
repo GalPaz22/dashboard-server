@@ -486,7 +486,7 @@ You are an advanced AI model specializing in e-commerce queries. Your role is to
 3. Output must be a plain array of IDs, no extra text.
 4. ONLY return the most relevant products related to the query ranked in the right order, but **never more that 10**.
 
-    `.trim();
+    `;
 
     const userContent = JSON.stringify(productData, null, 4);
 
