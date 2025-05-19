@@ -265,8 +265,12 @@ function extractCategoriesUsingRegex(query, categories) {
 }
 
 const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
+  console.log("Building fuzzy search pipeline with filters:", JSON.stringify(filters));
+  
   const pipeline = [];
-  if (cleanedHebrewText && cleanedHebrewText.trim() !== "") {
+  
+  // Only add the $search stage if we have a non-empty search query
+  if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
     pipeline.push({
       $search: {
         index: "default",
@@ -281,7 +285,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
                   prefixLength: 3,
                   maxExpansions: 50,
                 },
-                score: { boost: { value: 5 } }
+                score: { boost: { value: 5 } } // Boost for the "name" field
               }
             },
             {
@@ -296,44 +300,92 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
               }
             }
           ],
-          filter: []
+          filter: [] // We're not using compound.filter - handling filters in separate $match stages
         }
       }
     });
   } else {
+    // If no search query is provided, start with a simple $match stage
     pipeline.push({ $match: {} });
   }
+
+  // Handle stock status filter first
   pipeline.push({
     $match: {
-      $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
+      $or: [
+        { stockStatus: { $exists: false } },
+        { stockStatus: "instock" }
+      ],
     },
   });
+
+  // Now handle the other filters - create a separate match stage for price
+// ...existing code...
+  // Now handle the other filters - create a separate match stage for price
   if (filters && Object.keys(filters).length > 0) {
-    const matchStage = {};
+    // Type filter: support string or array without using regex
     if (filters.type) {
-      filters.type = Array.isArray(filters.type) ? { $in: filters.type } : filters.type;
+      pipeline.push({
+        $match: {
+          category: Array.isArray(filters.type) 
+            ? { $in: filters.type } 
+            : filters.type
+        }
+      });
     }
-    if (filters.minPrice && filters.maxPrice) {
-      matchStage.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
-    } else if (filters.minPrice) {
-      matchStage.price = { $gte: filters.minPrice };
-    } else if (filters.maxPrice) {
-      matchStage.price = { $lte: filters.maxPrice };
-    } else if (filters.price) {
-      const price = filters.price;
+    // ...existing code...
+    
+    // Category filter
+    if (filters.category) {
+      pipeline.push({
+        $match: {
+          category: Array.isArray(filters.category) 
+            ? { $in: filters.category } 
+            : filters.category
+        }
+      });
+    }
+    
+    // Price filters - ensure all values are converted to numbers
+    const priceMatch = {};
+    let hasPriceFilter = false;
+    
+    if (filters.minPrice !== undefined && filters.maxPrice !== undefined) {
+      priceMatch.$gte = Number(filters.minPrice);
+      priceMatch.$lte = Number(filters.maxPrice);
+      hasPriceFilter = true;
+    } else if (filters.minPrice !== undefined) {
+      priceMatch.$gte = Number(filters.minPrice);
+      hasPriceFilter = true;
+    } else if (filters.maxPrice !== undefined) {
+      priceMatch.$lte = Number(filters.maxPrice);
+      hasPriceFilter = true;
+    } else if (filters.price !== undefined) {
+      const price = Number(filters.price);
       const priceRange = price * 0.15;
-      matchStage.price = { $gte: price - priceRange, $lte: price + priceRange };
+      priceMatch.$gte = Math.max(0, price - priceRange); // Ensure price is not negative
+      priceMatch.$lte = price + priceRange;
+      hasPriceFilter = true;
+      
+      console.log(`Price filter range: ${priceMatch.$gte} to ${priceMatch.$lte}`);
     }
-    if (Object.keys(matchStage).length > 0) {
-      pipeline.push({ $match: matchStage });
+    
+    // Add the price match stage if we have price filters
+    if (hasPriceFilter) {
+      pipeline.push({
+        $match: {
+          price: priceMatch
+        }
+      });
     }
   }
-  pipeline.push({
-    $match: {
-      $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
-    },
-  });
+  
+  // Add limit at the end
   pipeline.push({ $limit: 5 });
+  
+  // Log the pipeline for debugging
+  console.log("Fuzzy search pipeline:", JSON.stringify(pipeline));
+  
   return pipeline;
 };
 
