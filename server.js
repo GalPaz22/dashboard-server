@@ -848,6 +848,7 @@ app.post("/search", async (req, res) => {
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
+        id: product._id.toString(),
 
       })),
       ...remainingResults.map((r) => ({
@@ -861,6 +862,7 @@ app.post("/search", async (req, res) => {
         specialSales: r.specialSales,
         ItemID: r.ItemID,
         highlight: false,
+        id: r._id.toString(),
       })),
     ];
 
