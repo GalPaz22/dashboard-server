@@ -838,7 +838,7 @@ app.post("/search", async (req, res) => {
      
     const formattedResults = [
       ...orderedProducts.map((product) => ({
-        id: product._id.toString(),
+        id: product.id.toString(),
         name: product.name,
         description: product.description,
         price: product.price,
@@ -848,11 +848,11 @@ app.post("/search", async (req, res) => {
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
-        id: product._id.toString(),
+       
 
       })),
       ...remainingResults.map((r) => ({
-        id: r._id.toString(),
+        id: r.id.toString(),
         name: r.name,
         description: r.description,
         price: r.price,
@@ -862,7 +862,7 @@ app.post("/search", async (req, res) => {
         specialSales: r.specialSales,
         ItemID: r.ItemID,
         highlight: false,
-        id: r._id.toString(),
+   
       })),
     ];
 
