@@ -866,6 +866,8 @@ app.post("/search", async (req, res) => {
       })),
     ];
 
+    console.log(`Returning ${formattedResults.length} results for query: ${query}`);
+
     res.json(formattedResults);
   } catch (error) {
     console.error("Error handling search request:", error);
