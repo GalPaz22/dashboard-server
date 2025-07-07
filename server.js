@@ -15,7 +15,6 @@ app.use(cors({ origin: "*" }));
 // Initialize Google Generative AI client
 const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
 
-
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -455,7 +454,7 @@ async function translateQuery(query, context) {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
     const response = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4o",
       messages: [
         {
           role: "system",
@@ -553,7 +552,6 @@ async function logQuery(queryCollection, query, filters) {
 }
 
 // --- 2) reorderResultsWithGPT ---
-// --- 2) reorderResultsWithGPT ---
 async function reorderResultsWithGPT(
   combinedResults,
   translatedQuery,
@@ -574,18 +572,33 @@ async function reorderResultsWithGPT(
 You are an advanced AI model specializing in e-commerce queries.
 Your task: given the user query "${query}" and this list of products (with name & description),
 return a JSON array of up to 10 product IDs, ordered by relevance.
-Output only the array, no extra text.
+Only return the product IDs that are most relevant to the query.
     `;
 
     const userContent = JSON.stringify(productData, null, 4);
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.0-flash",
+      model: "gemini-2.5-flash",
       contents: userContent,
-      config: { systemInstruction }
+      config: { 
+        systemInstruction, 
+        temperature: 0.1,
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.STRING,
+            description: "Product ID"
+          }
+        }
+      },
     });
 
     const text = response.text.trim();
+    console.log("Gemini Reordered IDs text:", text);
     const ids = JSON.parse(text);
     if (!Array.isArray(ids)) throw new Error("Unexpected format");
     return ids;
@@ -612,96 +625,57 @@ async function reorderImagesWithGPT(
      (product) => !alreadyDelivered.includes(product._id.toString())
    );
 
-   const productData = combinedResults.map(product => ({
+   const productData = filteredResults.map(product => ({
      id: product._id.toString(),
      name: product.name,
      image: product.image,
      description: product.description1,
    }));
 
-   const imagesToSend = combinedResults.map(product => ({
-     imageUrl: product.image || "No image"
-   }));
-
-
-   const messages = [
-     {
-       role: "user",
-       parts: [
-         {
-           text: `You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given "${translatedQuery}", from an e-commerce site, along with a provided list of products (each including only an image), and return the **most relevant product IDs** based on how well the product images match the query.
+   const systemInstruction = `
+You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given "${translatedQuery}", from an e-commerce site, along with a provided list of products (each including name, image, and description), and return the **most relevant product IDs** based on how well the product images and descriptions match the query.
 
 ### Key Instructions:
 1. Ignore pricing details (already filtered).
-2. Output must be a JSON array of IDs, with no extra text or formatting.
-3. Rank strictly according to the product images.
-4. Return at least 5 but no more than 8 product IDs.
-5. Answer ONLY with the Array, do not add any other text beside it- NEVER!
+2. Rank strictly according to the product images and descriptions.
+3. Return at least 5 but no more than 8 product IDs.
+4. Only return product IDs that are most relevant to the query.
+   `;
 
-example: [ "id1", "id2", "id3", "id4" ]
+   const userContent = JSON.stringify(productData, null, 4);
 
-`,
-         },
-         {
-             text:  JSON.stringify(productData, null, 4),
-           },
-         {
-           text: JSON.stringify(
-             {
-               type: "image_url",
-               images: imagesToSend,
-             },
-             null,
-             4
-           ),
-         },
-         ]
+   const response = await genAI.models.generateContent({
+     model: "gemini-2.5-flash",
+     contents: userContent,
+     config: { 
+       systemInstruction, 
+       temperature: 0.1,
+       thinkingConfig: {
+         thinkingBudget: 0,
+       },
+       responseMimeType: "application/json",
+       responseSchema: {
+         type: Type.ARRAY,
+         items: {
+           type: Type.STRING,
+           description: "Product ID"
+         }
+       }
      },
-   ];
-
- 
-
-
-
-   const geminiResponse = await model.generateContent({
-     contents: messages,
    });
 
-
-     const responseText = geminiResponse.response.text()
-     console.log("Gemini Reordered IDs text:", responseText);
- 
-
+   const responseText = response.text.trim();
+   console.log("Gemini Reordered IDs text:", responseText);
 
    if (!responseText) {
      throw new Error("No content returned from Gemini");
    }
 
-  // If you want usage details:
-   // console.log(geminiResponse.usage);
-
-
-   const cleanedText = responseText
-   .trim()
-   .replace(/[^,\[\]"'\w]/g, "")
-   .replace(/json/gi, "");
-
-
-   try {
-     const reorderedIds = JSON.parse(cleanedText);
-     if (!Array.isArray(reorderedIds)) {
-       throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
-     }
-     return reorderedIds;
-   } catch (parseError) {
-     console.error(
-       "Failed to parse Gemini response:",
-       parseError,
-       "Cleaned Text:",
-       cleanedText
-     );
-     throw new Error("Response from Gemini could not be parsed as a valid array.");
+   const reorderedIds = JSON.parse(responseText);
+   if (!Array.isArray(reorderedIds)) {
+     throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
    }
+   return reorderedIds;
  } catch (error) {
    console.error("Error reordering results with Gemini:", error);
    throw error;
