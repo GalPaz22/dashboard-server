@@ -466,7 +466,7 @@ Instructions:
 2. Remove any extraneous or stop words.
 3. Output only the essential keywords and phrases that will best represent the query context 
 (remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
-Pay attention to the word שכלי or שאבלי (which mean chablis).`
+Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.`
         },
         { role: "user", content: query },
       ],
