@@ -511,7 +511,7 @@ async function getQueryEmbedding(cleanedText) {
 async function extractFiltersFromQuery(query, categories, types, example) {
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4.1-mini",
+      model: "gpt-4.1",
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: `Extract the following filters from the query if they exist:
@@ -519,6 +519,7 @@ async function extractFiltersFromQuery(query, categories, types, example) {
                   2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
                   3. maxPrice (maximum price, indicated by the word 'עד').
                   4. category - one of the following Hebrew words: ${categories}. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה')- in case you can't find the relevant category, do not bring up by yourself.
+                  **if you find more than one category, return them as an array**.
                   5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query.
                 Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
                ${example}.` },
