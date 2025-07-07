@@ -454,7 +454,8 @@ async function translateQuery(query, context) {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
     const response = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4.1",
+      temperature: 0.1,
       messages: [
         {
           role: "system",
