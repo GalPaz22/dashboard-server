@@ -723,7 +723,7 @@ async function getProductsByIds(ids, dbName, collectionName) {
 
 // Function to detect if query is complex enough for LLM reordering
 function isComplexQuery(query, filters) {
-  // Only skip LLM for very simple, exact category matches
+  // Only skip LLM for exact category matches (no additional descriptors)
   if (filters.category && !filters.price && !filters.minPrice && !filters.maxPrice && !filters.type) {
     // Check if query is EXACTLY just the category (no additional descriptors)
     const queryWords = query.toLowerCase().trim().split(/\s+/);
@@ -740,42 +740,8 @@ function isComplexQuery(query, filters) {
     }
   }
   
-  // If we get here, the query has additional context beyond just category
-  // Complex query indicators (origin, quality, pairing, etc.)
-  const complexityIndicators = [
-    // Origin/geographic indicators
-    /italian|french|spanish|german|australian|american|israeli|california|bordeaux|tuscany|rioja/i,
-    // Quality/style descriptors
-    /smooth|bold|light|heavy|dry|sweet|crisp|rich|elegant|premium|cheap|expensive|quality/i,
-    // Contextual/pairing words
-    /match|pair|go with|complement|suitable for|best for|perfect for|ideal for/i,
-    // Occasion/usage context
-    /dinner|party|celebration|event|wedding|holiday|meal|food|cheese|dessert/i,
-    // Comparative/recommendation words
-    /better|best|top|recommend|suggestion|similar|like|compare/i,
-    // Multiple conditions
-    /and.*with|but.*also|or.*maybe|either.*or/i,
-    // Question structures
-    /what.*best|which.*should|how.*choose|can you.*recommend/i,
-    // Hebrew origins/descriptors
-    /איטלקי|צרפתי|ספרדי|גרמני|אוסטרלי|אמריקני|ישראלי|קליפורני/i,
-    // Hebrew quality descriptors
-    /חלק|מורכב|קל|כבד|יבש|מתוק|חד|עשיר|אלגנטי|איכותי|זול|יקר/i
-  ];
-  
-  // Check for complexity indicators
-  const hasComplexIndicators = complexityIndicators.some(pattern => pattern.test(query));
-  
-  // Long queries are usually more complex
-  const isLongQuery = query.split(/\s+/).length > 5;
-  
-  // Multiple filters suggest complexity
-  const hasMultipleFilters = Object.keys(filters).length > 1;
-  
-  // Hebrew-specific complexity (multiple conditions)
-  const hasHebrewComplexity = /ו.*ש|עם.*ש|בשביל.*ש|ל.*ש/i.test(query);
-  
-  return hasComplexIndicators || isLongQuery || hasMultipleFilters || hasHebrewComplexity;
+  // For everything else, use LLM reordering
+  return true;
 }
 
 
