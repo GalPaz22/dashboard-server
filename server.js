@@ -577,7 +577,7 @@ async function reorderResultsWithGPT(
     const systemInstruction = `
 You are an advanced AI model specializing in e-commerce queries.
 Your task: given the user query "${query}" and this list of products (with name & description),
-return a JSON array of up to 10 product IDs, ordered by relevance.
+return a JSON array of product IDs, ordered by relevance.
 Only return the product IDs that are most relevant to the query.
     `;
 
