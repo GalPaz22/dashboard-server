@@ -721,6 +721,50 @@ async function getProductsByIds(ids, dbName, collectionName) {
   }
 }
 
+// Function to detect if query is complex enough for LLM reordering
+function isComplexQuery(query, filters) {
+  // Simple category-only queries don't need LLM reordering
+  if (filters.category && !filters.price && !filters.minPrice && !filters.maxPrice && !filters.type) {
+    // Check if query is just mentioning the category
+    const queryWords = query.toLowerCase().split(/\s+/);
+    if (queryWords.length <= 3) {
+      return false;
+    }
+  }
+  
+  // Complex query indicators
+  const complexityIndicators = [
+    // Contextual/pairing words
+    /match|pair|go with|complement|suitable for|best for|perfect for|ideal for/i,
+    // Occasion/usage context
+    /dinner|party|celebration|event|wedding|holiday|meal|food|cheese|dessert/i,
+    // Descriptive/preference words
+    /smooth|bold|light|heavy|dry|sweet|crisp|rich|elegant|premium|cheap|expensive/i,
+    // Comparative/quality words
+    /better|best|top|quality|recommend|suggestion|similar|like|compare/i,
+    // Origin/region specificity with context
+    /from.*that|.*from.*for|region.*with|area.*good/i,
+    // Multiple conditions
+    /and.*with|but.*also|or.*maybe|either.*or/i,
+    // Question structures
+    /what.*best|which.*should|how.*choose|can you.*recommend/i
+  ];
+  
+  // Check for complexity indicators
+  const hasComplexIndicators = complexityIndicators.some(pattern => pattern.test(query));
+  
+  // Long queries are usually more complex
+  const isLongQuery = query.split(/\s+/).length > 8;
+  
+  // Multiple filters suggest complexity
+  const hasMultipleFilters = Object.keys(filters).length > 1;
+  
+  // Hebrew-specific complexity (multiple conditions)
+  const hasHebrewComplexity = /ו.*ש|עם.*ש|בשביל.*ש|ל.*ש/i.test(query);
+  
+  return hasComplexIndicators || isLongQuery || hasMultipleFilters || hasHebrewComplexity;
+}
+
 
 app.post("/search", async (req, res) => {
   const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
@@ -808,11 +852,19 @@ app.post("/search", async (req, res) => {
       })
       .sort((a, b) => b.rrf_score - a.rrf_score);
     let reorderedIds;
-    try {
-      const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-      reorderedIds = await reorderFn(combinedResults, translatedQuery, query);
-    } catch (error) {
-      console.error("LLM reordering failed, falling back to default ordering:", error);
+    
+    // Only apply LLM reordering for complex queries
+    if (isComplexQuery(query, filters)) {
+      console.log("Complex query detected - applying LLM reordering");
+      try {
+        const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+        reorderedIds = await reorderFn(combinedResults, translatedQuery, query);
+      } catch (error) {
+        console.error("LLM reordering failed, falling back to default ordering:", error);
+        reorderedIds = combinedResults.map((result) => result._id.toString());
+      }
+    } else {
+      console.log("Simple query detected - using RRF ordering without LLM");
       reorderedIds = combinedResults.map((result) => result._id.toString());
     }
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
