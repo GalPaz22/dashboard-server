@@ -380,7 +380,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
   }
   
   // Add limit at the end
-  pipeline.push({ $limit: 5 });
+  pipeline.push({ $limit: 50 });
   
   // Log the pipeline for debugging
   console.log("Fuzzy search pipeline:", JSON.stringify(pipeline));
@@ -423,7 +423,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
         path: "embedding",
         queryVector: queryEmbedding,
         exact: true,
-        limit: 16,
+        limit: 50,
         ...(Object.keys(filter).length && { filter }),
       },
     },
@@ -564,7 +564,11 @@ async function reorderResultsWithGPT(
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
     );
-    const productData = filtered.map((p) => ({
+    
+    // Only consider the first 25 results for LLM reordering
+    const limitedResults = filtered.slice(0, 25);
+    
+    const productData = limitedResults.map((p) => ({
       id: p._id.toString(),
       name: p.name || "No name",
       description: p.description1 || "No description",
@@ -586,7 +590,7 @@ Only return the product IDs that are most relevant to the query.
         systemInstruction, 
         temperature: 0.1,
         thinkingConfig: {
-          thinkingBudget: 0,
+          thinkingBudget: 0, // Disables thinking
         },
         responseMimeType: "application/json",
         responseSchema: {
@@ -627,7 +631,10 @@ async function reorderImagesWithGPT(
      (product) => !alreadyDelivered.includes(product._id.toString())
    );
 
-   const productData = filteredResults.map(product => ({
+   // Only consider the first 25 results for LLM reordering
+   const limitedResults = filteredResults.slice(0, 25);
+
+   const productData = limitedResults.map(product => ({
      id: product._id.toString(),
      name: product.name,
      image: product.image,
@@ -653,7 +660,7 @@ You are an advanced AI model specializing in e-commerce queries. Your role is to
        systemInstruction, 
        temperature: 0.1,
        thinkingConfig: {
-         thinkingBudget: 0,
+         thinkingBudget: 0, // Disables thinking
        },
        responseMimeType: "application/json",
        responseSchema: {
