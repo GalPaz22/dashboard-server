@@ -565,8 +565,8 @@ async function reorderResultsWithGPT(
       (p) => !alreadyDelivered.includes(p._id.toString())
     );
     
-    // Only consider the first 25 results for LLM reordering
-    const limitedResults = filtered.slice(0, 25);
+    // Only consider the first 50 results for LLM reordering
+    const limitedResults = filtered.slice(0, 50);
     
     const productData = limitedResults.map((p) => ({
       id: p._id.toString(),
@@ -631,8 +631,8 @@ async function reorderImagesWithGPT(
      (product) => !alreadyDelivered.includes(product._id.toString())
    );
 
-   // Only consider the first 25 results for LLM reordering
-   const limitedResults = filteredResults.slice(0, 25);
+   // Only consider the first 50 results for LLM reordering
+   const limitedResults = filteredResults.slice(0, 50);
 
    const productData = limitedResults.map(product => ({
      id: product._id.toString(),
