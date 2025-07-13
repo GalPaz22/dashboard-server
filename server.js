@@ -525,7 +525,7 @@ async function extractFiltersFromQuery(query, categories, types, example) {
                ${example}.` },
         { role: "user", content: query },
       ],
-      temperature: 0.5,
+      temperature: 0.1,
     });
 
     const content = response.choices[0]?.message?.content;
@@ -634,30 +634,62 @@ async function reorderImagesWithGPT(
    // Only consider the first 50 results for LLM reordering
    const limitedResults = filteredResults.slice(0, 50);
 
-   const productData = limitedResults.map(product => ({
-     id: product._id.toString(),
-     name: product.name,
-     image: product.image,
-     description: product.description1,
-   }));
+   // Filter products that have images
+   const productsWithImages = limitedResults.filter(product => product.image && product.image.trim() !== '');
 
-   const systemInstruction = `
-You are an advanced AI model specializing in e-commerce queries. Your role is to analyze a given "${translatedQuery}", from an e-commerce site, along with a provided list of products (each including name, image, and description), and return the **most relevant product IDs** based on how well the product images and descriptions match the query.
+   if (productsWithImages.length === 0) {
+     console.log("No products with images found, falling back to text-based reordering");
+     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered);
+   }
 
-### Key Instructions:
-1. Ignore pricing details (already filtered).
-2. Rank strictly according to the product images and descriptions.
-3. Return at least 5 but no more than 8 product IDs.
-4. Only return product IDs that are most relevant to the query.
-   `;
+   // Prepare content array for Gemini API
+   const contents = [];
+   
+   // Add the query text first
+   contents.push({ text: `You are analyzing products for the query: "${translatedQuery}" (original: "${query}")` });
+   
+   // Add products with images
+   for (let i = 0; i < Math.min(productsWithImages.length, 20); i++) { // Limit to 20 products to avoid token limits
+     const product = productsWithImages[i];
+     
+     try {
+       // Fetch image and convert to base64
+       const response = await fetch(product.image);
+       if (response.ok) {
+         const imageArrayBuffer = await response.arrayBuffer();
+         const base64ImageData = Buffer.from(imageArrayBuffer).toString('base64');
+         
+         // Add image to contents
+         contents.push({
+           inlineData: {
+             mimeType: 'image/jpeg',
+             data: base64ImageData,
+           },
+         });
+         
+         // Add product details
+         contents.push({ 
+           text: `Product ID: ${product._id.toString()}
+Name: ${product.name || "No name"}
+Description: ${product.description1 || "No description"}
+---` 
+         });
+       }
+     } catch (imageError) {
+       console.error(`Failed to fetch image for product ${product._id}:`, imageError);
+       // Skip this product if image fails
+     }
+   }
 
-   const userContent = JSON.stringify(productData, null, 4);
+   // Add final instruction
+   contents.push({ 
+     text: `Based on the query "${translatedQuery}" and the product images and descriptions shown above, return a JSON array of the most relevant product IDs, ordered by relevance. Focus primarily on how well the product images match the query context. Return 5-8 of the most relevant product IDs only.` 
+   });
 
    const response = await genAI.models.generateContent({
      model: "gemini-2.5-flash",
-     contents: userContent,
+     contents: contents,
      config: { 
-       systemInstruction, 
        temperature: 0.1,
        thinkingConfig: {
          thinkingBudget: 0, // Disables thinking
@@ -674,7 +706,7 @@ You are an advanced AI model specializing in e-commerce queries. Your role is to
    });
 
    const responseText = response.text.trim();
-   console.log("Gemini Reordered IDs text:", responseText);
+   console.log("Gemini Image-based Reordered IDs:", responseText);
 
    if (!responseText) {
      throw new Error("No content returned from Gemini");
@@ -686,8 +718,9 @@ You are an advanced AI model specializing in e-commerce queries. Your role is to
    }
    return reorderedIds;
  } catch (error) {
-   console.error("Error reordering results with Gemini:", error);
-   throw error;
+   console.error("Error reordering results with Gemini image analysis:", error);
+   console.log("Falling back to text-based reordering");
+   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered);
  }
 }
 
