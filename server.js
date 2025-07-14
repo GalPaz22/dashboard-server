@@ -584,7 +584,7 @@ Only return the product IDs that are most relevant to the query.
     const userContent = JSON.stringify(productData, null, 4);
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.5-flash-lite-preview-06-17",
       contents: userContent,
       config: { 
         systemInstruction, 
@@ -687,7 +687,7 @@ Description: ${product.description1 || "No description"}
    });
 
    const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash",
+     model: "gemini-2.5-flash-lite-preview-06-17",
      contents: contents,
      config: { 
        temperature: 0.1,
