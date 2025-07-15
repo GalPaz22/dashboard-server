@@ -380,7 +380,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
   }
   
   // Add limit at the end
-  pipeline.push({ $limit: 50 });
+  pipeline.push({ $limit: 1000 });
   
   // Log the pipeline for debugging
   console.log("Fuzzy search pipeline:", JSON.stringify(pipeline));
@@ -423,7 +423,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
         path: "embedding",
         queryVector: queryEmbedding,
         exact: true,
-        limit: 50,
+        limit: 30,
         ...(Object.keys(filter).length && { filter }),
       },
     },
@@ -1046,6 +1046,8 @@ app.post("/search-to-cart", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+
 
 const PORT = process.env.PORT || 8000;
 app.listen(PORT, () => {
