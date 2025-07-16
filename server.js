@@ -577,9 +577,9 @@ async function reorderResultsWithGPT(
     const systemInstruction = `
 You are an advanced AI model specializing in e-commerce queries.
 Your task: given the user query "${query}" and this list of products (with name & description),
-return a JSON array of objects. Each object must contain a product ID ('id') and a brief, one-sentence explanation ('explanation') of why this product is relevant.
-The explanation MUST be in the same language as the user's original query.
-Order the products by relevance. Only return the most relevant products.`;
+return a JSON array of product IDs, ordered by relevance.
+Only return the product IDs that are most relevant to the query.
+    `;
 
     const userContent = JSON.stringify(productData, null, 4);
 
@@ -596,28 +596,18 @@ Order the products by relevance. Only return the most relevant products.`;
         responseSchema: {
           type: Type.ARRAY,
           items: {
-            type: Type.OBJECT,
-            properties: {
-              id: {
-                type: Type.STRING,
-                description: "Product ID",
-              },
-              explanation: {
-                type: Type.STRING,
-                description:
-                  "Brief explanation of product relevance for the query, in the query's language.",
-              },
-            },
-          },
-        },
+            type: Type.STRING,
+            description: "Product ID"
+          }
+        }
       },
     });
 
     const text = response.text.trim();
-    console.log("Gemini Reordered data with explanations:", text);
-    const reorderedData = JSON.parse(text);
-    if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
-    return reorderedData;
+    console.log("Gemini Reordered IDs text:", text);
+    const ids = JSON.parse(text);
+    if (!Array.isArray(ids)) throw new Error("Unexpected format");
+    return ids;
   } catch (error) {
     console.error("Error reordering results with Gemini:", error);
     throw error;
@@ -693,7 +683,7 @@ Description: ${product.description1 || "No description"}
 
    // Add final instruction
    contents.push({ 
-     text: `Based on the query "${translatedQuery}" (original: "${query}") and the product images and descriptions shown above, return a JSON array of objects. Each object must contain a product ID ('id') and a brief, one-sentence explanation ('explanation') of why this product is relevant to the query, focusing primarily on how well the product images match the query context. The explanation MUST be in the same language as the original user query. Return 5-8 of the most relevant product IDs only.` 
+     text: `Based on the query "${translatedQuery}" and the product images and descriptions shown above, return a JSON array of the most relevant product IDs, ordered by relevance. Focus primarily on how well the product images match the query context. Return 5-8 of the most relevant product IDs only.` 
    });
 
    const response = await genAI.models.generateContent({
@@ -708,35 +698,25 @@ Description: ${product.description1 || "No description"}
        responseSchema: {
          type: Type.ARRAY,
          items: {
-           type: Type.OBJECT,
-           properties: {
-             id: {
-               type: Type.STRING,
-               description: "Product ID",
-             },
-             explanation: {
-               type: Type.STRING,
-               description:
-                 "Brief explanation of product relevance for the query, in the query's language.",
-             },
-           },
-         },
-       },
+           type: Type.STRING,
+           description: "Product ID"
+         }
+       }
      },
    });
 
    const responseText = response.text.trim();
-   console.log("Gemini Image-based Reordered data:", responseText);
+   console.log("Gemini Image-based Reordered IDs:", responseText);
 
    if (!responseText) {
      throw new Error("No content returned from Gemini");
    }
 
-   const reorderedData = JSON.parse(responseText);
-   if (!Array.isArray(reorderedData)) {
-     throw new Error("Invalid response format from Gemini. Expected an array of objects.");
+   const reorderedIds = JSON.parse(responseText);
+   if (!Array.isArray(reorderedIds)) {
+     throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
    }
-   return reorderedData;
+   return reorderedIds;
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
    console.log("Falling back to text-based reordering");
@@ -883,24 +863,22 @@ app.post("/search", async (req, res) => {
         return { ...doc, rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT) };
       })
       .sort((a, b) => b.rrf_score - a.rrf_score);
-    let reorderedData;
+    let reorderedIds;
     
     // Only apply LLM reordering for complex queries
     if (isComplexQuery(query, filters)) {
       console.log("Complex query detected - applying LLM reordering");
       try {
         const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-        reorderedData = await reorderFn(combinedResults, translatedQuery, query);
+        reorderedIds = await reorderFn(combinedResults, translatedQuery, query);
       } catch (error) {
         console.error("LLM reordering failed, falling back to default ordering:", error);
-        reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+        reorderedIds = combinedResults.map((result) => result._id.toString());
       }
     } else {
       console.log("Simple query detected - using RRF ordering without LLM");
-      reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+      reorderedIds = combinedResults.map((result) => result._id.toString());
     }
-    const reorderedIds = reorderedData.map(item => item.id);
-    const explanationsMap = new Map(reorderedData.map(item => [item.id, item.explanation]));
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
     const reorderedProductIds = new Set(reorderedIds);
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
@@ -917,7 +895,6 @@ app.post("/search", async (req, res) => {
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
-        explanation: explanationsMap.get(product._id.toString()) || null
        
 
       })),
@@ -932,7 +909,6 @@ app.post("/search", async (req, res) => {
         specialSales: r.specialSales,
         ItemID: r.ItemID,
         highlight: false,
-        explanation: null
    
       })),
     ];
