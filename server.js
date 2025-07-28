@@ -62,9 +62,15 @@ app.post("/queries", async (req, res) => {
    STORE CONFIG LOOK-UP – one place, reused by all routes
 \* =========================================================== */
 
+// ...existing code...
+
+// Remove getMongoClient and cachedPromise/cachedClient logic
+// Only use connectToMongoDB everywhere
+
+// In getStoreConfigByApiKey:
 async function getStoreConfigByApiKey(apiKey) {
   if (!apiKey) return null;
-  const client = await connectToMongoDB(mongodbUri);
+  const client = await connectToMongoDB(mongodbUri); // always use this
   const coreDb = client.db("users");
   const userDoc = await coreDb.collection("users").findOne({ apiKey });
   if (!userDoc) return null;
@@ -78,6 +84,7 @@ async function getStoreConfigByApiKey(apiKey) {
   };
 }
 
+// ...existing code...
 async function authenticate(req, res, next) {
   try {
     const apiKey = req.get("X-API-Key");
@@ -319,14 +326,12 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
   });
 
   // Now handle the other filters - create a separate match stage for price
-// ...existing code...
-  // Now handle the other filters - create a separate match stage for price
   if (filters && Object.keys(filters).length > 0) {
     // Type filter: support string or array without using regex
-    if (filters.type) {
+    if (filters.type && (!Array.isArray(filters.type) || filters.type.length > 0)) {
       pipeline.push({
         $match: {
-          category: Array.isArray(filters.type) 
+          type: Array.isArray(filters.type) 
             ? { $in: filters.type } 
             : filters.type
         }
@@ -397,7 +402,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
       : filters.category;
   }
 
-  if (filters.type) {
+  if (filters.type && (!Array.isArray(filters.type) || filters.type.length > 0)) {
     filter.type = Array.isArray(filters.type)
       ? { $in: filters.type }
       : filters.type;
@@ -454,7 +459,7 @@ async function translateQuery(query, context) {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
     const response = await openai.chat.completions.create({
-      model: "gpt-4.1",
+      model: "gpt-4o",
       temperature: 0.1,
       messages: [
         {
@@ -511,7 +516,7 @@ async function getQueryEmbedding(cleanedText) {
 async function extractFiltersFromQuery(query, categories, types, example) {
   try {
     const response = await openai.chat.completions.create({
-      model: "gpt-4.1",
+      model: "gpt-4o",
       response_format: { type: "json_object" },
       messages: [
         { role: "system", content: `Extract the following filters from the query if they exist:
@@ -520,7 +525,7 @@ async function extractFiltersFromQuery(query, categories, types, example) {
                   3. maxPrice (maximum price, indicated by the word 'עד').
                   4. category - one of the following Hebrew words: ${categories}. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה')- in case you can't find the relevant category, do not bring up by yourself.
                   **if you find more than one category, return them as an array**.
-                  5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query.
+                  5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query. **Important**: If a type is preceded by a word indicating negation (like 'לא', 'בלי', or 'ללא'), you must NOT extract it.
                 Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
                ${example}.` },
         { role: "user", content: query },
@@ -565,21 +570,24 @@ async function reorderResultsWithGPT(
       (p) => !alreadyDelivered.includes(p._id.toString())
     );
     
-    // Only consider the first 50 results for LLM reordering
-    const limitedResults = filtered.slice(0, 25);
+    // Only consider the first 20 results for LLM reordering
+    const limitedResults = filtered.slice(0, 20);
     
     const productData = limitedResults.map((p) => ({
       id: p._id.toString(),
       name: p.name || "No name",
       description: p.description1 || "No description",
+      price: p.price || "No price",
     }));
 
     const systemInstruction = `
-You are an advanced AI model specializing in e-commerce queries.
-Your task: given the user query "${query}" and this list of products (with name & description),
-return a JSON array of product IDs, ordered by relevance.
-Only return the product IDs that are most relevant to the query.
-    `;
+You are an advanced AI model for e-commerce search.
+Your task is to re-rank the provided products based on the user query: "${query}".
+Return a JSON array of the top 1 to 8 most relevant products.
+Each object in the array MUST contain:
+1. 'id': The product ID.
+2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query. This is a mandatory field. Do not omit it.
+Do not return more than 8 products.`;
 
     const userContent = JSON.stringify(productData, null, 4);
 
@@ -596,18 +604,29 @@ Only return the product IDs that are most relevant to the query.
         responseSchema: {
           type: Type.ARRAY,
           items: {
-            type: Type.STRING,
-            description: "Product ID"
-          }
-        }
+            type: Type.OBJECT,
+            properties: {
+              id: {
+                type: Type.STRING,
+                description: "Product ID",
+              },
+              explanation: {
+                type: Type.STRING,
+                description:
+                  "A brief, one-sentence explanation of product relevance for the query, in the query's language. Required for each of the 1-8 returned products.",
+              },
+            },
+            required: ["id", "explanation"],
+          },
+        },
       },
     });
 
     const text = response.text.trim();
-    console.log("Gemini Reordered IDs text:", text);
-    const ids = JSON.parse(text);
-    if (!Array.isArray(ids)) throw new Error("Unexpected format");
-    return ids;
+    console.log("Gemini Reordered data with explanations:", text);
+    const reorderedData = JSON.parse(text);
+    if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
+    return reorderedData;
   } catch (error) {
     console.error("Error reordering results with Gemini:", error);
     throw error;
@@ -672,6 +691,8 @@ async function reorderImagesWithGPT(
            text: `Product ID: ${product._id.toString()}
 Name: ${product.name || "No name"}
 Description: ${product.description1 || "No description"}
+Price: ${product.price || "No price"}
+
 ---` 
          });
        }
@@ -683,7 +704,12 @@ Description: ${product.description1 || "No description"}
 
    // Add final instruction
    contents.push({ 
-     text: `Based on the query "${translatedQuery}" and the product images and descriptions shown above, return a JSON array of the most relevant product IDs, ordered by relevance. Focus primarily on how well the product images match the query context. Return 5-8 of the most relevant product IDs only.` 
+     text: `Based on the user query "${query}" and the product images with descriptions, return a JSON array of the top 1 to 8 most relevant products. Focus on visual relevance from the images.
+For each product, provide:
+1. 'id': The product ID.
+2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query.
+Be concise and do not add phrases like 'this is relevant because...'.
+Do not return more than 8 products.` 
    });
 
    const response = await genAI.models.generateContent({
@@ -698,25 +724,36 @@ Description: ${product.description1 || "No description"}
        responseSchema: {
          type: Type.ARRAY,
          items: {
-           type: Type.STRING,
-           description: "Product ID"
-         }
-       }
+           type: Type.OBJECT,
+           properties: {
+             id: {
+               type: Type.STRING,
+               description: "Product ID",
+             },
+             explanation: {
+               type: Type.STRING,
+               description:
+                 "A brief, concise explanation of the product's visual relevance to the query, in the query's language. Required for each of the 1-8 returned products.",
+             },
+           },
+            required: ["id", "explanation"],
+         },
+       },
      },
    });
 
    const responseText = response.text.trim();
-   console.log("Gemini Image-based Reordered IDs:", responseText);
+   console.log("Gemini Image-based Reordered data:", responseText);
 
    if (!responseText) {
      throw new Error("No content returned from Gemini");
    }
 
-   const reorderedIds = JSON.parse(responseText);
-   if (!Array.isArray(reorderedIds)) {
-     throw new Error("Invalid response format from Gemini. Expected an array of IDs.");
+   const reorderedData = JSON.parse(responseText);
+   if (!Array.isArray(reorderedData)) {
+     throw new Error("Invalid response format from Gemini. Expected an array of objects.");
    }
-   return reorderedIds;
+   return reorderedData;
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
    console.log("Falling back to text-based reordering");
@@ -794,9 +831,18 @@ app.post("/search", async (req, res) => {
     console.log("Connected to database:", dbName);
     const collection = db.collection("products");
     const querycollection = db.collection("queries");
-    const translatedQuery = await translateQuery(query, context);
+
+    // Parallelize translation and filter extraction
+    const [translatedQuery, llmFilters] = await Promise.all([
+      translateQuery(query, context),
+      categories
+        ? extractFiltersFromQuery(query, categories, types, example)
+        : Promise.resolve({}),
+    ]);
+
     if (!translatedQuery)
       return res.status(500).json({ error: "Error translating query" });
+
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     console.log("Cleaned query for embedding:", cleanedText);
     let filters = {};
@@ -806,11 +852,12 @@ app.post("/search", async (req, res) => {
         console.log("Categories matched via regex:", regexCategories);
         filters.category = regexCategories;
       }
-      const llmFilters = await extractFiltersFromQuery(query, categories, types, example);
       console.log("Filters extracted via LLM:", llmFilters);
       if (llmFilters.category) {
         if (filters.category) {
-          filters.category = [...new Set([...filters.category, ...llmFilters.category])];
+          filters.category = [
+            ...new Set([...filters.category, ...llmFilters.category]),
+          ];
         } else {
           filters.category = llmFilters.category;
         }
@@ -830,9 +877,7 @@ app.post("/search", async (req, res) => {
     }
     console.log("Final filters:", filters);
     logQuery(querycollection, query, filters);
-    const queryEmbedding = await getQueryEmbedding(cleanedText);
-    if (!queryEmbedding)
-      return res.status(500).json({ error: "Error generating query embedding" });
+
     const FUZZY_WEIGHT = 1;
     const VECTOR_WEIGHT = 1;
     const RRF_CONSTANT = 60;
@@ -844,10 +889,30 @@ app.post("/search", async (req, res) => {
     }
     const cleanedHebrewText = removeWordsFromQuery(query, noHebrewWord);
     console.log("Cleaned query for fuzzy search:", cleanedHebrewText);
-    const fuzzySearchPipeline = buildFuzzySearchPipeline(cleanedHebrewText, query, filters);
-    const fuzzyResults = await collection.aggregate(fuzzySearchPipeline).toArray();
-    const vectorSearchPipeline = buildVectorSearchPipeline(queryEmbedding, filters);
-    const vectorResults = await collection.aggregate(vectorSearchPipeline).toArray();
+    const fuzzySearchPipeline = buildFuzzySearchPipeline(
+      cleanedHebrewText,
+      query,
+      filters
+    );
+
+    // Parallelize embedding generation and fuzzy search
+    const [queryEmbedding, fuzzyResults] = await Promise.all([
+      getQueryEmbedding(cleanedText),
+      collection.aggregate(fuzzySearchPipeline).toArray(),
+    ]);
+
+    if (!queryEmbedding)
+      return res
+        .status(500)
+        .json({ error: "Error generating query embedding" });
+
+    const vectorSearchPipeline = buildVectorSearchPipeline(
+      queryEmbedding,
+      filters
+    );
+    const vectorResults = await collection
+      .aggregate(vectorSearchPipeline)
+      .toArray();
     const documentRanks = new Map();
     fuzzyResults.forEach((doc, index) => {
       documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
@@ -863,22 +928,24 @@ app.post("/search", async (req, res) => {
         return { ...doc, rrf_score: calculateRRFScore(ranks.fuzzyRank, ranks.vectorRank, VECTOR_WEIGHT) };
       })
       .sort((a, b) => b.rrf_score - a.rrf_score);
-    let reorderedIds;
+    let reorderedData;
     
     // Only apply LLM reordering for complex queries
     if (isComplexQuery(query, filters)) {
       console.log("Complex query detected - applying LLM reordering");
       try {
         const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-        reorderedIds = await reorderFn(combinedResults, translatedQuery, query);
+        reorderedData = await reorderFn(combinedResults, translatedQuery, query);
       } catch (error) {
         console.error("LLM reordering failed, falling back to default ordering:", error);
-        reorderedIds = combinedResults.map((result) => result._id.toString());
+        reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
       }
     } else {
       console.log("Simple query detected - using RRF ordering without LLM");
-      reorderedIds = combinedResults.map((result) => result._id.toString());
+      reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
     }
+    const reorderedIds = reorderedData.map(item => item.id);
+    const explanationsMap = new Map(reorderedData.map(item => [item.id, item.explanation]));
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
     const reorderedProductIds = new Set(reorderedIds);
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
@@ -895,6 +962,7 @@ app.post("/search", async (req, res) => {
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
+        explanation: explanationsMap.get(product._id.toString()) || null
        
 
       })),
@@ -909,6 +977,7 @@ app.post("/search", async (req, res) => {
         specialSales: r.specialSales,
         ItemID: r.ItemID,
         highlight: false,
+        explanation: null
    
       })),
     ];
