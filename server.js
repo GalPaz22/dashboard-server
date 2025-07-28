@@ -709,7 +709,9 @@ For each product, provide:
 1. 'id': The product ID.
 2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query.
 Be concise and do not add phrases like 'this is relevant because...'.
-Do not return more than 8 products.` 
+Do not return more than 8 products
+3. answer with the query language ALWAYS.` 
+
    });
 
    const response = await genAI.models.generateContent({
