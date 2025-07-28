@@ -592,7 +592,7 @@ Do not return more than 8 products.`;
     const userContent = JSON.stringify(productData, null, 4);
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.0-flash",
       contents: userContent,
       config: { 
         systemInstruction, 
@@ -713,7 +713,7 @@ Do not return more than 8 products.`
    });
 
    const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash",
+     model: "gemini-2.0-flash",
      contents: contents,
      config: { 
        temperature: 0.1,
