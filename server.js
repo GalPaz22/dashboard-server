@@ -713,7 +713,7 @@ Do not return more than 8 products.`
    });
 
    const response = await genAI.models.generateContent({
-     model: "gemini-2.0-flash",
+     model: "gemini-2.0-flash-lite",
      contents: contents,
      config: { 
        temperature: 0.1,
