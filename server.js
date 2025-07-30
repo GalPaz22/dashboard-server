@@ -583,7 +583,7 @@ async function reorderResultsWithGPT(
     const systemInstruction = `
 You are an advanced AI model for e-commerce search.
 Your task is to re-rank the provided products based on the user query: "${query}".
-Return a JSON array of the top 1 to 8 most relevant products.
+Return a JSON array of the top 1 to 4 most relevant products.
 Each object in the array MUST contain:
 1. 'id': The product ID.
 2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query. This is a mandatory field. Do not omit it.
@@ -613,7 +613,7 @@ Do not return more than 8 products.`;
               explanation: {
                 type: Type.STRING,
                 description:
-                  "A brief, one-sentence explanation of product relevance for the query, in the query's language. Required for each of the 1-8 returned products.",
+                  "A brief, one-sentence explanation of product relevance for the query, in the query's language. Required for each of the 1-4 returned products.",
               },
             },
             required: ["id", "explanation"],
@@ -709,7 +709,7 @@ For each product, provide:
 1. 'id': The product ID.
 2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query.
 Be concise and do not add phrases like 'this is relevant because...'.
-Do not return more than 8 products
+Do not return more than 4 products
 3. answer with the query language ALWAYS.` 
 
    });
@@ -735,7 +735,7 @@ Do not return more than 8 products
              explanation: {
                type: Type.STRING,
                description:
-                 "A brief, concise explanation of the product's visual relevance to the query, in the query's language. Required for each of the 1-8 returned products.",
+                 "A brief, concise explanation of the product's visual relevance to the query, in the query's language. Required for each of the 1-4 returned products.",
              },
            },
             required: ["id", "explanation"],
