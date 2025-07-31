@@ -270,7 +270,7 @@ function extractCategoriesUsingRegex(query, categories) {
   return [];
 }
 
-const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
+const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters, limit = 1000) => {
   console.log("Building fuzzy search pipeline with filters:", JSON.stringify(filters));
   
   const pipeline = [];
@@ -385,7 +385,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
   }
   
   // Add limit at the end
-  pipeline.push({ $limit: 1000 });
+  pipeline.push({ $limit: limit });
   
   // Log the pipeline for debugging
   console.log("Fuzzy search pipeline:", JSON.stringify(pipeline));
@@ -393,7 +393,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters) => {
   return pipeline;
 };
 
-function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
+function buildVectorSearchPipeline(queryEmbedding, filters = {}, limit = 30) {
   const filter = {};
 
   if (filters.category) {
@@ -428,7 +428,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}) {
         path: "embedding",
         queryVector: queryEmbedding,
         exact: true,
-        limit: 30,
+        limit: limit,
         ...(Object.keys(filter).length && { filter }),
       },
     },
@@ -794,7 +794,12 @@ async function getProductsByIds(ids, dbName, collectionName) {
 }
 
 // Function to detect if query is complex enough for LLM reordering
-function isComplexQuery(query, filters) {
+function isComplexQuery(query, filters, cleanedHebrewText) {
+  // If there are filters and no other meaningful search terms, it is a simple query.
+  if (Object.keys(filters).length > 0 && (!cleanedHebrewText || cleanedHebrewText.trim() === '')) {
+      return false;
+  }
+
   // Only skip LLM for exact category matches (no additional descriptors)
   if (filters.category && !filters.price && !filters.minPrice && !filters.maxPrice && !filters.type) {
     // Check if query is EXACTLY just the category (no additional descriptors)
@@ -889,12 +894,29 @@ app.post("/search", async (req, res) => {
         VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank))
       );
     }
-    const cleanedHebrewText = removeWordsFromQuery(query, noHebrewWord);
+
+    let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
+    if (filters.category) {
+      const cats = Array.isArray(filters.category) ? filters.category : [filters.category];
+      cats.forEach(c => tempNoHebrewWord.push(...c.split(' ')));
+    }
+    if (filters.type) {
+      const typs = Array.isArray(filters.type) ? filters.type : [filters.type];
+      typs.forEach(t => tempNoHebrewWord.push(...t.split(' ')));
+    }
+    tempNoHebrewWord = [...new Set(tempNoHebrewWord)];
+
+    const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
     console.log("Cleaned query for fuzzy search:", cleanedHebrewText);
+
+    const isComplex = isComplexQuery(query, filters, cleanedHebrewText);
+
+    const fuzzyLimit = isComplex ? 20 : 1000;
     const fuzzySearchPipeline = buildFuzzySearchPipeline(
       cleanedHebrewText,
       query,
-      filters
+      filters,
+      fuzzyLimit
     );
 
     // Parallelize embedding generation and fuzzy search
@@ -907,10 +929,12 @@ app.post("/search", async (req, res) => {
       return res
         .status(500)
         .json({ error: "Error generating query embedding" });
-
+    
+    const vectorLimit = isComplex ? 20 : 30;
     const vectorSearchPipeline = buildVectorSearchPipeline(
       queryEmbedding,
-      filters
+      filters,
+      vectorLimit
     );
     const vectorResults = await collection
       .aggregate(vectorSearchPipeline)
@@ -933,7 +957,7 @@ app.post("/search", async (req, res) => {
     let reorderedData;
     
     // Only apply LLM reordering for complex queries
-    if (isComplexQuery(query, filters)) {
+    if (isComplex) {
       console.log("Complex query detected - applying LLM reordering");
       try {
         const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
