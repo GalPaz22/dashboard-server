@@ -179,7 +179,11 @@ app.get("/autocomplete", async (req, res) => {
       url: item.url
     }));
     const combinedSuggestions = [...labeledSuggestions1, ...labeledSuggestions2]
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => {
+        if (a.source === 'queries' && b.source !== 'queries') return -1;
+        if (a.source !== 'queries' && b.source === 'queries') return 1;
+        return b.score - a.score;
+      })
       .filter((item, index, self) =>
         index === self.findIndex((t) => t.suggestion === item.suggestion)
       );
