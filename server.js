@@ -81,6 +81,7 @@ async function getStoreConfigByApiKey(apiKey) {
     categories: userDoc.credentials?.categories || "",
     types: userDoc.credentials?.type || "",
     syncMode: userDoc.syncMode || "text",
+    explain: userDoc.explain || false,
   };
 }
 
@@ -567,7 +568,8 @@ async function reorderResultsWithGPT(
   combinedResults,
   translatedQuery,
   query,
-  alreadyDelivered = []
+  alreadyDelivered = [],
+  explain = true
 ) {
   try {
     const filtered = combinedResults.filter(
@@ -584,28 +586,25 @@ async function reorderResultsWithGPT(
       price: p.price || "No price",
     }));
 
-    const systemInstruction = `
-You are an advanced AI model for e-commerce search.
+    const systemInstruction = explain 
+      ? `You are an advanced AI model for e-commerce search.
 Your task is to re-rank the provided products based on the user query: "${query}".
 Return a JSON array of the top 1 to 4 most relevant products.
 Each object in the array MUST contain:
 1. 'id': The product ID.
 2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query. This is a mandatory field. Do not omit it.
-Do not return more than 8 products.`;
+Do not return more than 8 products.`
+      : `You are an advanced AI model for e-commerce search.
+Your task is to re-rank the provided products based on the user query: "${query}".
+Return a JSON array of the top 1 to 8 most relevant products.
+Each object in the array MUST contain only:
+1. 'id': The product ID.
+Do not include explanations or any other fields.`;
 
     const userContent = JSON.stringify(productData, null, 4);
 
-    const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash-lite",
-      contents: userContent,
-      config: { 
-        systemInstruction, 
-        temperature: 0.1,
-        thinkingConfig: {
-          thinkingBudget: 0, // Disables thinking
-        },
-        responseMimeType: "application/json",
-        responseSchema: {
+    const responseSchema = explain 
+      ? {
           type: Type.ARRAY,
           items: {
             type: Type.OBJECT,
@@ -622,7 +621,32 @@ Do not return more than 8 products.`;
             },
             required: ["id", "explanation"],
           },
+        }
+      : {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              id: {
+                type: Type.STRING,
+                description: "Product ID",
+              },
+            },
+            required: ["id"],
+          },
+        };
+
+    const response = await genAI.models.generateContent({
+      model: "gemini-2.5-flash-lite",
+      contents: userContent,
+      config: { 
+        systemInstruction, 
+        temperature: 0.1,
+        thinkingConfig: {
+          thinkingBudget: 0, // Disables thinking
         },
+        responseMimeType: "application/json",
+        responseSchema: responseSchema,
       },
     });
 
@@ -630,7 +654,12 @@ Do not return more than 8 products.`;
     console.log("Gemini Reordered data with explanations:", text);
     const reorderedData = JSON.parse(text);
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
-    return reorderedData;
+    
+    // Ensure explanation field exists (set to null if not explaining)
+    return reorderedData.map(item => ({
+      id: item.id,
+      explanation: explain ? (item.explanation || null) : null
+    }));
   } catch (error) {
     console.error("Error reordering results with Gemini:", error);
     throw error;
@@ -643,7 +672,8 @@ async function reorderImagesWithGPT(
  combinedResults,
  translatedQuery,
  query,
- alreadyDelivered = []
+ alreadyDelivered = [],
+ explain = true
 ) {
  try {
    if (!Array.isArray(alreadyDelivered)) {
@@ -662,7 +692,7 @@ async function reorderImagesWithGPT(
 
    if (productsWithImages.length === 0) {
      console.log("No products with images found, falling back to text-based reordering");
-     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered);
+     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain);
    }
 
    // Prepare content array for Gemini API
@@ -707,27 +737,23 @@ Price: ${product.price || "No price"}
    }
 
    // Add final instruction
-   contents.push({ 
-     text: `Based on the user query "${query}" and the product images with descriptions, return a JSON array of the top 1 to 8 most relevant products. Focus on visual relevance from the images.
+   const finalInstruction = explain 
+     ? `Based on the user query "${query}" and the product images with descriptions, return a JSON array of the top 1 to 8 most relevant products. Focus on visual relevance from the images.
 For each product, provide:
 1. 'id': The product ID.
 2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query.
 Be concise and do not add phrases like 'this is relevant because...'.
 Do not return more than 4 products
-3. answer with the query language ALWAYS.` 
+3. answer with the query language ALWAYS.`
+     : `Based on the user query "${query}" and the product images with descriptions, return a JSON array of the top 1 to 8 most relevant products. Focus on visual relevance from the images.
+For each product, provide only:
+1. 'id': The product ID.
+Do not include explanations or any other fields.`;
 
-   });
+   contents.push({ text: finalInstruction });
 
-   const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash-lite",
-     contents: contents,
-     config: { 
-       temperature: 0.1,
-       thinkingConfig: {
-         thinkingBudget: 0, // Disables thinking
-       },
-       responseMimeType: "application/json",
-       responseSchema: {
+   const responseSchema = explain 
+     ? {
          type: Type.ARRAY,
          items: {
            type: Type.OBJECT,
@@ -744,7 +770,31 @@ Do not return more than 4 products
            },
             required: ["id", "explanation"],
          },
+       }
+     : {
+         type: Type.ARRAY,
+         items: {
+           type: Type.OBJECT,
+           properties: {
+             id: {
+               type: Type.STRING,
+               description: "Product ID",
+             },
+           },
+           required: ["id"],
+         },
+       };
+
+   const response = await genAI.models.generateContent({
+     model: "gemini-2.5-flash-lite",
+     contents: contents,
+     config: { 
+       temperature: 0.1,
+       thinkingConfig: {
+         thinkingBudget: 0, // Disables thinking
        },
+       responseMimeType: "application/json",
+       responseSchema: responseSchema,
      },
    });
 
@@ -759,11 +809,16 @@ Do not return more than 4 products
    if (!Array.isArray(reorderedData)) {
      throw new Error("Invalid response format from Gemini. Expected an array of objects.");
    }
-   return reorderedData;
+   
+   // Ensure explanation field exists (set to null if not explaining)
+   return reorderedData.map(item => ({
+     id: item.id,
+     explanation: explain ? (item.explanation || null) : null
+   }));
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
    console.log("Falling back to text-based reordering");
-   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered);
+   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain);
  }
 }
 
@@ -828,7 +883,7 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 
 app.post("/search", async (req, res) => {
   const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
-  const { dbName, products: collectionName, categories, types, syncMode } = req.store;
+  const { dbName, products: collectionName, categories, types, syncMode, explain } = req.store;
   console.log("categories", categories);
   console.log("types", types);
   if (!query || !dbName || !collectionName) {
@@ -965,7 +1020,7 @@ app.post("/search", async (req, res) => {
       console.log("Complex query detected - applying LLM reordering");
       try {
         const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-        reorderedData = await reorderFn(combinedResults, translatedQuery, query);
+        reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain);
       } catch (error) {
         console.error("LLM reordering failed, falling back to default ordering:", error);
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
@@ -992,7 +1047,7 @@ app.post("/search", async (req, res) => {
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
-        explanation: explanationsMap.get(product._id.toString()) || null
+        explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null
        
 
       })),
