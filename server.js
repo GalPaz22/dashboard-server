@@ -924,6 +924,9 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 
 
 app.post("/search", async (req, res) => {
+  const requestId = Math.random().toString(36).substr(2, 9);
+  console.log(`[${requestId}] Search request started for query: "${req.body.query}"`);
+  
   const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
   const { dbName, products: collectionName, categories, types, syncMode, explain } = req.store;
   console.log("categories", categories);
@@ -984,7 +987,10 @@ app.post("/search", async (req, res) => {
       }
     }
     console.log("Final filters:", filters);
+    
+    console.log(`[${requestId}] About to log query to database`);
     logQuery(querycollection, query, filters);
+    console.log(`[${requestId}] Query logged to database`);
 
     const FUZZY_WEIGHT = 1;
     const VECTOR_WEIGHT = 1;
@@ -1110,10 +1116,12 @@ app.post("/search", async (req, res) => {
     ];
 
     console.log(`Returning ${formattedResults.length} results for query: ${query}`);
+    console.log(`[${requestId}] Search request completed successfully`);
 
     res.json(formattedResults);
   } catch (error) {
     console.error("Error handling search request:", error);
+    console.error(`[${requestId}] Search request failed with error:`, error.message);
     if (!res.headersSent) {
       res.status(500).json({ error: "Server error." });
     }
