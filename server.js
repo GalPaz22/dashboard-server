@@ -520,25 +520,67 @@ async function getQueryEmbedding(cleanedText) {
 }
 async function extractFiltersFromQuery(query, categories, types, example) {
   try {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: `Extract the following filters from the query if they exist:
-                  1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
-                  2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
-                  3. maxPrice (maximum price, indicated by the word 'עד').
-                  4. category - one of the following Hebrew words: ${categories}. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה')- in case you can't find the relevant category, do not bring up by yourself.
-                  **if you find more than one category, return them as an array**.
-                  5. type - one or both of the following Hebrew words: ${types}. Pay close attention to find these types in the query. **Important**: If a type is preceded by a word indicating negation (like 'לא', 'בלי', or 'ללא'), you must NOT extract it.
-                Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
-               ${example}.` },
-        { role: "user", content: query },
-      ],
-      temperature: 0.1,
+    const systemInstruction = `Extract the following filters from the query if they exist:
+1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
+2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
+3. maxPrice (maximum price, indicated by the word 'עד').
+4. category - ONLY select from these exact Hebrew words: ${categories}. You must ONLY choose from this provided list. Pay close attention to find these categories in the query, and look if the user mentions a shortened version (e.g., 'רוזה' instead of 'יין רוזה'). If you cannot find an EXACT match from the provided list, do NOT include any category.
+**if you find more than one category from the provided list, return them as an array**.
+5. type - ONLY select from these exact Hebrew words: ${types}. You must ONLY choose from this provided list. Pay close attention to find these types in the query. **Important**: If a type is preceded by a word indicating negation (like 'לא', 'בלי', or 'ללא'), you must NOT extract it.
+
+CRITICAL: For category and type, you must NEVER create or suggest categories/types that are not in the provided lists. Only select from the exact options given.
+
+Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
+${example}.`;
+
+    const response = await genAI.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ text: query }],
+      config: {
+        systemInstruction,
+        temperature: 0.1,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            price: {
+              type: Type.NUMBER,
+              description: "Exact price if mentioned"
+            },
+            minPrice: {
+              type: Type.NUMBER,
+              description: "Minimum price if mentioned"
+            },
+            maxPrice: {
+              type: Type.NUMBER,
+              description: "Maximum price if mentioned"
+            },
+            category: {
+              oneOf: [
+                { type: Type.STRING },
+                { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                }
+              ],
+              description: "Category from the provided list only"
+            },
+            type: {
+              oneOf: [
+                { type: Type.STRING },
+                { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                }
+              ],
+              description: "Type from the provided list only"
+            }
+          }
+        }
+      }
     });
 
-    const content = response.choices[0]?.message?.content;
+    const content = response.text.trim();
     const filters = JSON.parse(content);
     console.log("Extracted filters:", filters);
     return filters;
