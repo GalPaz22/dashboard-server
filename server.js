@@ -349,7 +349,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters, limit = 100
       pipeline.push({
         $match: {
           category: Array.isArray(filters.category) 
-            ? { $in: filters.category } 
+            ? { $all: filters.category } 
             : filters.category
         }
       });
@@ -403,7 +403,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}, limit = 30) {
 
   if (filters.category) {
     filter.category = Array.isArray(filters.category)
-      ? { $in: filters.category }
+      ? { $all: filters.category }
       : filters.category;
   }
 
