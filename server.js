@@ -349,7 +349,7 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters, limit = 100
       pipeline.push({
         $match: {
           category: Array.isArray(filters.category) 
-            ? { $in: filters.category } 
+            ? { $all: filters.category } 
             : filters.category
         }
       });
@@ -402,6 +402,7 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}, limit = 30) {
   const filter = {};
 
   if (filters.category) {
+    // Use $in for pre-filtering. This is less strict but supported and efficient.
     filter.category = Array.isArray(filters.category)
       ? { $in: filters.category }
       : filters.category;
@@ -440,6 +441,12 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}, limit = 30) {
   ];
   
   const postMatchClauses = [];
+
+  // Add the strict $all filter here for the post-match stage
+  if (Array.isArray(filters.category) && filters.category.length > 0) {
+    postMatchClauses.push({ category: { $all: filters.category } });
+  }
+
   postMatchClauses.push({
     $or: [
       { stockStatus: "instock" },
@@ -968,12 +975,15 @@ app.post("/search", async (req, res) => {
       }
       console.log("Filters extracted via LLM:", llmFilters);
       if (llmFilters.category) {
+        const llmCats = Array.isArray(llmFilters.category)
+          ? llmFilters.category
+          : [llmFilters.category];
         if (filters.category) {
           filters.category = [
-            ...new Set([...filters.category, ...llmFilters.category]),
+            ...new Set([...filters.category, ...llmCats]),
           ];
         } else {
-          filters.category = llmFilters.category;
+          filters.category = llmCats;
         }
       }
       if (llmFilters.minPrice !== undefined) {
