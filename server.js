@@ -518,9 +518,10 @@ async function getQueryEmbedding(cleanedText) {
     throw error;
   }
 }
-async function extractFiltersFromQuery(query, categories, types, example) {
+async function extractFiltersFromQuery(query, categories, types, example, context) {
   try {
-    const systemInstruction = `Extract the following filters from the query if they exist:
+    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
+Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
@@ -611,7 +612,8 @@ async function reorderResultsWithGPT(
   translatedQuery,
   query,
   alreadyDelivered = [],
-  explain = true
+  explain = true,
+  context
 ) {
   try {
     const filtered = combinedResults.filter(
@@ -629,14 +631,14 @@ async function reorderResultsWithGPT(
     }));
 
     const systemInstruction = explain 
-      ? `You are an advanced AI model for e-commerce search.
+      ? `You are an advanced AI model for e-commerce search. The user's context is: ${context}.
 Your task is to re-rank the provided products based on the user query: "${query}".
 Return a JSON array of the top 1 to 4 most relevant products.
 Each object in the array MUST contain:
 1. 'id': The product ID.
 2. 'explanation': A brief, one-sentence explanation for its relevance, in the same language as the user's query. This is a mandatory field. Do not omit it.
 Do not return more than 8 products.`
-      : `You are an advanced AI model for e-commerce search.
+      : `You are an advanced AI model for e-commerce search. The user's context is: ${context}.
 Your task is to re-rank the provided products based on the user query: "${query}".
 Return a JSON array of the top 1 to 8 most relevant products.
 Each object in the array MUST contain only:
@@ -711,11 +713,12 @@ Do not include explanations or any other fields.`;
 
 
 async function reorderImagesWithGPT(
- combinedResults,
- translatedQuery,
- query,
- alreadyDelivered = [],
- explain = true
+  combinedResults,
+  translatedQuery,
+  query,
+  alreadyDelivered = [],
+  explain = true,
+  context
 ) {
  try {
    if (!Array.isArray(alreadyDelivered)) {
@@ -734,14 +737,14 @@ async function reorderImagesWithGPT(
 
    if (productsWithImages.length === 0) {
      console.log("No products with images found, falling back to text-based reordering");
-     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain);
+     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context);
    }
 
    // Prepare content array for Gemini API
    const contents = [];
    
    // Add the query text first
-   contents.push({ text: `You are analyzing products for the query: "${translatedQuery}" (original: "${query}")` });
+   contents.push({ text: `You are analyzing products for the query: "${translatedQuery}" (original: "${query}"). The user's context is: ${context}.` });
    
    // Add products with images
    for (let i = 0; i < Math.min(productsWithImages.length, 20); i++) { // Limit to 20 products to avoid token limits
@@ -810,7 +813,7 @@ Do not include explanations or any other fields.`;
                  "A brief, concise explanation of the product's visual relevance to the query, in the query's language. Required for each of the 1-4 returned products.",
              },
            },
-            required: ["id", "explanation"],
+           required: ["id", "explanation"],
          },
        }
      : {
@@ -860,7 +863,7 @@ Do not include explanations or any other fields.`;
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
    console.log("Falling back to text-based reordering");
-   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain);
+   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context);
  }
 }
 
@@ -890,8 +893,8 @@ async function getProductsByIds(ids, dbName, collectionName) {
     return orderedProducts;
   } catch (error) {
     console.error("Error fetching products by IDs:", error);
-    throw error;
-  }
+   throw error;
+ }
 }
 
 // Function to detect if query is complex enough for LLM reordering
@@ -937,8 +940,8 @@ app.post("/search", async (req, res) => {
     });
   }
   try {
-    const client = await connectToMongoDB(mongodbUri);
-    const db = client.db(dbName);
+  const client = await connectToMongoDB(mongodbUri);
+  const db = client.db(dbName);
     console.log("Connected to database:", dbName);
     const collection = db.collection("products");
     const querycollection = db.collection("queries");
@@ -947,7 +950,7 @@ app.post("/search", async (req, res) => {
     const [translatedQuery, llmFilters] = await Promise.all([
       translateQuery(query, context),
       categories
-        ? extractFiltersFromQuery(query, categories, types, example)
+        ? extractFiltersFromQuery(query, categories, types, example, context)
         : Promise.resolve({}),
     ]);
 
@@ -1045,7 +1048,7 @@ app.post("/search", async (req, res) => {
     );
     const vectorResults = await collection
       .aggregate(vectorSearchPipeline)
-      .toArray();
+    .toArray();
     const documentRanks = new Map();
     fuzzyResults.forEach((doc, index) => {
       documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
@@ -1068,7 +1071,7 @@ app.post("/search", async (req, res) => {
       console.log("Complex query detected - applying LLM reordering");
       try {
         const reorderFn = syncMode=='image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-        reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain);
+        reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
       } catch (error) {
         console.error("LLM reordering failed, falling back to default ordering:", error);
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
