@@ -334,43 +334,25 @@ const buildFuzzySearchPipeline = (cleanedHebrewText, query, filters, limit = 100
   if (filters && Object.keys(filters).length > 0) {
     // Type filter: support string or array without using regex
     if (filters.type && (!Array.isArray(filters.type) || filters.type.length > 0)) {
-      if (Array.isArray(filters.type) && filters.type.length > 1) {
-        // For multiple types, use AND logic - product must have ALL types
-        pipeline.push({
-          $match: {
-            type: { $all: filters.type }
-          }
-        });
-      } else {
-        // For single type, use regular match
-        const singleType = Array.isArray(filters.type) ? filters.type[0] : filters.type;
-        pipeline.push({
-          $match: {
-            type: singleType
-          }
-        });
-      }
+      pipeline.push({
+        $match: {
+          type: Array.isArray(filters.type) 
+            ? { $in: filters.type } 
+            : filters.type
+        }
+      });
     }
     // ...existing code...
     
     // Category filter
     if (filters.category) {
-      if (Array.isArray(filters.category) && filters.category.length > 1) {
-        // For multiple categories, use AND logic - product must have ALL categories
-        pipeline.push({
-          $match: {
-            category: { $all: filters.category }
-          }
-        });
-      } else {
-        // For single category, use regular match
-        const singleCategory = Array.isArray(filters.category) ? filters.category[0] : filters.category;
-        pipeline.push({
-          $match: {
-            category: singleCategory
-          }
-        });
-      }
+      pipeline.push({
+        $match: {
+          category: Array.isArray(filters.category) 
+            ? { $in: filters.category } 
+            : filters.category
+        }
+      });
     }
     
     // Price filters - ensure all values are converted to numbers
@@ -420,25 +402,15 @@ function buildVectorSearchPipeline(queryEmbedding, filters = {}, limit = 30) {
   const filter = {};
 
   if (filters.category) {
-    if (Array.isArray(filters.category) && filters.category.length > 1) {
-      // For multiple categories, use AND logic - product must have ALL categories
-      filter.category = { $all: filters.category };
-    } else {
-      // For single category, use regular match
-      const singleCategory = Array.isArray(filters.category) ? filters.category[0] : filters.category;
-      filter.category = singleCategory;
-    }
+    filter.category = Array.isArray(filters.category)
+      ? { $in: filters.category }
+      : filters.category;
   }
 
   if (filters.type && (!Array.isArray(filters.type) || filters.type.length > 0)) {
-    if (Array.isArray(filters.type) && filters.type.length > 1) {
-      // For multiple types, use AND logic - product must have ALL types
-      filter.type = { $all: filters.type };
-    } else {
-      // For single type, use regular match
-      const singleType = Array.isArray(filters.type) ? filters.type[0] : filters.type;
-      filter.type = singleType;
-    }
+    filter.type = Array.isArray(filters.type)
+      ? { $in: filters.type }
+      : filters.type;
   }
   if (filters.minPrice && filters.maxPrice) {
     filter.price = { $gte: filters.minPrice, $lte: filters.maxPrice };
