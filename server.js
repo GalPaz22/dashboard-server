@@ -667,7 +667,7 @@ Do not include explanations or any other fields.`;
               explanation: {
                 type: Type.STRING,
                 description:
-                  "A brief, one-sentence explanation of product relevance for the query, in the query's language. Required for each of the 1-4 returned products.",
+                  "A brief, one-sentence explanation of product relevance for the query, and ALWAYS ANSWER IN THE SAME LANGUAGE AS THE QUERY. Required for each of the 1-4 returned products.",
               },
             },
             required: ["id", "explanation"],
