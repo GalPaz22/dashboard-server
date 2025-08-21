@@ -240,7 +240,6 @@ Analyze the query and return your classification.`;
     });
 
     const result = JSON.parse(response.text.trim());
-    console.log(`Gemini query classification for "${query}":`, result);
     
     return result.classification === "simple";
   } catch (error) {
@@ -254,27 +253,17 @@ Analyze the query and return your classification.`;
 async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context) {
   // If any filters are detected, it's not a simple query
   if (filters && Object.keys(filters).length > 0) {
-    console.log(`Query "${query}" classified as COMPLEX due to existing filters`);
     return false;
   }
 
-
-
   // Use Gemini to classify the query
   const isSimple = await classifyQueryComplexity(query, context);
-  console.log(`Query "${query}" classified as ${isSimple ? 'SIMPLE' : 'COMPLEX'} by Gemini`);
 
   return isSimple;
 }
 
 // Enhanced search pipeline builder that handles both hard and soft filters
 const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 1000, useOrLogic = false, isHardFilterQuery = true, boostMultiplier = 1) => {
-  console.log("Building enhanced search pipeline");
-  console.log(`Applying boost multiplier: ${boostMultiplier}`);
-  console.log("Hard filters:", JSON.stringify(hardFilters));
-  console.log("Soft filters:", JSON.stringify(softFilters));
-  console.log("Is hard filter query:", isHardFilterQuery);
-  
   const pipeline = [];
   
   // Add search stage if we have a query
@@ -448,7 +437,6 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
   
   pipeline.push({ $limit: limit });
   
-  console.log("Enhanced search pipeline:", JSON.stringify(pipeline, null, 2));
   return pipeline;
 };
 
@@ -559,8 +547,6 @@ function isHebrewQuery(query) {
   // Lowered threshold to handle mixed content better
   const isHebrew = hebrewChars / totalChars > 0.3;
   
-  console.log(`Hebrew detection for "${query}": ${hebrewChars}/${totalChars} Hebrew chars (${Math.round(hebrewChars/totalChars*100)}%) = ${isHebrew ? 'Hebrew' : 'Non-Hebrew'}`);
-  
   return isHebrew;
 }
 
@@ -587,7 +573,6 @@ Pay attention to the word שכלי or שאבלי (which mean chablis) and מוס
       ],
     });
     const translatedText = response.choices[0]?.message?.content?.trim();
-    console.log("Optimized query for embedding:", translatedText);
     return translatedText;
   } catch (error) {
     console.error("Error translating query:", error);
@@ -707,7 +692,6 @@ ${example}.`;
 
     const content = response.text.trim();
     const filters = JSON.parse(content);
-    console.log("Extracted enhanced filters:", filters);
     return filters;
   } catch (error) {
     console.error("Error extracting enhanced filters:", error);
@@ -828,12 +812,6 @@ function shouldUseOrLogicForCategories(query, categories) {
   if (hasRedAndWhite) {
     orScore += 2; // Boost OR score for red+white combinations
   }
-  
-  // Log the decision for debugging
-  console.log(`OR/AND Logic Decision for query: "${query}"`);
-  console.log(`Categories: ${JSON.stringify(categories)}`);
-  console.log(`OR Score: ${orScore}, AND Score: ${andScore}`);
-  console.log(`Decision: ${orScore > andScore ? 'OR' : 'AND'} logic`);
   
   return orScore > andScore;
 }
@@ -966,7 +944,6 @@ ${JSON.stringify(productData, null, 2)}`;
     });
 
     const text = response.text.trim();
-    console.log("Gemini Reordered data with explanations:", text);
     const reorderedData = JSON.parse(text);
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
     
@@ -1005,7 +982,6 @@ async function reorderImagesWithGPT(
    const productsWithImages = limitedResults.filter(product => product.image && product.image.trim() !== '');
 
    if (productsWithImages.length === 0) {
-     console.log("No products with images found, falling back to text-based reordering");
      return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context);
    }
 
@@ -1129,7 +1105,6 @@ Focus only on visual elements that match the search intent.`;
    });
 
    const responseText = response.text.trim();
-   console.log("Gemini Image-based Reordered data:", responseText);
 
    if (!responseText) {
      throw new Error("No content returned from Gemini");
@@ -1147,7 +1122,6 @@ Focus only on visual elements that match the search intent.`;
    }));
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
-   console.log("Falling back to text-based reordering");
    return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context);
  }
 }
@@ -1173,7 +1147,6 @@ async function getProductsByIds(ids, dbName, collectionName) {
     const orderedProducts = ids.map((id) =>
       products.find((p) => p && p._id.toString() === id)
     ).filter((product) => product !== undefined);
-    console.log(`Number of products returned: ${orderedProducts.length}/${ids.length}`);
     return orderedProducts;
   } catch (error) {
     console.error("Error fetching products by IDs:", error);
@@ -1212,7 +1185,7 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 // Enhanced search endpoint
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
-  console.log(`[${requestId}] Enhanced search request started for query: "${req.body.query}"`);
+  console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
   
   const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain } = req.store;
@@ -1220,10 +1193,6 @@ app.post("/search", async (req, res) => {
   // Add default soft categories if not configured
   const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט";
   const finalSoftCategories = softCategories || defaultSoftCategories;
-  
-  console.log("Hard categories:", categories);
-  console.log("Hard types:", types);
-  console.log("Soft categories:", finalSoftCategories);
   
   if (!query || !dbName || !collectionName) {
     return res.status(400).json({
@@ -1245,26 +1214,20 @@ app.post("/search", async (req, res) => {
     // The rest of the logic is now unified, regardless of query complexity.
     // The isComplexQuery flag will be used ONLY to determine if we should skip the final LLM re-rank.
     
-    console.log(`[${requestId}] Search request initiated. Complex Query: ${isComplexQuery}`);
-
     // Early language detection to optimize processing
     const isHebrewLang = isHebrewQuery(query);
     const shouldSkipVector = isHebrewLang && !isComplexQuery;
-    
-    console.log(`Language detection: ${isHebrewLang ? 'Hebrew' : 'English/Other'}, Complex: ${isComplexQuery}, Skip Vector: ${shouldSkipVector}`);
 
     // Conditional translation and embedding - only if needed
     let translatedQuery, queryEmbedding, cleanedText;
     
     if (shouldSkipVector) {
       // Hebrew simple query - skip translation and embedding
-      console.log("Skipping translation and embedding for Hebrew simple query");
       translatedQuery = query; // Use original query
       cleanedText = query;
       queryEmbedding = null;
     } else {
       // Need translation and/or embedding for vector search or complex processing
-      console.log("Performing translation and embedding generation");
       const [translatedQueryResult, enhancedFiltersResult] = await Promise.all([
         translateQuery(query, context),
         categories
@@ -1277,7 +1240,6 @@ app.post("/search", async (req, res) => {
         return res.status(500).json({ error: "Error translating query" });
 
       cleanedText = removeWineFromQuery(translatedQuery, noWord);
-      console.log("Cleaned query for embedding:", cleanedText);
       
       // Get query embedding
       queryEmbedding = await getQueryEmbedding(cleanedText);
@@ -1286,7 +1248,6 @@ app.post("/search", async (req, res) => {
     }
 
     // Use enhanced filter extraction for complex queries (Gemini-based only)
-    console.log("Using Gemini-based filter extraction (regex extraction removed)");
     const enhancedFilters = categories && !shouldSkipVector
       ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
       : {};
@@ -1309,7 +1270,6 @@ app.post("/search", async (req, res) => {
     const hasExtractedSoftFilters = softFilters.softCategory;
 
     if (!hasExtractedHardFilters && !hasExtractedSoftFilters) {
-      console.log(`No filters extracted for complex query. Using query "${query}" as a soft category filter.`);
       softFilters.softCategory = [query];
     }
 
@@ -1565,12 +1525,12 @@ app.post("/search", async (req, res) => {
         price: product.price,
         image: product.image,
         url: product.url,
-        highlight: true,
+        highlight: isComplexQuery, // Only highlight if it was an LLM-reordered query
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
         explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
-        softFilterMatch: combinedResults.find(r => r._id.toString() === product._id.toString())?.softFilterBoost > 0,
+        softFilterMatch: combinedResults.find(r => r._id.toString() === product._id.toString())?.rrf_score > 1000,
         simpleSearch: false
       })),
       ...remainingResults.map((r) => ({
