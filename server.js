@@ -1229,15 +1229,15 @@ app.post("/search", async (req, res) => {
     } else {
       // Need translation and/or embedding for vector search or complex processing
       const [translatedQueryResult, enhancedFiltersResult] = await Promise.all([
-        translateQuery(query, context),
-        categories
-          ? extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
-          : Promise.resolve({}),
-      ]);
-      
+      translateQuery(query, context),
+      categories
+        ? extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
+        : Promise.resolve({}),
+    ]);
+
       translatedQuery = translatedQueryResult;
-      if (!translatedQuery)
-        return res.status(500).json({ error: "Error translating query" });
+    if (!translatedQuery)
+      return res.status(500).json({ error: "Error translating query" });
 
       cleanedText = removeWineFromQuery(translatedQuery, noWord);
       
@@ -1295,15 +1295,15 @@ app.post("/search", async (req, res) => {
 
     const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
     console.log("Cleaned query for fuzzy search:", cleanedHebrewText);
-    
+
     let combinedResults = [];
 
     if (hasSoftFilters) {
       console.log("Executing DUAL search strategy for soft filters");
-
+      
       // SEARCH A: Find products that MATCH the soft category
       const softMatchHardFilters = { ...hardFilters, softCategory: { $in: softFilters.softCategory } };
-      
+
       // Only do vector search if we have an embedding
       const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
@@ -1313,9 +1313,9 @@ app.post("/search", async (req, res) => {
       
       if (queryEmbedding) {
         searchPromises.push(
-          collection.aggregate(buildEnhancedVectorSearchPipeline(
+        collection.aggregate(buildEnhancedVectorSearchPipeline(
             queryEmbedding, softMatchHardFilters, {}, 20, useOrLogic, true
-          )).toArray()
+        )).toArray()
         );
       }
       
@@ -1334,9 +1334,9 @@ app.post("/search", async (req, res) => {
       
       if (queryEmbedding) {
         generalSearchPromises.push(
-          collection.aggregate(buildEnhancedVectorSearchPipeline(
+        collection.aggregate(buildEnhancedVectorSearchPipeline(
             queryEmbedding, generalHardFilters, {}, 30, useOrLogic, true
-          )).toArray()
+        )).toArray()
         );
       }
       
@@ -1370,6 +1370,39 @@ app.post("/search", async (req, res) => {
         existing.vectorRank = Math.min(existing.vectorRank, index);
         documentRanks.set(id, existing);
       });
+
+      // Fallback mechanism: if no results found, try vector search
+      if (documentRanks.size === 0) {
+        console.log("No dual search results found - applying vector search fallback");
+        try {
+          // Generate embedding for fallback if not available
+          if (!queryEmbedding) {
+            const translatedForEmbedding = await translateQuery(query, context);
+            const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
+            queryEmbedding = await getQueryEmbedding(cleanedForEmbedding);
+          }
+          
+          if (queryEmbedding) {
+            const fallbackVectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
+              queryEmbedding, hardFilters, {}, 50, useOrLogic, true
+            )).toArray();
+            
+            console.log(`Vector fallback found ${fallbackVectorResults.length} results`);
+            
+            // Add fallback results to documentRanks
+            fallbackVectorResults.forEach((doc, index) => {
+              documentRanks.set(doc._id.toString(), { 
+                fuzzyRank: Infinity, 
+                vectorRank: index, 
+                isSoftMatch: false, 
+                doc: doc 
+              });
+            });
+          }
+        } catch (error) {
+          console.error("Vector search fallback failed:", error);
+        }
+      }
 
       // Calculate RRF scores with boost
       combinedResults = Array.from(documentRanks.values())
@@ -1406,15 +1439,47 @@ app.post("/search", async (req, res) => {
           cleanedHebrewText, query, hardFilters, {}, 1000, useOrLogic, true, boostMultiplier
         )).toArray();
         
-        // Create document ranks from fuzzy results only
+        let vectorResults = [];
+        
+        // Fallback mechanism: if no fuzzy results, try vector search
+        if (fuzzyResults.length === 0) {
+          console.log("No fuzzy results found - applying vector search fallback");
+          try {
+            // Generate embedding for fallback
+            if (!queryEmbedding) {
+              const translatedForEmbedding = await translateQuery(query, context);
+              const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
+              queryEmbedding = await getQueryEmbedding(cleanedForEmbedding);
+            }
+            
+            if (queryEmbedding) {
+              vectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
+                queryEmbedding, hardFilters, {}, 50, useOrLogic, true
+              )).toArray();
+              console.log(`Vector fallback found ${vectorResults.length} results`);
+            }
+          } catch (error) {
+            console.error("Vector search fallback failed:", error);
+          }
+        }
+        
+        // Create document ranks from fuzzy results and fallback vector results
         const documentRanks = new Map();
         fuzzyResults.forEach((doc, index) => {
           documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
         });
+        
+        // Add vector results if fuzzy was empty
+        if (fuzzyResults.length === 0) {
+          vectorResults.forEach((doc, index) => {
+            documentRanks.set(doc._id.toString(), { fuzzyRank: Infinity, vectorRank: index });
+          });
+        }
 
         combinedResults = Array.from(documentRanks.entries())
           .map(([id, ranks]) => {
-            const doc = fuzzyResults.find((d) => d._id.toString() === id);
+            const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
+                        vectorResults.find((d) => d._id.toString() === id);
             
             // Apply keyword bonus for Hebrew queries
             let keywordBonus = 0;
@@ -1441,36 +1506,36 @@ app.post("/search", async (req, res) => {
         console.log("Executing combined fuzzy + vector search");
         
         const searchPromises = [
-          collection.aggregate(buildEnhancedSearchPipeline(
+        collection.aggregate(buildEnhancedSearchPipeline(
             cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 1000, useOrLogic, true, boostMultiplier
           )).toArray()
         ];
         
         if (queryEmbedding) {
           searchPromises.push(
-            collection.aggregate(buildEnhancedVectorSearchPipeline(
+        collection.aggregate(buildEnhancedVectorSearchPipeline(
               queryEmbedding, hardFilters, {}, isComplexQuery ? 20 : 50, useOrLogic, true
-            )).toArray()
+        )).toArray()
           );
         }
         
         const searchResults = await Promise.all(searchPromises);
         const fuzzyResults = searchResults[0];
         const vectorResults = queryEmbedding ? searchResults[1] : [];
-        
-        const documentRanks = new Map();
-        fuzzyResults.forEach((doc, index) => {
-          documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-        });
-        vectorResults.forEach((doc, index) => {
-          const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-          documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
-        });
 
-        combinedResults = Array.from(documentRanks.entries())
-          .map(([id, ranks]) => {
-            const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
-                        vectorResults.find((d) => d._id.toString() === id);
+      const documentRanks = new Map();
+      fuzzyResults.forEach((doc, index) => {
+        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+      });
+      vectorResults.forEach((doc, index) => {
+        const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+        documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+      });
+
+      combinedResults = Array.from(documentRanks.entries())
+        .map(([id, ranks]) => {
+          const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
+                      vectorResults.find((d) => d._id.toString() === id);
             
             // Apply keyword bonus for simple queries
             let keywordBonus = 0;
@@ -1489,8 +1554,8 @@ app.post("/search", async (req, res) => {
               ...doc, 
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, keywordBonus) 
             };
-          })
-          .sort((a, b) => b.rrf_score - a.rrf_score);
+        })
+        .sort((a, b) => b.rrf_score - a.rrf_score);
       }
     }
 
