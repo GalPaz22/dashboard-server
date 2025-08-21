@@ -297,6 +297,18 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
               }
             },
             {
+              text: {
+                query: cleanedHebrewText,
+                path: "description",
+                fuzzy: {
+                  maxEdits: 2,
+                  prefixLength: 3,
+                  maxExpansions: 50,
+                },
+                score: { boost: { value: 3 * boostMultiplier } } // Boost description matches
+              }
+            },
+            {
               autocomplete: {
                 query: cleanedHebrewText,
                 path: "name",
