@@ -267,8 +267,10 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
   return isSimple;
 }
 
-const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 1000, useOrLogic = false, isHardFilterQuery = true) => {
+// Enhanced search pipeline builder that handles both hard and soft filters
+const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 1000, useOrLogic = false, isHardFilterQuery = true, boostMultiplier = 1) => {
   console.log("Building enhanced search pipeline");
+  console.log(`Applying boost multiplier: ${boostMultiplier}`);
   console.log("Hard filters:", JSON.stringify(hardFilters));
   console.log("Soft filters:", JSON.stringify(softFilters));
   console.log("Is hard filter query:", isHardFilterQuery);
@@ -291,19 +293,18 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
                   prefixLength: 3,
                   maxExpansions: 50,
                 },
-                score: { boost: { value: 10 } } // Boost name matches
+                score: { boost: { value: 10 * boostMultiplier } } // Boost name matches
               }
             },
             {
-              text: {
+              autocomplete: {
                 query: cleanedHebrewText,
-                path: "description",
+                path: "name",
                 fuzzy: {
                   maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
+                  prefixLength: 2
                 },
-                score: { boost: { value: 3 } } // Boost description matches
+                score: { boost: { value: 5 * boostMultiplier } } // Add a moderate boost for autocomplete matches
               }
             }
           ]
@@ -533,6 +534,22 @@ function buildEnhancedVectorSearchPipeline(queryEmbedding, hardFilters = {}, sof
 async function isHebrew(query) {
   const hebrewPattern = /[\u0590-\u05FF]/;
   return hebrewPattern.test(query);
+}
+
+// Function to detect if a query is primarily Hebrew
+function isHebrewQuery(query) {
+  // Extended Hebrew pattern including punctuation and vowel points
+  const hebrewPattern = /[\u0590-\u05FF\uFB1D-\uFB4F]/g;
+  const hebrewChars = (query.match(hebrewPattern) || []).length;
+  const totalChars = query.replace(/\s+/g, '').length;
+  
+  // Consider it Hebrew if more than 30% of non-space characters are Hebrew
+  // Lowered threshold to handle mixed content better
+  const isHebrew = hebrewChars / totalChars > 0.3;
+  
+  console.log(`Hebrew detection for "${query}": ${hebrewChars}/${totalChars} Hebrew chars (${Math.round(hebrewChars/totalChars*100)}%) = ${isHebrew ? 'Hebrew' : 'Non-Hebrew'}`);
+  
+  return isHebrew;
 }
 
 async function translateQuery(query, context) {
@@ -810,14 +827,15 @@ function shouldUseOrLogicForCategories(query, categories) {
 }
 
 // Enhanced RRF calculation that accounts for soft filter boosting
-function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
+function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
   const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
                    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
   
   // Add soft filter boost (now cumulative)
   const softBoost = (softFilterBoost / 1000) * 0.5; // Each match gives a 0.5 boost
   
-  return baseScore + softBoost;
+  // Add keyword match bonus for strong text matches
+  return baseScore + softBoost + keywordMatchBonus;
 }
 
 // --- 2) reorderResultsWithGPT ---
@@ -1086,7 +1104,7 @@ Focus only on visual elements that match the search intent.`;
        };
 
    const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash-lite",
+     model: "gemini-2.5-flash",
      contents: contents,
      config: { 
        temperature: 0.1,
@@ -1217,20 +1235,49 @@ app.post("/search", async (req, res) => {
     
     console.log(`[${requestId}] Search request initiated. Complex Query: ${isComplexQuery}`);
 
+    // Early language detection to optimize processing
+    const isHebrewLang = isHebrewQuery(query);
+    const shouldSkipVector = isHebrewLang && !isComplexQuery;
+    
+    console.log(`Language detection: ${isHebrewLang ? 'Hebrew' : 'English/Other'}, Complex: ${isComplexQuery}, Skip Vector: ${shouldSkipVector}`);
+
+    // Conditional translation and embedding - only if needed
+    let translatedQuery, queryEmbedding, cleanedText;
+    
+    if (shouldSkipVector) {
+      // Hebrew simple query - skip translation and embedding
+      console.log("Skipping translation and embedding for Hebrew simple query");
+      translatedQuery = query; // Use original query
+      cleanedText = query;
+      queryEmbedding = null;
+    } else {
+      // Need translation and/or embedding for vector search or complex processing
+      console.log("Performing translation and embedding generation");
+      const [translatedQueryResult, enhancedFiltersResult] = await Promise.all([
+        translateQuery(query, context),
+        categories
+          ? extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
+          : Promise.resolve({}),
+      ]);
+      
+      translatedQuery = translatedQueryResult;
+      if (!translatedQuery)
+        return res.status(500).json({ error: "Error translating query" });
+
+      cleanedText = removeWineFromQuery(translatedQuery, noWord);
+      console.log("Cleaned query for embedding:", cleanedText);
+      
+      // Get query embedding
+      queryEmbedding = await getQueryEmbedding(cleanedText);
+      if (!queryEmbedding)
+        return res.status(500).json({ error: "Error generating query embedding" });
+    }
+
     // Use enhanced filter extraction for complex queries (Gemini-based only)
     console.log("Using Gemini-based filter extraction (regex extraction removed)");
-    const [translatedQuery, enhancedFilters] = await Promise.all([
-      translateQuery(query, context),
-      categories
-        ? extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
-        : Promise.resolve({}),
-    ]);
-
-    if (!translatedQuery)
-      return res.status(500).json({ error: "Error translating query" });
-
-    const cleanedText = removeWineFromQuery(translatedQuery, noWord);
-    console.log("Cleaned query for embedding:", cleanedText);
+    const enhancedFilters = categories && !shouldSkipVector
+      ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
+      : {};
 
     // Separate hard and soft filters
     const hardFilters = {
@@ -1260,11 +1307,6 @@ app.post("/search", async (req, res) => {
 
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
-    
-    // Get query embedding
-    const queryEmbedding = await getQueryEmbedding(cleanedText);
-    if (!queryEmbedding)
-      return res.status(500).json({ error: "Error generating query embedding" });
 
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
 
@@ -1281,9 +1323,6 @@ app.post("/search", async (req, res) => {
 
     const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
     console.log("Cleaned query for fuzzy search:", cleanedHebrewText);
-
-    // The isComplex flag from the old logic is no longer needed here. We use isComplexQuery at the end.
-    // const isComplex = isComplexQuery(query, hardFilters, cleanedHebrewText);
     
     let combinedResults = [];
 
@@ -1292,25 +1331,46 @@ app.post("/search", async (req, res) => {
 
       // SEARCH A: Find products that MATCH the soft category
       const softMatchHardFilters = { ...hardFilters, softCategory: { $in: softFilters.softCategory } };
-      const [softFuzzyResults, softVectorResults] = await Promise.all([
+      
+      // Only do vector search if we have an embedding
+      const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, softMatchHardFilters, {}, 100, useOrLogic, true
-        )).toArray(),
-        collection.aggregate(buildEnhancedVectorSearchPipeline(
-          queryEmbedding, softMatchHardFilters, {}, 20, useOrLogic, true
+          cleanedHebrewText, query, softMatchHardFilters, {}, 100, useOrLogic, true, 1
         )).toArray()
-      ]);
+      ];
+      
+      if (queryEmbedding) {
+        searchPromises.push(
+          collection.aggregate(buildEnhancedVectorSearchPipeline(
+            queryEmbedding, softMatchHardFilters, {}, 20, useOrLogic, true
+          )).toArray()
+        );
+      }
+      
+      const searchResults = await Promise.all(searchPromises);
+      const softFuzzyResults = searchResults[0];
+      const softVectorResults = queryEmbedding ? searchResults[1] : [];
 
       // SEARCH B: Find other products that DO NOT MATCH the soft category
       const generalHardFilters = { ...hardFilters, softCategory: { $nin: softFilters.softCategory } };
-      const [generalFuzzyResults, generalVectorResults] = await Promise.all([
+      
+      const generalSearchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
           cleanedHebrewText, query, generalHardFilters, {}, 400, useOrLogic, true
-        )).toArray(),
-        collection.aggregate(buildEnhancedVectorSearchPipeline(
-          queryEmbedding, generalHardFilters, {}, 30, useOrLogic, true
         )).toArray()
-      ]);
+      ];
+      
+      if (queryEmbedding) {
+        generalSearchPromises.push(
+          collection.aggregate(buildEnhancedVectorSearchPipeline(
+            queryEmbedding, generalHardFilters, {}, 30, useOrLogic, true
+          )).toArray()
+        );
+      }
+      
+      const generalSearchResults = await Promise.all(generalSearchPromises);
+      const generalFuzzyResults = generalSearchResults[0];
+      const generalVectorResults = queryEmbedding ? generalSearchResults[1] : [];
 
       // Combine results, giving a massive boost to soft-matched products
       const documentRanks = new Map();
@@ -1358,32 +1418,108 @@ app.post("/search", async (req, res) => {
         .sort((a, b) => b.rrf_score - a.rrf_score);
 
     } else {
-      // Standard search (no soft filters)
-      const [fuzzyResults, vectorResults] = await Promise.all([
-        collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 1000, useOrLogic, true
-        )).toArray(),
-        collection.aggregate(buildEnhancedVectorSearchPipeline(
-          queryEmbedding, hardFilters, {}, isComplexQuery ? 20 : 50, useOrLogic, true
-        )).toArray()
-      ]);
+      // Standard search (no soft filters), this is the path for SIMPLE QUERIES
+      const boostMultiplier = isComplexQuery ? 1 : 1000; // 10x boost for simple queries
+      
+      // Language-based search strategy
+      const isHebrew = isHebrewLang;
+      const shouldSkipVector = isHebrew && !isComplexQuery;
+      
+      console.log(`Language detection: ${isHebrew ? 'Hebrew' : 'English/Other'}, Complex: ${isComplexQuery}, Skip Vector: ${shouldSkipVector}`);
+      
+      if (shouldSkipVector) {
+        // Hebrew non-complex: Fuzzy search only
+        console.log("Executing Hebrew simple query - fuzzy search only");
+        const fuzzyResults = await collection.aggregate(buildEnhancedSearchPipeline(
+          cleanedHebrewText, query, hardFilters, {}, 1000, useOrLogic, true, boostMultiplier
+        )).toArray();
+        
+        // Create document ranks from fuzzy results only
+        const documentRanks = new Map();
+        fuzzyResults.forEach((doc, index) => {
+          documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+        });
 
-      const documentRanks = new Map();
-      fuzzyResults.forEach((doc, index) => {
-        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-      });
-      vectorResults.forEach((doc, index) => {
-        const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-        documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
-      });
+        combinedResults = Array.from(documentRanks.entries())
+          .map(([id, ranks]) => {
+            const doc = fuzzyResults.find((d) => d._id.toString() === id);
+            
+            // Apply keyword bonus for Hebrew queries
+            let keywordBonus = 0;
+            if (doc && doc.name) {
+              const queryLower = query.toLowerCase();
+              const nameLower = doc.name.toLowerCase();
+              
+              if (nameLower.includes(queryLower)) {
+                keywordBonus = 10;
+              } else if (queryLower.split(' ').some(word => word.length > 2 && nameLower.includes(word))) {
+                keywordBonus = 5;
+              }
+            }
+            
+            return { 
+              ...doc, 
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, keywordBonus) 
+            };
+          })
+          .sort((a, b) => b.rrf_score - a.rrf_score);
+          
+      } else {
+        // English simple or any complex: Combined fuzzy + vector search
+        console.log("Executing combined fuzzy + vector search");
+        
+        const searchPromises = [
+          collection.aggregate(buildEnhancedSearchPipeline(
+            cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 1000, useOrLogic, true, boostMultiplier
+          )).toArray()
+        ];
+        
+        if (queryEmbedding) {
+          searchPromises.push(
+            collection.aggregate(buildEnhancedVectorSearchPipeline(
+              queryEmbedding, hardFilters, {}, isComplexQuery ? 20 : 50, useOrLogic, true
+            )).toArray()
+          );
+        }
+        
+        const searchResults = await Promise.all(searchPromises);
+        const fuzzyResults = searchResults[0];
+        const vectorResults = queryEmbedding ? searchResults[1] : [];
+        
+        const documentRanks = new Map();
+        fuzzyResults.forEach((doc, index) => {
+          documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+        });
+        vectorResults.forEach((doc, index) => {
+          const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+          documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+        });
 
-      combinedResults = Array.from(documentRanks.entries())
-        .map(([id, ranks]) => {
-          const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
-                      vectorResults.find((d) => d._id.toString() === id);
-          return { ...doc, rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank) };
-        })
-        .sort((a, b) => b.rrf_score - a.rrf_score);
+        combinedResults = Array.from(documentRanks.entries())
+          .map(([id, ranks]) => {
+            const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
+                        vectorResults.find((d) => d._id.toString() === id);
+            
+            // Apply keyword bonus for simple queries
+            let keywordBonus = 0;
+            if (!isComplexQuery && doc && doc.name) {
+              const queryLower = query.toLowerCase();
+              const nameLower = doc.name.toLowerCase();
+              
+              if (nameLower.includes(queryLower)) {
+                keywordBonus = 10;
+              } else if (queryLower.split(' ').some(word => word.length > 2 && nameLower.includes(word))) {
+                keywordBonus = 5;
+              }
+            }
+            
+            return { 
+              ...doc, 
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, keywordBonus) 
+            };
+          })
+          .sort((a, b) => b.rrf_score - a.rrf_score);
+      }
     }
 
     // Rest of the search logic remains the same...
