@@ -1317,7 +1317,7 @@ app.post("/search", async (req, res) => {
       // Only do vector search if we have an embedding
       const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, softMatchHardFilters, {}, 100, useOrLogic, true, 1
+          cleanedHebrewText, query, softMatchHardFilters, {}, 200, useOrLogic, true, 1
         )).toArray()
       ];
       
@@ -1338,7 +1338,7 @@ app.post("/search", async (req, res) => {
       
       const generalSearchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, generalHardFilters, {}, 100, useOrLogic, true
+          cleanedHebrewText, query, generalHardFilters, {}, 200, useOrLogic, true
         )).toArray()
       ];
       
@@ -1446,21 +1446,19 @@ app.post("/search", async (req, res) => {
         // Hebrew non-complex: Fuzzy search only
         console.log("Executing Hebrew simple query - fuzzy search only");
         const fuzzyResults = await collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, hardFilters, {}, 100, useOrLogic, true, boostMultiplier
+          cleanedHebrewText, query, hardFilters, {}, 200, useOrLogic, true, boostMultiplier
         )).toArray();
         
         let vectorResults = [];
         
-        // Fallback mechanism: if fewer than 5 fuzzy results, try vector search
+        // Fallback mechanism: if fewer than 5 fuzzy results, perform translation and vector search
         if (fuzzyResults.length < 5) {
-          console.log(`Only ${fuzzyResults.length} fuzzy results found - applying vector search fallback`);
+          console.log(`Only ${fuzzyResults.length} fuzzy results found - performing translation and vector search fallback`);
           try {
-            // Generate embedding for fallback
-            if (!queryEmbedding) {
-              const translatedForEmbedding = await translateQuery(query, context);
-              const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
-              queryEmbedding = await getQueryEmbedding(cleanedForEmbedding);
-            }
+            // Always perform translation for fallback
+            const translatedForEmbedding = await translateQuery(query, context);
+            const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
+            queryEmbedding = await getQueryEmbedding(cleanedForEmbedding);
             
             if (queryEmbedding) {
               vectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
@@ -1469,7 +1467,7 @@ app.post("/search", async (req, res) => {
               console.log(`Vector fallback found ${vectorResults.length} results`);
             }
           } catch (error) {
-            console.error("Vector search fallback failed:", error);
+            console.error("Translation and vector search fallback failed:", error);
           }
         }
         
@@ -1517,7 +1515,7 @@ app.post("/search", async (req, res) => {
         
         const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-            cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 100, useOrLogic, true, boostMultiplier
+            cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 200, useOrLogic, true, boostMultiplier
           )).toArray()
         ];
         
@@ -1632,8 +1630,8 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Limit final results to maximum of 100
-    const limitedResults = formattedResults.slice(0, 100);
+    // Limit final results to maximum of 200
+    const limitedResults = formattedResults.slice(0, 200);
     
     console.log(`Returning ${limitedResults.length} results for query: ${query}`);
     console.log(`[${requestId}] Enhanced search request completed successfully`);
