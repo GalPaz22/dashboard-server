@@ -1248,8 +1248,8 @@ app.post("/search", async (req, res) => {
         return res.status(500).json({ error: "Error generating query embedding" });
     }
 
-    // Use enhanced filter extraction for complex queries (Gemini-based only)
-    const enhancedFilters = categories && !shouldSkipVector
+    // Use enhanced filter extraction for all queries when categories are available (Gemini-based)
+    const enhancedFilters = categories
       ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
       : {};
 
