@@ -1439,6 +1439,7 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 }
 
 // UPDATED: Enhanced search endpoint with unified soft filter approach
+// UPDATED: Enhanced search endpoint with unified soft filter approach
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
@@ -1730,19 +1731,23 @@ app.post("/search", async (req, res) => {
 
     // LLM reordering for complex queries
     let reorderedData;
+    let llmReorderingSuccessful = false; // Track if LLM reordering actually happened
     
     if (isComplexQuery) {
       console.log(`[${requestId}] Applying LLM reordering`);
       try {
         const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
         reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
+        llmReorderingSuccessful = true; // Mark as successful
       } catch (error) {
         console.error("LLM reordering failed, falling back to RRF ordering:", error);
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+        llmReorderingSuccessful = false; // Mark as failed
       }
     } else {
       console.log(`[${requestId}] Using RRF ordering (simple query)`);
       reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+      llmReorderingSuccessful = false; // No LLM reordering attempted
     }
 
     // Prepare final results
@@ -1762,7 +1767,7 @@ app.post("/search", async (req, res) => {
           price: product.price,
           image: product.image,
           url: product.url,
-          highlight: reorderedIds.includes(product.id.toString()), // Highlight ONLY if it was in the LLM reordered list
+          highlight: llmReorderingSuccessful, // Only highlight if LLM reordering actually succeeded
           type: product.type,
           specialSales: product.specialSales,
           ItemID: product.ItemID,
@@ -1781,7 +1786,7 @@ app.post("/search", async (req, res) => {
         type: r.type,
         specialSales: r.specialSales,
         ItemID: r.ItemID,
-        highlight: false, // Remaining results were not re-ranked by LLM
+        highlight: false, // Remaining results are never highlighted
         explanation: null,
         softFilterMatch: !!r.softFilterMatch,
         simpleSearch: false
@@ -1799,6 +1804,8 @@ app.post("/search", async (req, res) => {
     
     console.log(`[${requestId}] Returning ${limitedResults.length} results`);
     console.log(`[${requestId}] Soft filter matches in final results: ${limitedResults.filter(r => r.softFilterMatch).length}`);
+    console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
+    console.log(`[${requestId}] Highlighted products: ${limitedResults.filter(r => r.highlight).length}`);
 
     res.json(limitedResults);
     
