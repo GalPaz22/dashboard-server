@@ -1762,7 +1762,7 @@ app.post("/search", async (req, res) => {
           price: product.price,
           image: product.image,
           url: product.url,
-          highlight: isComplexQuery, // Highlight ONLY if it was an LLM-reordered query
+          highlight: reorderedIds.includes(product.id.toString()), // Highlight ONLY if it was in the LLM reordered list
           type: product.type,
           specialSales: product.specialSales,
           ItemID: product.ItemID,
@@ -1781,7 +1781,7 @@ app.post("/search", async (req, res) => {
         type: r.type,
         specialSales: r.specialSales,
         ItemID: r.ItemID,
-        highlight: false, // Remaining results are never highlighted
+        highlight: false, // Remaining results were not re-ranked by LLM
         explanation: null,
         softFilterMatch: !!r.softFilterMatch,
         simpleSearch: false
