@@ -1745,7 +1745,7 @@ app.post("/search-to-cart", async (req, res) => {
     
     // Add timestamp if not provided
     if (!document.timestamp) {
-      document.timestamp = Math.floor(Date.now() / 1000);
+      document.timestamp = new Date().toISOString();
     }
     
     // Insert the document into the cart collection
