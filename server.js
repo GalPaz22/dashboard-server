@@ -1074,7 +1074,7 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
                    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
   
   // Add soft filter boost (now cumulative)
-  const softBoost = softFilterBoost * 0.5; // Each match gives a 0.5 boost
+  const softBoost = softFilterBoost * 1.5; // Each match gives a 1.5 boost
   
   // Add keyword match bonus for strong text matches
   return baseScore + softBoost + keywordMatchBonus;
@@ -1739,6 +1739,7 @@ app.post("/search", async (req, res) => {
         const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
         reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
         llmReorderingSuccessful = true; // Mark as successful
+        console.log(`[${requestId}] LLM reordering successful. Data received:`, JSON.stringify(reorderedData, null, 2));
       } catch (error) {
         console.error("LLM reordering failed, falling back to RRF ordering:", error);
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
@@ -1752,6 +1753,7 @@ app.post("/search", async (req, res) => {
 
     // Prepare final results
     const reorderedIds = reorderedData.map(item => item.id);
+    console.log(`[${requestId}] Reordered IDs for highlighting check:`, reorderedIds);
     const explanationsMap = new Map(reorderedData.map(item => [item.id, item.explanation]));
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
     const reorderedProductIds = new Set(reorderedIds);
@@ -1760,14 +1762,16 @@ app.post("/search", async (req, res) => {
     const formattedResults = [
       ...orderedProducts.map((product) => {
         const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
+        const isHighlighted = llmReorderingSuccessful && reorderedIds.includes(product._id.toString());
+        console.log(`[Highlight Check] Product ID: ${product._id.toString()}, In reorderedIds: ${reorderedIds.includes(product._id.toString())}, isHighlighted: ${isHighlighted}`);
         return {
-          id: product.id,
+          id: product._id, // Ensure we use _id here
           name: product.name,
           description: product.description,
           price: product.price,
           image: product.image,
           url: product.url,
-          highlight: llmReorderingSuccessful, // Only highlight if LLM reordering actually succeeded
+          highlight: isHighlighted, // Highlight only if LLM reordering was successful AND the product was in the reordered list
           type: product.type,
           specialSales: product.specialSales,
           ItemID: product.ItemID,
