@@ -1619,36 +1619,43 @@ app.post("/search", async (req, res) => {
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
      
     const formattedResults = [
-      ...orderedProducts.map((product) => ({
-        id: product.id,
-        name: product.name,
-        description: product.description,
-        price: product.price,
-        image: product.image,
-        url: product.url,
-        highlight: isComplexQuery, // Only highlight if it was an LLM-reordered query
-        type: product.type,
-        specialSales: product.specialSales,
-        ItemID: product.ItemID,
-        explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
-        softFilterMatch: combinedResults.find(r => r._id.toString() === product._id.toString())?.rrf_score > 1000,
-        simpleSearch: false
-      })),
-      ...remainingResults.map((r) => ({
-        id: r.id,
-        name: r.name,
-        description: r.description,
-        price: r.price,
-        image: r.image,
-        url: r.url,
-        type: r.type,
-        specialSales: r.specialSales,
-        ItemID: r.ItemID,
-        highlight: false,
-        explanation: null,
-        softFilterMatch: r.softFilterBoost > 0,
-        simpleSearch: false
-      })),
+      ...orderedProducts.map((product) => {
+        const productResult = combinedResults.find(r => r._id.toString() === product._id.toString());
+        const hasSoftFilterMatch = productResult?.rrf_score > 1000 || productResult?.softFilterMatch;
+        return {
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          price: product.price,
+          image: product.image,
+          url: product.url,
+          highlight: isComplexQuery || hasSoftFilterMatch, // Highlight if LLM-reordered OR has soft filter match
+          type: product.type,
+          specialSales: product.specialSales,
+          ItemID: product.ItemID,
+          explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+          softFilterMatch: hasSoftFilterMatch,
+          simpleSearch: false
+        };
+      }),
+      ...remainingResults.map((r) => {
+        const hasSoftFilterMatch = r.softFilterBoost > 0 || r.softFilterMatch;
+        return {
+          id: r.id,
+          name: r.name,
+          description: r.description,
+          price: r.price,
+          image: r.image,
+          url: r.url,
+          type: r.type,
+          specialSales: r.specialSales,
+          ItemID: r.ItemID,
+          highlight: hasSoftFilterMatch, // Highlight if has soft filter match
+          explanation: null,
+          softFilterMatch: hasSoftFilterMatch,
+          simpleSearch: false
+        };
+      }),
     ];
 
     // Log the query and extracted filters to database
