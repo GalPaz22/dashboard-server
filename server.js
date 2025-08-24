@@ -279,8 +279,8 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
                 path: "name",
                 fuzzy: {
                   maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
+                  prefixLength: 1, // Reduced from 3 to 1 for better Hebrew matching
+                  maxExpansions: 100, // Increased for more variations
                 },
                 score: { boost: { value: 10 * boostMultiplier } } // Boost name matches
               }
@@ -291,8 +291,8 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
                 path: "description",
                 fuzzy: {
                   maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
+                  prefixLength: 1, // Reduced from 3 to 1 for better Hebrew matching
+                  maxExpansions: 100, // Increased for more variations
                 },
                 score: { boost: { value: 3 * boostMultiplier } } // Boost description matches
               }
@@ -303,9 +303,21 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
                 path: "name",
                 fuzzy: {
                   maxEdits: 2,
-                  prefixLength: 2
+                  prefixLength: 1 // Reduced for better Hebrew matching
                 },
                 score: { boost: { value: 5 * boostMultiplier } } // Add a moderate boost for autocomplete matches
+              }
+            },
+            {
+              text: {
+                query: cleanedHebrewText,
+                path: "name",
+                fuzzy: {
+                  maxEdits: 3, // Allow more edits for Hebrew character variations
+                  prefixLength: 0, // No prefix requirement for maximum flexibility
+                  maxExpansions: 200,
+                },
+                score: { boost: { value: 2 * boostMultiplier } } // Lower boost for this more permissive search
               }
             }
           ]
@@ -369,23 +381,15 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
       });
     }
     
-    // Category filter with AND/OR logic
+    // Category filter with OR logic
     if (filtersToApply.category) {
-      if (Array.isArray(filtersToApply.category) && useOrLogic) {
-        pipeline.push({
-          $match: {
-            category: { $in: filtersToApply.category }
-          }
-        });
-      } else {
-        pipeline.push({
-          $match: {
-            category: Array.isArray(filtersToApply.category) 
-              ? { $all: filtersToApply.category } 
-              : filtersToApply.category
-          }
-        });
-      }
+      pipeline.push({
+        $match: {
+          category: Array.isArray(filtersToApply.category) 
+            ? { $in: filtersToApply.category }
+            : filtersToApply.category
+        }
+      });
     }
     
     // Price filters
@@ -489,13 +493,9 @@ function buildEnhancedVectorSearchPipeline(queryEmbedding, hardFilters = {}, sof
   
   const postMatchClauses = [];
 
-  // Apply hard category filters in post-match
+  // Apply hard category filters in post-match with OR logic
   if (isHardFilterQuery && Array.isArray(hardFilters.category) && hardFilters.category.length > 0) {
-    if (useOrLogic) {
-      postMatchClauses.push({ category: { $in: hardFilters.category } });
-    } else {
-      postMatchClauses.push({ category: { $all: hardFilters.category } });
-    }
+    postMatchClauses.push({ category: { $in: hardFilters.category } });
   }
 
   postMatchClauses.push({
@@ -1286,7 +1286,8 @@ app.post("/search", async (req, res) => {
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
 
-    const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
+    // Always use OR logic for categories now
+    const useOrLogic = true;
 
     let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
     if (hardFilters.category) {
@@ -1307,8 +1308,8 @@ app.post("/search", async (req, res) => {
     if (hasSoftFilters) {
       console.log("Executing DUAL search strategy for soft filters");
       
-      // SEARCH A: Find products that MATCH the soft category
-      const softMatchHardFilters = { ...hardFilters, softCategory: { $in: softFilters.softCategory } };
+      // SEARCH A: Find products that MATCH the soft category (using OR logic)
+      const softMatchHardFilters = { ...hardFilters, softCategory: { $in: Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory] } };
 
       // Only do vector search if we have an embedding
       const searchPromises = [
@@ -1329,8 +1330,8 @@ app.post("/search", async (req, res) => {
       const softFuzzyResults = searchResults[0];
       const softVectorResults = queryEmbedding ? searchResults[1] : [];
 
-      // SEARCH B: Find other products that DO NOT MATCH the soft category
-      const generalHardFilters = { ...hardFilters, softCategory: { $nin: softFilters.softCategory } };
+      // SEARCH B: Find other products that DO NOT MATCH the soft category (using OR logic)
+      const generalHardFilters = { ...hardFilters, softCategory: { $nin: Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory] } };
       
       const generalSearchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
