@@ -1334,7 +1334,7 @@ app.post("/search", async (req, res) => {
       
       const generalSearchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, generalHardFilters, {}, 400, useOrLogic, true
+          cleanedHebrewText, query, generalHardFilters, {}, 100, useOrLogic, true
         )).toArray()
       ];
       
@@ -1442,7 +1442,7 @@ app.post("/search", async (req, res) => {
         // Hebrew non-complex: Fuzzy search only
         console.log("Executing Hebrew simple query - fuzzy search only");
         const fuzzyResults = await collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, hardFilters, {}, 1000, useOrLogic, true, boostMultiplier
+          cleanedHebrewText, query, hardFilters, {}, 100, useOrLogic, true, boostMultiplier
         )).toArray();
         
         let vectorResults = [];
@@ -1513,7 +1513,7 @@ app.post("/search", async (req, res) => {
         
         const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-            cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 1000, useOrLogic, true, boostMultiplier
+            cleanedHebrewText, query, hardFilters, {}, isComplexQuery ? 20 : 100, useOrLogic, true, boostMultiplier
           )).toArray()
         ];
         
@@ -1628,10 +1628,13 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    console.log(`Returning ${formattedResults.length} results for query: ${query}`);
+    // Limit final results to maximum of 100
+    const limitedResults = formattedResults.slice(0, 100);
+    
+    console.log(`Returning ${limitedResults.length} results for query: ${query}`);
     console.log(`[${requestId}] Enhanced search request completed successfully`);
 
-    res.json(formattedResults);
+    res.json(limitedResults);
   } catch (error) {
     console.error("Error handling enhanced search request:", error);
     console.error(`[${requestId}] Search request failed with error:`, error.message);
