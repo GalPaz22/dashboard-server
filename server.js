@@ -1424,7 +1424,7 @@ app.post("/search", async (req, res) => {
             // Count how many of the filter categories are in the product's categories
             matchCount = filterCats.filter(cat => data.doc.softCategory.includes(cat)).length;
           }
-          const softBoost = matchCount * 1000; // Cumulative boost
+          const softBoost = matchCount * 2000; // Cumulative boost (Increased from 1000)
           return { 
             ...data.doc, 
             rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, softBoost)
@@ -1450,7 +1450,7 @@ app.post("/search", async (req, res) => {
           .filter(product => !existingIds.has(product._id.toString()))
           .map(product => ({
             ...product,
-            rrf_score: 500, // Give a moderate score to appended products
+            rrf_score: 1000, // Give a higher score to appended products (Increased from 500)
             softFilterMatch: true
           }));
         
@@ -1481,18 +1481,24 @@ app.post("/search", async (req, res) => {
         
         // Fallback mechanism: if fewer than 5 fuzzy results, perform translation and vector search
         if (fuzzyResults.length < 5) {
-          console.log(`Only ${fuzzyResults.length} fuzzy results found - performing translation and vector search fallback`);
+          console.log(`Fallback triggered: Only ${fuzzyResults.length} fuzzy results found.`);
           try {
             // Always perform translation for fallback
+            console.log("Fallback: Translating query...");
             const translatedForEmbedding = await translateQuery(query, context);
             const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
+            console.log(`Fallback: Translated query for embedding: "${cleanedForEmbedding}"`);
+
             queryEmbedding = await getQueryEmbedding(cleanedForEmbedding);
             
             if (queryEmbedding) {
+              console.log("Fallback: Performing vector search...");
               vectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
                 queryEmbedding, hardFilters, {}, 50, useOrLogic, true
               )).toArray();
-              console.log(`Vector fallback found ${vectorResults.length} results`);
+              console.log(`Fallback: Vector search found ${vectorResults.length} results.`);
+            } else {
+              console.log("Fallback: Could not generate query embedding.");
             }
           } catch (error) {
             console.error("Translation and vector search fallback failed:", error);
@@ -1619,43 +1625,36 @@ app.post("/search", async (req, res) => {
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
      
     const formattedResults = [
-      ...orderedProducts.map((product) => {
-        const productResult = combinedResults.find(r => r._id.toString() === product._id.toString());
-        const hasSoftFilterMatch = productResult?.rrf_score > 1000 || productResult?.softFilterMatch;
-        return {
-          id: product.id,
-          name: product.name,
-          description: product.description,
-          price: product.price,
-          image: product.image,
-          url: product.url,
-          highlight: isComplexQuery || hasSoftFilterMatch, // Highlight if LLM-reordered OR has soft filter match
-          type: product.type,
-          specialSales: product.specialSales,
-          ItemID: product.ItemID,
-          explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
-          softFilterMatch: hasSoftFilterMatch,
-          simpleSearch: false
-        };
-      }),
-      ...remainingResults.map((r) => {
-        const hasSoftFilterMatch = r.softFilterBoost > 0 || r.softFilterMatch;
-        return {
-          id: r.id,
-          name: r.name,
-          description: r.description,
-          price: r.price,
-          image: r.image,
-          url: r.url,
-          type: r.type,
-          specialSales: r.specialSales,
-          ItemID: r.ItemID,
-          highlight: hasSoftFilterMatch, // Highlight if has soft filter match
-          explanation: null,
-          softFilterMatch: hasSoftFilterMatch,
-          simpleSearch: false
-        };
-      }),
+      ...orderedProducts.map((product) => ({
+        id: product.id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        highlight: isComplexQuery || !!(combinedResults.find(r => r._id.toString() === product._id.toString())?.softFilterMatch), // Highlight if LLM-reordered OR has soft filter match
+        type: product.type,
+        specialSales: product.specialSales,
+        ItemID: product.ItemID,
+        explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+        softFilterMatch: !!(combinedResults.find(r => r._id.toString() === product._id.toString())?.softFilterMatch),
+        simpleSearch: false
+      })),
+      ...remainingResults.map((r) => ({
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        price: r.price,
+        image: r.image,
+        url: r.url,
+        type: r.type,
+        specialSales: r.specialSales,
+        ItemID: r.ItemID,
+        highlight: !!r.softFilterMatch, // Highlight if has soft filter match
+        explanation: null,
+        softFilterMatch: !!r.softFilterMatch,
+        simpleSearch: false
+      })),
     ];
 
     // Log the query and extracted filters to database
