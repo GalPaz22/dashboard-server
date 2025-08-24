@@ -41,7 +41,22 @@ function getMongoClient() {
 }
 
 // POST /queries endpoint
-
+app.post("/queries", async (req, res) => {
+  const { dbName } = req.body;
+  if (!dbName) {
+    return res.status(400).json({ error: "dbName parameter is required in the request body" });
+  }
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const queriesCollection = db.collection("queries");
+    const queries = await queriesCollection.find({}).toArray();
+    return res.status(200).json({ queries });
+  } catch (error) {
+    console.error("Error fetching queries:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
 
 /* =========================================================== *\
    STORE CONFIG LOOK-UP – one place, reused by all routes
@@ -99,19 +114,7 @@ async function connectToMongoDB(mongodbUri) {
   }
   return client;
 }
-app.post("/queries", authenticate, async (req, res) => {
-  const { dbName } = req.store;
-  try {
-    const client = await getMongoClient();
-    const db = client.db(dbName);
-    const queriesCollection = db.collection("queries");
-    const queries = await queriesCollection.find({}).toArray();
-    return res.status(200).json({ queries });
-  } catch (error) {
-    console.error("Error fetching queries:", error);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
+
 const buildAutocompletePipeline = (query, indexName, path) => {
   const pipeline = [];
   pipeline.push({
@@ -707,6 +710,7 @@ async function logQuery(queryCollection, query, filters) {
     minPrice: filters.minPrice || "unknown",
     maxPrice: filters.maxPrice || "unknown",
     type: filters.type || "unknown",
+    softCategory: filters.softCategory || "unknown",
     entity: entity.trim(),
   };
   await queryCollection.insertOne(queryDocument);
@@ -1249,6 +1253,11 @@ app.post("/search", async (req, res) => {
       ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
       : {};
 
+    // Log extracted filters for debugging
+    if (Object.keys(enhancedFilters).length > 0) {
+      console.log(`[${requestId}] Extracted filters:`, JSON.stringify(enhancedFilters));
+    }
+
     // Separate hard and soft filters
     const hardFilters = {
       category: enhancedFilters.category,
@@ -1611,6 +1620,13 @@ app.post("/search", async (req, res) => {
         simpleSearch: false
       })),
     ];
+
+    // Log the query and extracted filters to database
+    try {
+      await logQuery(querycollection, query, enhancedFilters);
+    } catch (logError) {
+      console.error(`[${requestId}] Failed to log query:`, logError.message);
+    }
 
     console.log(`Returning ${formattedResults.length} results for query: ${query}`);
     console.log(`[${requestId}] Enhanced search request completed successfully`);
