@@ -931,7 +931,7 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.5-flash-lite",
       contents: userContent,
       config: { 
         systemInstruction, 
