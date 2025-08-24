@@ -1427,7 +1427,8 @@ app.post("/search", async (req, res) => {
           const softBoost = matchCount * 2000; // Cumulative boost (Increased from 1000)
           return { 
             ...data.doc, 
-            rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, softBoost)
+            rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, softBoost),
+            softFilterMatch: data.isSoftMatch // Explicitly label soft-matched products
           };
         });
 
