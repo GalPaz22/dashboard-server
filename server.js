@@ -1317,14 +1317,14 @@ app.post("/search", async (req, res) => {
       // Only do vector search if we have an embedding
       const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, softMatchHardFilters, {}, 200, useOrLogic, true, 1
+          cleanedHebrewText, query, softMatchHardFilters, {}, 100, useOrLogic, true, 1
         )).toArray()
       ];
       
       if (queryEmbedding) {
         searchPromises.push(
         collection.aggregate(buildEnhancedVectorSearchPipeline(
-            queryEmbedding, softMatchHardFilters, {}, 20, useOrLogic, true
+            queryEmbedding, softMatchHardFilters, {}, 100, useOrLogic, true
         )).toArray()
         );
       }
@@ -1338,14 +1338,14 @@ app.post("/search", async (req, res) => {
       
       const generalSearchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, generalHardFilters, {}, 200, useOrLogic, true
+          cleanedHebrewText, query, generalHardFilters, {}, 100, useOrLogic, true
         )).toArray()
       ];
       
       if (queryEmbedding) {
         generalSearchPromises.push(
         collection.aggregate(buildEnhancedVectorSearchPipeline(
-            queryEmbedding, generalHardFilters, {}, 30, useOrLogic, true
+            queryEmbedding, generalHardFilters, {}, 100, useOrLogic, true
         )).toArray()
         );
       }
@@ -1431,6 +1431,34 @@ app.post("/search", async (req, res) => {
           };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
+
+      // APPEND ALL products with the extracted soft category
+      console.log("Appending all products with soft category:", softFilters.softCategory);
+      try {
+        const allSoftCategoryProducts = await collection.find({
+          softCategory: { $in: Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory] },
+          ...(Object.keys(hardFilters).length > 0 && hardFilters) // Apply hard filters if they exist
+        }).limit(200).toArray();
+        
+        console.log(`Found ${allSoftCategoryProducts.length} additional products with soft category`);
+        
+        // Get IDs of products already in combinedResults to avoid duplicates
+        const existingIds = new Set(combinedResults.map(r => r._id.toString()));
+        
+        // Append new products that aren't already in the results
+        const newProducts = allSoftCategoryProducts
+          .filter(product => !existingIds.has(product._id.toString()))
+          .map(product => ({
+            ...product,
+            rrf_score: 500, // Give a moderate score to appended products
+            softFilterMatch: true
+          }));
+        
+        combinedResults = [...combinedResults, ...newProducts];
+        console.log(`Appended ${newProducts.length} new products, total results: ${combinedResults.length}`);
+      } catch (error) {
+        console.error("Error appending soft category products:", error);
+      }
 
     } else {
       // Standard search (no soft filters), this is the path for SIMPLE QUERIES
