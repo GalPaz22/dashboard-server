@@ -1429,8 +1429,7 @@ app.post("/search", async (req, res) => {
             ...data.doc, 
             rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, softBoost)
           };
-        })
-        .sort((a, b) => b.rrf_score - a.rrf_score);
+        });
 
       // APPEND ALL products with the extracted soft category
       console.log("Appending all products with soft category:", softFilters.softCategory);
@@ -1600,6 +1599,20 @@ app.post("/search", async (req, res) => {
         .sort((a, b) => b.rrf_score - a.rrf_score);
       }
     }
+
+    // New Binary Sort: Prioritize soft category matches
+    combinedResults.sort((a, b) => {
+      const aIsSoftMatch = a.softFilterMatch || false;
+      const bIsSoftMatch = b.softFilterMatch || false;
+
+      // If one is a soft match and the other isn't, the soft match comes first
+      if (aIsSoftMatch !== bIsSoftMatch) {
+        return aIsSoftMatch ? -1 : 1;
+      }
+
+      // Otherwise, sort by the regular score
+      return b.rrf_score - a.rrf_score;
+    });
 
     // Rest of the search logic remains the same...
     let reorderedData;
