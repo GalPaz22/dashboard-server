@@ -41,22 +41,7 @@ function getMongoClient() {
 }
 
 // POST /queries endpoint
-app.post("/queries", async (req, res) => {
-  const { dbName } = req.body;
-  if (!dbName) {
-    return res.status(400).json({ error: "dbName parameter is required in the request body" });
-  }
-  try {
-    const client = await getMongoClient();
-    const db = client.db(dbName);
-    const queriesCollection = db.collection("queries");
-    const queries = await queriesCollection.find({}).toArray();
-    return res.status(200).json({ queries });
-  } catch (error) {
-    console.error("Error fetching queries:", error);
-    return res.status(500).json({ error: "Internal Server Error" });
-  }
-});
+
 
 /* =========================================================== *\
    STORE CONFIG LOOK-UP – one place, reused by all routes
@@ -114,7 +99,19 @@ async function connectToMongoDB(mongodbUri) {
   }
   return client;
 }
-
+app.post("/queries", authenticate, async (req, res) => {
+  const { dbName } = req.store;
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const queriesCollection = db.collection("queries");
+    const queries = await queriesCollection.find({}).toArray();
+    return res.status(200).json({ queries });
+  } catch (error) {
+    console.error("Error fetching queries:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
 const buildAutocompletePipeline = (query, indexName, path) => {
   const pipeline = [];
   pipeline.push({
