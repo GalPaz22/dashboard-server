@@ -303,7 +303,7 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
                 path: "name",
                 fuzzy: {
                   maxEdits: 2,
-                  prefixLength: 2
+                  prefixLength: 3
                 },
                 score: { boost: { value: 5 * boostMultiplier } } // Add a moderate boost for autocomplete matches
               }
@@ -945,6 +945,8 @@ ${JSON.stringify(productData, null, 2)}`;
     });
 
     const text = response.text.trim();
+    console.log(`[Gemini Rerank] Query: "${sanitizedQuery}"`);
+    console.log(`[Gemini Rerank] Response: ${text}`);
     const reorderedData = JSON.parse(text);
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
     
@@ -1106,6 +1108,8 @@ Focus only on visual elements that match the search intent.`;
    });
 
    const responseText = response.text.trim();
+   console.log(`[Gemini Image Rerank] Query: "${sanitizedQuery}"`);
+   console.log(`[Gemini Image Rerank] Response: ${responseText}`);
 
    if (!responseText) {
      throw new Error("No content returned from Gemini");
