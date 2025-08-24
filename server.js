@@ -1324,7 +1324,7 @@ app.post("/search", async (req, res) => {
       if (queryEmbedding) {
         searchPromises.push(
         collection.aggregate(buildEnhancedVectorSearchPipeline(
-            queryEmbedding, softMatchHardFilters, {}, 100, useOrLogic, true
+            queryEmbedding, softMatchHardFilters, {}, 30, useOrLogic, true
         )).toArray()
         );
       }
@@ -1338,14 +1338,14 @@ app.post("/search", async (req, res) => {
       
       const generalSearchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, generalHardFilters, {}, 100, useOrLogic, true
+          cleanedHebrewText, query, generalHardFilters, {}, 50, useOrLogic, true
         )).toArray()
       ];
       
       if (queryEmbedding) {
         generalSearchPromises.push(
         collection.aggregate(buildEnhancedVectorSearchPipeline(
-            queryEmbedding, generalHardFilters, {}, 100, useOrLogic, true
+            queryEmbedding, generalHardFilters, {}, 50, useOrLogic, true
         )).toArray()
         );
       }
@@ -1721,7 +1721,7 @@ app.post("/recommend", async (req, res) => {
           index: "vector_index",
           path: "embedding",
           queryVector: embedding,
-          numCandidates: 100,
+          numCandidates: 50,
           limit: 10,
         },
       },
