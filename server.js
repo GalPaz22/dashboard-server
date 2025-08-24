@@ -1261,11 +1261,6 @@ app.post("/search", async (req, res) => {
     if (Object.keys(enhancedFilters).length > 0) {
       console.log(`[${requestId}] Extracted filters:`, JSON.stringify(enhancedFilters));
     }
-    
-    // Debug soft filters specifically
-    if (softFilters.softCategory) {
-      console.log(`[${requestId}] Soft category filters detected:`, softFilters.softCategory);
-    }
 
     // Separate hard and soft filters
     const hardFilters = {
@@ -1432,8 +1427,7 @@ app.post("/search", async (req, res) => {
           const softBoost = matchCount * 2000; // Cumulative boost (Increased from 1000)
           return { 
             ...data.doc, 
-            rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, softBoost),
-            softFilterMatch: matchCount > 0 // Mark products with soft category matches
+            rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, softBoost)
           };
         });
 
@@ -1669,9 +1663,9 @@ app.post("/search", async (req, res) => {
         type: r.type,
         specialSales: r.specialSales,
         ItemID: r.ItemID,
-        highlight: !!(r.softFilterMatch || r.softFilterBoost > 0), // Highlight if has soft filter match
+        highlight: !!r.softFilterMatch, // Highlight if has soft filter match
         explanation: null,
-        softFilterMatch: !!(r.softFilterMatch || r.softFilterBoost > 0),
+        softFilterMatch: !!r.softFilterMatch,
         simpleSearch: false
       })),
     ];
