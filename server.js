@@ -1451,9 +1451,9 @@ app.post("/search", async (req, res) => {
         
         let vectorResults = [];
         
-        // Fallback mechanism: if no fuzzy results, try vector search
-        if (fuzzyResults.length === 0) {
-          console.log("No fuzzy results found - applying vector search fallback");
+        // Fallback mechanism: if fewer than 5 fuzzy results, try vector search
+        if (fuzzyResults.length < 5) {
+          console.log(`Only ${fuzzyResults.length} fuzzy results found - applying vector search fallback`);
           try {
             // Generate embedding for fallback
             if (!queryEmbedding) {
