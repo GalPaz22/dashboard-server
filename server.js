@@ -1440,6 +1440,7 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 
 // UPDATED: Enhanced search endpoint with unified soft filter approach
 // UPDATED: Enhanced search endpoint with unified soft filter approach
+// UPDATED: Enhanced search endpoint with unified soft filter approach
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
@@ -1463,13 +1464,23 @@ app.post("/search", async (req, res) => {
     const collection = db.collection("products");
     const querycollection = db.collection("queries");
 
-    // Check if this is a simple product name query first
+    // Check if this is a simple product name query first with fallback mechanism
     const initialFilters = {};
-    const isComplexQuery = !(await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context));
+    let isComplexQuery;
+    let queryClassificationFailed = false;
+    
+    try {
+      isComplexQuery = !(await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context));
+      console.log(`[${requestId}] Query classification successful: ${isComplexQuery ? 'COMPLEX' : 'SIMPLE'}`);
+    } catch (error) {
+      console.error(`[${requestId}] Query classification failed, falling back to complex query handling:`, error);
+      isComplexQuery = true; // Default to complex query for full search
+      queryClassificationFailed = true;
+    }
 
     // Early language detection to optimize processing
     const isHebrewLang = isHebrewQuery(query);
-    const shouldSkipVector = isHebrewLang && !isComplexQuery;
+    const shouldSkipVector = isHebrewLang && !isComplexQuery && !queryClassificationFailed;
 
     // Translation and embedding
     let translatedQuery, queryEmbedding, cleanedText;
@@ -1523,6 +1534,10 @@ app.post("/search", async (req, res) => {
 
     console.log(`[${requestId}] Hard filters:`, JSON.stringify(hardFilters));
     console.log(`[${requestId}] Soft filters:`, JSON.stringify(softFilters));
+    
+    if (queryClassificationFailed) {
+      console.log(`[${requestId}] Using fallback: Full search (fuzzy + vector) due to classification failure`);
+    }
 
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
 
@@ -1546,6 +1561,9 @@ app.post("/search", async (req, res) => {
 
     if (hasSoftFilters) {
       console.log(`[${requestId}] Executing search with soft filters`, softFilters.softCategory);
+      if (queryClassificationFailed) {
+        console.log(`[${requestId}] Fallback: Using enhanced search with soft filters due to classification failure`);
+      }
 
       const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
@@ -1684,6 +1702,10 @@ app.post("/search", async (req, res) => {
         
       } else {
         // Combined fuzzy + vector search
+        if (queryClassificationFailed) {
+          console.log(`[${requestId}] Fallback: Using combined fuzzy + vector search due to classification failure`);
+        }
+        
         const searchPromises = [
           collection.aggregate(buildEnhancedSearchPipeline(
             cleanedHebrewText, query, hardFilters, {}, searchLimit, useOrLogic, true, boostMultiplier
@@ -1739,7 +1761,6 @@ app.post("/search", async (req, res) => {
         const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
         reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
         llmReorderingSuccessful = true; // Mark as successful
-        console.log(`[${requestId}] LLM reordering successful. Data received:`, JSON.stringify(reorderedData, null, 2));
       } catch (error) {
         console.error("LLM reordering failed, falling back to RRF ordering:", error);
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
@@ -1753,7 +1774,6 @@ app.post("/search", async (req, res) => {
 
     // Prepare final results
     const reorderedIds = reorderedData.map(item => item.id);
-    console.log(`[${requestId}] Reordered IDs for highlighting check:`, reorderedIds);
     const explanationsMap = new Map(reorderedData.map(item => [item.id, item.explanation]));
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
     const reorderedProductIds = new Set(reorderedIds);
@@ -1762,16 +1782,14 @@ app.post("/search", async (req, res) => {
     const formattedResults = [
       ...orderedProducts.map((product) => {
         const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
-        const isHighlighted = llmReorderingSuccessful && reorderedIds.includes(product._id.toString());
-        console.log(`[Highlight Check] Product ID: ${product._id.toString()}, In reorderedIds: ${reorderedIds.includes(product._id.toString())}, isHighlighted: ${isHighlighted}`);
         return {
-          id: product._id, // Ensure we use _id here
+          id: product.id,
           name: product.name,
           description: product.description,
           price: product.price,
           image: product.image,
           url: product.url,
-          highlight: isHighlighted, // Highlight only if LLM reordering was successful AND the product was in the reordered list
+          highlight: llmReorderingSuccessful, // Only highlight if LLM reordering actually succeeded
           type: product.type,
           specialSales: product.specialSales,
           ItemID: product.ItemID,
@@ -1810,6 +1828,7 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] Soft filter matches in final results: ${limitedResults.filter(r => r.softFilterMatch).length}`);
     console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
     console.log(`[${requestId}] Highlighted products: ${limitedResults.filter(r => r.highlight).length}`);
+    console.log(`[${requestId}] Query classification fallback used: ${queryClassificationFailed}`);
 
     res.json(limitedResults);
     
