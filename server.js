@@ -117,24 +117,50 @@ async function connectToMongoDB(mongodbUri) {
 
 const buildAutocompletePipeline = (query, indexName, path) => {
   const pipeline = [];
+  
   pipeline.push({
     $search: {
       index: indexName,
-      autocomplete: {
+      compound: {
+        should: [
+          // "Near exact" match - no fuzzy but allows analyzer normalization
+          {
+            text: {
+              query: query,
+              path: path,
+              // No fuzzy here, but still allows analyzer to handle Hebrew normalization
+              score: { 
+                boost: { value: 5.0 } // High boost for close matches
+              }
+            }
+          },
+          // Fuzzy match for broader results
+          {
+            text: {
         query: query,
         path: path,
         fuzzy: {
           maxEdits: 2,
-          prefixLength: 2,
+                prefixLength: 1,
+                maxExpansions: 50,
         },
-      },
+              score: {
+                boost: { value: 1.5 } // Lower boost for fuzzy matches
+              }
+            }
+          }
+        ],
+        minimumShouldMatch: 1
+      }
     },
   });
+  
   pipeline.push({
     $match: {
       $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
     },
   });
+  
   pipeline.push(
     { $limit: 5 },
     {
@@ -148,6 +174,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
       },
     }
   );
+  
   return pipeline;
 };
 
@@ -159,8 +186,8 @@ app.get("/autocomplete", async (req, res) => {
     const db = client.db(dbName);
     const collection1 = db.collection("products");
     const collection2 = db.collection("queries");
-    const pipeline1 = buildAutocompletePipeline(query, "default", "name");
-    const pipeline2 = buildAutocompletePipeline(query, "default2", "query");
+    const pipeline1 = buildAutocompletePipeline(query, "default", "name", 1);
+    const pipeline2 = buildAutocompletePipeline(query, "default2", "query", 1);
     const [suggestions1, suggestions2] = await Promise.all([
       collection1.aggregate(pipeline1).toArray(),
       collection2.aggregate(pipeline2).toArray(),
@@ -281,7 +308,7 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
                 path: "name",
                 fuzzy: {
                   maxEdits: 2,
-                  prefixLength: 3,
+                  prefixLength: 2,
                   maxExpansions: 50,
                 },
                 score: { boost: { value: 10 } }
@@ -304,7 +331,7 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
                 query: cleanedHebrewText,
                 path: "name",
                 fuzzy: {
-                  maxEdits: 2,
+                  maxEdits: 5,
                   prefixLength: 3
                 },
                 score: { boost: { value: 5 } }
@@ -319,15 +346,15 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
     if (softFilters && softFilters.softCategory) {
       const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
       softCats.forEach(cat => {
-        // Boost products that have this soft category
+        // Boost products that have this exact soft category (exact match, not text search)
         searchStage.$search.compound.should.push({
-          text: {
-            query: cat,
+          equals: {
             path: "softCategory",
-            score: { boost: { value: 15 } } // High boost for direct soft category match
+            value: cat,
+            score: { boost: { value: 15 } } // High boost for exact soft category match
           }
         });
-        // Also boost if soft category appears in name or description
+        // Also boost if soft category appears in name or description (keep text search for these)
         searchStage.$search.compound.should.push({
           text: {
             query: cat,
@@ -532,7 +559,7 @@ function buildUnifiedVectorSearchPipeline(queryEmbedding, hardFilters = {}, soft
       }
     });
   }
-
+  
   return pipeline;
 }
 
@@ -571,17 +598,7 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
                 score: { boost: { value: 3 * boostMultiplier } } // Boost description matches
               }
             },
-            {
-              autocomplete: {
-                query: cleanedHebrewText,
-                path: "name",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3
-                },
-                score: { boost: { value: 5 * boostMultiplier } } // Add a moderate boost for autocomplete matches
-              }
-            }
+    
           ]
         }
       }
@@ -589,24 +606,24 @@ const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, soft
     
     // Add soft filter boosting to search stage
     if (softFilters && softFilters.softCategory) {
-      const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-      softCats.forEach(cat => {
-        searchStage.$search.compound.should.push({
-          text: {
-            query: cat,
+        const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+        softCats.forEach(cat => {
+          searchStage.$search.compound.should.push({
+            text: {
+              query: cat,
             path: "softCategory",
-            score: { boost: { value: 5 } } // Higher boost for direct softCategory match
-          }
+              score: { boost: { value: 5 } } // Higher boost for direct softCategory match
+            }
+          });
+          searchStage.$search.compound.should.push({
+            text: {
+              query: cat,
+              path: "description",
+              score: { boost: { value: 2 } } 
+            }
+          });
         });
-        searchStage.$search.compound.should.push({
-          text: {
-            query: cat,
-            path: "description",
-            score: { boost: { value: 2 } } 
-          }
-        });
-      });
-    }
+      }
     
     pipeline.push(searchStage);
   } else {
@@ -1440,7 +1457,6 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 
 // UPDATED: Enhanced search endpoint with unified soft filter approach
 // UPDATED: Enhanced search endpoint with unified soft filter approach
-// UPDATED: Enhanced search endpoint with unified soft filter approach
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
@@ -1464,48 +1480,49 @@ app.post("/search", async (req, res) => {
     const collection = db.collection("products");
     const querycollection = db.collection("queries");
 
-    // Check if this is a simple product name query first with fallback mechanism
+    // Check if this is a simple product name query first
     const initialFilters = {};
-    let isComplexQuery;
-    let queryClassificationFailed = false;
-    
-    try {
-      isComplexQuery = !(await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context));
-      console.log(`[${requestId}] Query classification successful: ${isComplexQuery ? 'COMPLEX' : 'SIMPLE'}`);
-    } catch (error) {
-      console.error(`[${requestId}] Query classification failed, falling back to complex query handling:`, error);
-      isComplexQuery = true; // Default to complex query for full search
-      queryClassificationFailed = true;
-    }
+    const isComplexQuery = !(await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context));
 
+    // The isComplexQuery flag will be used ONLY to determine if we should skip the final LLM re-rank.
+    
     // Early language detection to optimize processing
     const isHebrewLang = isHebrewQuery(query);
-    const shouldSkipVector = isHebrewLang && !isComplexQuery && !queryClassificationFailed;
+    const shouldSkipVector = isHebrewLang && !isComplexQuery;
 
-    // Translation and embedding
+    // Conditional translation and embedding - only if needed
     let translatedQuery, queryEmbedding, cleanedText;
     
     if (shouldSkipVector) {
-      translatedQuery = query;
+      // Hebrew simple query - skip translation and embedding
+      translatedQuery = query; // Use original query
       cleanedText = query;
       queryEmbedding = null;
     } else {
+      // Need translation and/or embedding for vector search or complex processing
       translatedQuery = await translateQuery(query, context);
-      if (!translatedQuery)
+
+      if (!translatedQuery) {
         return res.status(500).json({ error: "Error translating query" });
+      }
 
       cleanedText = removeWineFromQuery(translatedQuery, noWord);
+      
+      // Get query embedding
       queryEmbedding = await getQueryEmbedding(cleanedText);
       if (!queryEmbedding)
         return res.status(500).json({ error: "Error generating query embedding" });
     }
 
-    // Extract filters
+    // Use enhanced filter extraction for all queries when categories are available (Gemini-based)
     const enhancedFilters = categories
       ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
       : {};
 
-    console.log(`[${requestId}] Extracted filters:`, JSON.stringify(enhancedFilters));
+    // Log extracted filters for debugging
+    if (Object.keys(enhancedFilters).length > 0) {
+      console.log(`[${requestId}] Extracted filters:`, JSON.stringify(enhancedFilters));
+    }
 
     // Separate hard and soft filters
     const hardFilters = {
@@ -1525,23 +1542,22 @@ app.post("/search", async (req, res) => {
       softFilters.softCategory = [softFilters.softCategory];
     }
 
+    // If query is complex but no filters were extracted, use the query itself as a soft filter
+    const hasExtractedHardFilters = hardFilters.category || hardFilters.type || hardFilters.price || hardFilters.minPrice || hardFilters.maxPrice;
+    const hasExtractedSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
+
+    if (isComplexQuery && !hasExtractedHardFilters && !hasExtractedSoftFilters) {
+      softFilters.softCategory = softFilters.softCategory ? [...softFilters.softCategory, query] : [query];
+    }
+
     // Remove undefined values
     Object.keys(hardFilters).forEach(key => hardFilters[key] === undefined && delete hardFilters[key]);
     Object.keys(softFilters).forEach(key => softFilters[key] === undefined && delete softFilters[key]);
 
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
-    const hasHardFilters = Object.keys(hardFilters).length > 0;
-
-    console.log(`[${requestId}] Hard filters:`, JSON.stringify(hardFilters));
-    console.log(`[${requestId}] Soft filters:`, JSON.stringify(softFilters));
-    
-    if (queryClassificationFailed) {
-      console.log(`[${requestId}] Using fallback: Full search (fuzzy + vector) due to classification failure`);
-    }
 
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
 
-    // Prepare cleaned text for search
     let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
     if (hardFilters.category) {
       const cats = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
@@ -1554,16 +1570,13 @@ app.post("/search", async (req, res) => {
     tempNoHebrewWord = [...new Set(tempNoHebrewWord)];
 
     const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
-    console.log(`[${requestId}] Cleaned query for search:`, cleanedHebrewText);
+    console.log(`[${requestId}] Cleaned query for fuzzy search:`, cleanedHebrewText);
 
-    // UNIFIED SEARCH APPROACH
     let combinedResults = [];
 
+    // UNIFIED SEARCH APPROACH
     if (hasSoftFilters) {
       console.log(`[${requestId}] Executing search with soft filters`, softFilters.softCategory);
-      if (queryClassificationFailed) {
-        console.log(`[${requestId}] Fallback: Using enhanced search with soft filters due to classification failure`);
-      }
 
       const searchPromises = [
         collection.aggregate(buildEnhancedSearchPipeline(
@@ -1578,7 +1591,7 @@ app.post("/search", async (req, res) => {
           )).toArray()
         );
       }
-      
+
       const [fuzzyResults, vectorResults = []] = await Promise.all(searchPromises);
 
       const documentRanks = new Map();
@@ -1590,7 +1603,7 @@ app.post("/search", async (req, res) => {
         const id = doc._id.toString();
         const existing = documentRanks.get(id);
         if (existing) {
-          existing.vectorRank = index;
+        existing.vectorRank = index;
         } else {
           documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
         }
@@ -1600,7 +1613,7 @@ app.post("/search", async (req, res) => {
         .map(data => {
           const boost = data.doc.softFilterBoost || 0;
           return {
-            ...data.doc,
+        ...data.doc,
             rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, boost),
             softFilterMatch: boost > 0
           };
@@ -1629,18 +1642,18 @@ app.post("/search", async (req, res) => {
             console.log(`[${requestId}] Fallback: Translating query for vector search...`);
             const translatedForEmbedding = await translateQuery(query, context);
             if (translatedForEmbedding) {
-              const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
+            const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
               console.log(`[${requestId}] Fallback: Translated query: "${cleanedForEmbedding}"`);
 
               const fallbackEmbedding = await getQueryEmbedding(cleanedForEmbedding);
-              
+            
               if (fallbackEmbedding) {
                 console.log(`[${requestId}] Fallback: Performing comprehensive vector search...`);
-                vectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
+              vectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
                   fallbackEmbedding, hardFilters, {}, vectorLimit * 2, useOrLogic, true // Double the limit for fallback
-                )).toArray();
+              )).toArray();
                 console.log(`[${requestId}] Fallback: Vector search found ${vectorResults.length} results`);
-              } else {
+            } else {
                 console.log(`[${requestId}] Fallback: Could not generate query embedding`);
               }
             } else {
@@ -1658,7 +1671,7 @@ app.post("/search", async (req, res) => {
         });
         
         // Add vector results if fuzzy was empty
-        vectorResults.forEach((doc, index) => {
+          vectorResults.forEach((doc, index) => {
           const existing = documentRanks.get(doc._id.toString());
           if (!existing) {
             // Only add vector results that weren't already found by fuzzy
@@ -1666,7 +1679,7 @@ app.post("/search", async (req, res) => {
           } else {
             // Update existing with vector rank
             existing.vectorRank = index;
-          }
+        }
         });
 
         combinedResults = Array.from(documentRanks.entries())
@@ -1702,21 +1715,17 @@ app.post("/search", async (req, res) => {
         
       } else {
         // Combined fuzzy + vector search
-        if (queryClassificationFailed) {
-          console.log(`[${requestId}] Fallback: Using combined fuzzy + vector search due to classification failure`);
-        }
-        
         const searchPromises = [
-          collection.aggregate(buildEnhancedSearchPipeline(
+        collection.aggregate(buildEnhancedSearchPipeline(
             cleanedHebrewText, query, hardFilters, {}, searchLimit, useOrLogic, true, boostMultiplier
           )).toArray()
         ];
         
         if (queryEmbedding) {
           searchPromises.push(
-            collection.aggregate(buildEnhancedVectorSearchPipeline(
+        collection.aggregate(buildEnhancedVectorSearchPipeline(
               queryEmbedding, hardFilters, {}, vectorLimit, useOrLogic, true
-            )).toArray()
+        )).toArray()
           );
         }
         
@@ -1724,26 +1733,26 @@ app.post("/search", async (req, res) => {
         const fuzzyResults = searchResults[0];
         const vectorResults = queryEmbedding ? searchResults[1] : [];
 
-        const documentRanks = new Map();
-        fuzzyResults.forEach((doc, index) => {
-          documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-        });
-        vectorResults.forEach((doc, index) => {
-          const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-          documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
-        });
+      const documentRanks = new Map();
+      fuzzyResults.forEach((doc, index) => {
+        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+      });
+      vectorResults.forEach((doc, index) => {
+        const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+        documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+      });
 
-        combinedResults = Array.from(documentRanks.entries())
-          .map(([id, ranks]) => {
-            const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
-                        vectorResults.find((d) => d._id.toString() === id);
+      combinedResults = Array.from(documentRanks.entries())
+        .map(([id, ranks]) => {
+          const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
+                      vectorResults.find((d) => d._id.toString() === id);
             return { 
               ...doc, 
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank),
               softFilterMatch: false
             };
-          })
-          .sort((a, b) => b.rrf_score - a.rrf_score);
+        })
+        .sort((a, b) => b.rrf_score - a.rrf_score);
       }
     }
 
@@ -1761,6 +1770,7 @@ app.post("/search", async (req, res) => {
         const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
         reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
         llmReorderingSuccessful = true; // Mark as successful
+        console.log(`[${requestId}] LLM reordering successful. Data received:`, JSON.stringify(reorderedData, null, 2));
       } catch (error) {
         console.error("LLM reordering failed, falling back to RRF ordering:", error);
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
@@ -1779,23 +1789,24 @@ app.post("/search", async (req, res) => {
     const reorderedProductIds = new Set(reorderedIds);
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
      
-    const formattedResults = [
+    const finalResults = [
       ...orderedProducts.map((product) => {
         const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
+        const isHighlighted = llmReorderingSuccessful && reorderedIds.includes(product._id.toString());
         return {
-          id: product.id,
-          name: product.name,
-          description: product.description,
-          price: product.price,
-          image: product.image,
-          url: product.url,
-          highlight: llmReorderingSuccessful, // Only highlight if LLM reordering actually succeeded
-          type: product.type,
-          specialSales: product.specialSales,
-          ItemID: product.ItemID,
-          explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+          id: product._id, // Ensure we use _id here
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+          highlight: isHighlighted, // Highlight only if LLM reordering was successful AND the product was in the reordered list
+        type: product.type,
+        specialSales: product.specialSales,
+        ItemID: product.ItemID,
+        explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
           softFilterMatch: !!(resultData?.softFilterMatch),
-          simpleSearch: false
+        simpleSearch: false
         };
       }),
       ...remainingResults.map((r) => ({
@@ -1822,13 +1833,11 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    const limitedResults = formattedResults.slice(0, 200);
+    const limitedResults = finalResults.slice(0, 200);
     
     console.log(`[${requestId}] Returning ${limitedResults.length} results`);
     console.log(`[${requestId}] Soft filter matches in final results: ${limitedResults.filter(r => r.softFilterMatch).length}`);
     console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
-    console.log(`[${requestId}] Highlighted products: ${limitedResults.filter(r => r.highlight).length}`);
-    console.log(`[${requestId}] Query classification fallback used: ${queryClassificationFailed}`);
 
     res.json(limitedResults);
     
