@@ -289,13 +289,10 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
   return isSimple;
 }
 
-// NEW: Unified search pipeline that applies hard filters and boosts soft filters
-const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false) => {
-  console.log("Building unified search pipeline with soft filter boosting");
-  
+// Standard search pipeline without soft filter boosting
+const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 200, useOrLogic = false) => {
   const pipeline = [];
   
-  // Search stage with soft filter boosting in the compound query
   if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
     const searchStage = {
       $search: {
@@ -331,7 +328,7 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
                 query: cleanedHebrewText,
                 path: "name",
                 fuzzy: {
-                  maxEdits: 5,
+                  maxEdits: 2,
                   prefixLength: 3
                 },
                 score: { boost: { value: 5 } }
@@ -341,37 +338,6 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
         }
       }
     };
-
-    // Add soft filter boosting directly in the search compound query
-    if (softFilters && softFilters.softCategory) {
-      const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-      softCats.forEach(cat => {
-        // Boost products that have this exact soft category (exact match, not text search)
-        searchStage.$search.compound.should.push({
-          equals: {
-            path: "softCategory",
-            value: cat,
-            score: { boost: { value: 15 } } // High boost for exact soft category match
-          }
-        });
-        // Also boost if soft category appears in name or description (keep text search for these)
-        searchStage.$search.compound.should.push({
-          text: {
-            query: cat,
-            path: "name",
-            score: { boost: { value: 8 } }
-          }
-        });
-        searchStage.$search.compound.should.push({
-          text: {
-            query: cat,
-            path: "description",
-            score: { boost: { value: 5 } }
-          }
-        });
-      });
-    }
-    
     pipeline.push(searchStage);
   } else {
     pipeline.push({ $match: {} });
@@ -387,9 +353,8 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
     },
   });
 
-  // Apply hard filters (these are restrictive)
+  // Apply hard filters
   if (hardFilters && Object.keys(hardFilters).length > 0) {
-    // Type filter
     if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
       pipeline.push({
         $match: {
@@ -400,7 +365,6 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
       });
     }
     
-    // Category filter with AND/OR logic
     if (hardFilters.category) {
       if (Array.isArray(hardFilters.category) && useOrLogic) {
         pipeline.push({
@@ -450,35 +414,55 @@ const buildUnifiedSearchPipeline = (cleanedHebrewText, query, hardFilters, softF
     }
   }
   
-  // Add field to identify soft filter matches for later processing
-  if (softFilters && softFilters.softCategory) {
-    pipeline.push({
-      $addFields: {
-        softFilterBoost: {
-          $cond: {
-            if: {
-              $or: Array.isArray(softFilters.softCategory) 
-                ? softFilters.softCategory.map(cat => ({ $in: [cat, { $ifNull: ["$softCategory", []] }] }))
-                : [{ $in: [softFilters.softCategory, { $ifNull: ["$softCategory", []] }] }]
-            },
-            then: 1000,
-            else: 0
-          }
-        }
-      }
-    });
-  }
-  
   pipeline.push({ $limit: limit });
+  return pipeline;
+};
+
+// Search pipeline WITH soft category filter (explicit inclusion)
+const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false) => {
+  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic);
+  
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    const limitIndex = pipeline.findIndex(stage => stage.$limit);
+    if (limitIndex !== -1) {
+      pipeline.splice(limitIndex, 0, {
+        $match: {
+          softCategory: { $in: softCats }
+        }
+      });
+    }
+  }
   
   return pipeline;
 };
 
-// NEW: Unified vector search pipeline with soft filter boosting
-function buildUnifiedVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 50, useOrLogic = false) {
+// Search pipeline WITHOUT soft category filter (explicit exclusion)  
+const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false) => {
+  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic);
+  
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    const limitIndex = pipeline.findIndex(stage => stage.$limit);
+    if (limitIndex !== -1) {
+      pipeline.splice(limitIndex, 0, {
+        $match: {
+          $or: [
+            { softCategory: { $exists: false } },
+            { softCategory: { $not: { $in: softCats } } }
+          ]
+        }
+      });
+    }
+  }
+  
+  return pipeline;
+};
+
+// Standard vector search pipeline without soft filter boosting
+function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 50, useOrLogic = false) {
   const filter = {};
 
-  // Apply hard filters to pre-filter (restrictive)
   if (hardFilters.category) {
     filter.category = Array.isArray(hardFilters.category)
       ? { $in: hardFilters.category }
@@ -491,7 +475,6 @@ function buildUnifiedVectorSearchPipeline(queryEmbedding, hardFilters = {}, soft
       : hardFilters.type;
   }
 
-  // Price filters
   if (hardFilters.minPrice && hardFilters.maxPrice) {
     filter.price = { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice };
   } else if (hardFilters.minPrice) {
@@ -521,7 +504,6 @@ function buildUnifiedVectorSearchPipeline(queryEmbedding, hardFilters = {}, soft
   
   const postMatchClauses = [];
 
-  // Apply hard category filters in post-match if needed
   if (Array.isArray(hardFilters.category) && hardFilters.category.length > 0) {
     if (useOrLogic) {
       postMatchClauses.push({ category: { $in: hardFilters.category } });
@@ -540,22 +522,19 @@ function buildUnifiedVectorSearchPipeline(queryEmbedding, hardFilters = {}, soft
   if (postMatchClauses.length > 0) {
     pipeline.push({ $match: { $and: postMatchClauses } });
   }
+  
+  return pipeline;
+}
 
-  // Add soft filter boost identification
+// Vector search pipeline WITH soft category filter (explicit inclusion)
+function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 50, useOrLogic = false) {
+  const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
+  
   if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
     pipeline.push({
-      $addFields: {
-        softFilterBoost: {
-          $cond: {
-            if: {
-              $or: Array.isArray(softFilters.softCategory) 
-                ? softFilters.softCategory.map(cat => ({ $in: [cat, { $ifNull: ["$softCategory", []] }] }))
-                : [{ $in: [softFilters.softCategory, { $ifNull: ["$softCategory", []] }] }]
-            },
-            then: 1000,
-            else: 0
-          }
-        }
+      $match: {
+        softCategory: { $in: softCats }
       }
     });
   }
@@ -563,239 +542,131 @@ function buildUnifiedVectorSearchPipeline(queryEmbedding, hardFilters = {}, soft
   return pipeline;
 }
 
-// Enhanced search pipeline builder that handles both hard and soft filters (LEGACY - used for non-soft-filter queries)
-const buildEnhancedSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 1000, useOrLogic = false, isHardFilterQuery = true, boostMultiplier = 1) => {
-  const pipeline = [];
+// Vector search pipeline WITHOUT soft category filter (explicit exclusion)
+function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 50, useOrLogic = false) {
+  const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
-  // Add search stage if we have a query
-  if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
-    const searchStage = {
-      $search: {
-        index: "default",
-        compound: {
-          should: [
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "name",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
-                },
-                score: { boost: { value: 10 * boostMultiplier } } // Boost name matches
-              }
-            },
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "description",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
-                },
-                score: { boost: { value: 3 * boostMultiplier } } // Boost description matches
-              }
-            },
-    
-          ]
-        }
-      }
-    };
-    
-    // Add soft filter boosting to search stage
-    if (softFilters && softFilters.softCategory) {
-        const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-        softCats.forEach(cat => {
-          searchStage.$search.compound.should.push({
-            text: {
-              query: cat,
-            path: "softCategory",
-              score: { boost: { value: 5 } } // Higher boost for direct softCategory match
-            }
-          });
-          searchStage.$search.compound.should.push({
-            text: {
-              query: cat,
-              path: "description",
-              score: { boost: { value: 2 } } 
-            }
-          });
-        });
-      }
-    
-    pipeline.push(searchStage);
-  } else {
-    pipeline.push({ $match: {} });
-  }
-
-  // Handle stock status filter
-  pipeline.push({
-    $match: {
-      $or: [
-        { stockStatus: { $exists: false } },
-        { stockStatus: "instock" }
-      ],
-    },
-  });
-
-  // Apply hard filters only (deal-breakers)
-  const filtersToApply = isHardFilterQuery ? hardFilters : {};
-  
-  if (filtersToApply && Object.keys(filtersToApply).length > 0) {
-    // Type filter
-    if (filtersToApply.type && (!Array.isArray(filtersToApply.type) || filtersToApply.type.length > 0)) {
-      pipeline.push({
-        $match: {
-          type: Array.isArray(filtersToApply.type) 
-            ? { $in: filtersToApply.type } 
-            : filtersToApply.type
-        }
-      });
-    }
-    
-    // Category filter with AND/OR logic
-    if (filtersToApply.category) {
-      if (Array.isArray(filtersToApply.category) && useOrLogic) {
-        pipeline.push({
-          $match: {
-            category: { $in: filtersToApply.category }
-          }
-        });
-      } else {
-        pipeline.push({
-          $match: {
-            category: Array.isArray(filtersToApply.category) 
-              ? { $all: filtersToApply.category } 
-              : filtersToApply.category
-          }
-        });
-      }
-    }
-    
-    // Price filters
-    const priceMatch = {};
-    let hasPriceFilter = false;
-    
-    if (filtersToApply.minPrice !== undefined && filtersToApply.maxPrice !== undefined) {
-      priceMatch.$gte = Number(filtersToApply.minPrice);
-      priceMatch.$lte = Number(filtersToApply.maxPrice);
-      hasPriceFilter = true;
-    } else if (filtersToApply.minPrice !== undefined) {
-      priceMatch.$gte = Number(filtersToApply.minPrice);
-      hasPriceFilter = true;
-    } else if (filtersToApply.maxPrice !== undefined) {
-      priceMatch.$lte = Number(filtersToApply.maxPrice);
-      hasPriceFilter = true;
-    } else if (filtersToApply.price !== undefined) {
-      const price = Number(filtersToApply.price);
-      const priceRange = price * 0.15;
-      priceMatch.$gte = Math.max(0, price - priceRange);
-      priceMatch.$lte = price + priceRange;
-      hasPriceFilter = true;
-    }
-    
-    if (hasPriceFilter) {
-      pipeline.push({
-        $match: {
-          price: priceMatch
-        }
-      });
-    }
-  }
-  
-  // Add soft filter boosting stage
   if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
     pipeline.push({
-      $addFields: {
-        softFilterBoost: {
-          $size: {
-            $ifNull: [
-              { $setIntersection: ["$softCategory", softFilters.softCategory] },
-              []
-            ]
-          }
-        }
+      $match: {
+        $or: [
+          { softCategory: { $exists: false } },
+          { softCategory: { $not: { $in: softCats } } }
+        ]
       }
     });
   }
   
-  pipeline.push({ $limit: limit });
-  
   return pipeline;
-};
+}
 
-// Enhanced vector search pipeline with soft filter boosting (LEGACY)
-function buildEnhancedVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 30, useOrLogic = false, isHardFilterQuery = true) {
-  const filter = {};
-
-  // Only apply hard filters to the pre-filter
-  const filtersToApply = isHardFilterQuery ? hardFilters : {};
-
-  if (filtersToApply.category) {
-    filter.category = Array.isArray(filtersToApply.category)
-      ? { $in: filtersToApply.category }
-      : filtersToApply.category;
-  }
-
-  if (filtersToApply.type && (!Array.isArray(filtersToApply.type) || filtersToApply.type.length > 0)) {
-    filter.type = Array.isArray(filtersToApply.type)
-      ? { $in: filtersToApply.type }
-      : filtersToApply.type;
-  }
-
-  // Price filters
-  if (filtersToApply.minPrice && filtersToApply.maxPrice) {
-    filter.price = { $gte: filtersToApply.minPrice, $lte: filtersToApply.maxPrice };
-  } else if (filtersToApply.minPrice) {
-    filter.price = { $gte: filtersToApply.minPrice };
-  } else if (filtersToApply.maxPrice) {
-    filter.price = { $lte: filtersToApply.maxPrice };
-  }
-
-  if (filtersToApply.price) {
-    const price = filtersToApply.price;
-    const priceRange = price * 0.15;
-    filter.price = { $gte: price - priceRange, $lte: price + priceRange };
-  }
-
-  const pipeline = [
-    {
-      $vectorSearch: {
-        index: "vector_index",
-        path: "embedding",
-        queryVector: queryEmbedding,
-        exact: true,
-        limit: limit,
-        ...(Object.keys(filter).length && { filter }),
-      },
-    },
+// Function to execute explicit soft category filtering
+async function executeExplicitSoftCategorySearch(
+  collection,
+  cleanedHebrewText, 
+  query, 
+  hardFilters, 
+  softFilters, 
+  queryEmbedding,
+  useOrLogic = false
+) {
+  console.log("Executing explicit soft category search");
+  
+  const softCategoryLimit = 100;
+  const nonSoftCategoryLimit = 100;
+  
+  // Phase 1: Get products WITH soft categories
+  const softCategoryPromises = [
+    collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
+      cleanedHebrewText, query, hardFilters, softFilters, softCategoryLimit, useOrLogic
+    )).toArray()
   ];
   
-  const postMatchClauses = [];
-
-  // Apply hard category filters in post-match
-  if (isHardFilterQuery && Array.isArray(hardFilters.category) && hardFilters.category.length > 0) {
-    if (useOrLogic) {
-      postMatchClauses.push({ category: { $in: hardFilters.category } });
-    } else {
-      postMatchClauses.push({ category: { $all: hardFilters.category } });
-    }
+  if (queryEmbedding) {
+    softCategoryPromises.push(
+      collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
+        queryEmbedding, hardFilters, softFilters, 30, useOrLogic
+      )).toArray()
+    );
   }
-
-  postMatchClauses.push({
-    $or: [
-      { stockStatus: "instock" },
-      { stockStatus: { $exists: false } },
-    ],
+  
+  const [softCategoryFuzzyResults, softCategoryVectorResults = []] = await Promise.all(softCategoryPromises);
+  
+  // Phase 2: Get products WITHOUT soft categories
+  const nonSoftCategoryPromises = [
+    collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
+      cleanedHebrewText, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic
+    )).toArray()
+  ];
+  
+  if (queryEmbedding) {
+    nonSoftCategoryPromises.push(
+      collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
+        queryEmbedding, hardFilters, softFilters, 30, useOrLogic
+      )).toArray()
+    );
+  }
+  
+  const [nonSoftCategoryFuzzyResults, nonSoftCategoryVectorResults = []] = await Promise.all(nonSoftCategoryPromises);
+  
+  // Calculate RRF scores for soft category matches
+  const softCategoryDocumentRanks = new Map();
+  softCategoryFuzzyResults.forEach((doc, index) => {
+    softCategoryDocumentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
   });
 
-  if (postMatchClauses.length > 0) {
-    pipeline.push({ $match: { $and: postMatchClauses } });
-  }
+  softCategoryVectorResults.forEach((doc, index) => {
+    const id = doc._id.toString();
+    const existing = softCategoryDocumentRanks.get(id);
+    if (existing) {
+      existing.vectorRank = index;
+    } else {
+      softCategoryDocumentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+    }
+  });
 
-  return pipeline;
+  const softCategoryResults = Array.from(softCategoryDocumentRanks.values())
+    .map(data => ({
+      ...data.doc,
+      rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank),
+      softFilterMatch: true
+    }))
+    .sort((a, b) => b.rrf_score - a.rrf_score);
+  
+  // Calculate RRF scores for non-soft category matches
+  const nonSoftCategoryDocumentRanks = new Map();
+  nonSoftCategoryFuzzyResults.forEach((doc, index) => {
+    nonSoftCategoryDocumentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+  });
+
+  nonSoftCategoryVectorResults.forEach((doc, index) => {
+    const id = doc._id.toString();
+    const existing = nonSoftCategoryDocumentRanks.get(id);
+    if (existing) {
+      existing.vectorRank = index;
+    } else {
+      nonSoftCategoryDocumentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+    }
+  });
+
+  const nonSoftCategoryResults = Array.from(nonSoftCategoryDocumentRanks.values())
+    .map(data => ({
+      ...data.doc,
+      rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank),
+      softFilterMatch: false
+    }))
+    .sort((a, b) => b.rrf_score - a.rrf_score);
+  
+  // Combine results with soft category matches first
+  const combinedResults = [
+    ...softCategoryResults,
+    ...nonSoftCategoryResults
+  ];
+  
+  console.log(`Soft category matches: ${softCategoryResults.length}, Non-soft category matches: ${nonSoftCategoryResults.length}`);
+  
+  return combinedResults;
 }
 
 async function isHebrew(query) {
@@ -1455,8 +1326,7 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
   return true;
 }
 
-// UPDATED: Enhanced search endpoint with unified soft filter approach
-// UPDATED: Enhanced search endpoint with unified soft filter approach
+// Enhanced search endpoint with explicit soft filter approach
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
@@ -1483,8 +1353,6 @@ app.post("/search", async (req, res) => {
     // Check if this is a simple product name query first
     const initialFilters = {};
     const isComplexQuery = !(await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context));
-
-    // The isComplexQuery flag will be used ONLY to determine if we should skip the final LLM re-rank.
     
     // Early language detection to optimize processing
     const isHebrewLang = isHebrewQuery(query);
@@ -1574,112 +1442,65 @@ app.post("/search", async (req, res) => {
 
     let combinedResults = [];
 
-    // UNIFIED SEARCH APPROACH
+    // NEW EXPLICIT SOFT CATEGORY FILTERING APPROACH
     if (hasSoftFilters) {
-      console.log(`[${requestId}] Executing search with soft filters`, softFilters.softCategory);
-
-      const searchPromises = [
-        collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, hardFilters, softFilters, 100, useOrLogic, true
-        )).toArray()
-      ];
+      console.log(`[${requestId}] Executing explicit soft category search`, softFilters.softCategory);
       
-      if (queryEmbedding) {
-        searchPromises.push(
-          collection.aggregate(buildEnhancedVectorSearchPipeline(
-            queryEmbedding, hardFilters, softFilters, 50, useOrLogic, true
-          )).toArray()
-        );
-      }
-
-      const [fuzzyResults, vectorResults = []] = await Promise.all(searchPromises);
-
-      const documentRanks = new Map();
-      fuzzyResults.forEach((doc, index) => {
-        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
-      });
-
-      vectorResults.forEach((doc, index) => {
-        const id = doc._id.toString();
-        const existing = documentRanks.get(id);
-        if (existing) {
-        existing.vectorRank = index;
-        } else {
-          documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
-        }
-      });
-
-      combinedResults = Array.from(documentRanks.values())
-        .map(data => {
-          const boost = data.doc.softFilterBoost || 0;
-          return {
-        ...data.doc,
-            rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, boost),
-            softFilterMatch: boost > 0
-          };
-        })
-        .sort((a, b) => b.rrf_score - a.rrf_score);
+      combinedResults = await executeExplicitSoftCategorySearch(
+        collection,
+        cleanedHebrewText,
+        query,
+        hardFilters,
+        softFilters,
+        queryEmbedding,
+        useOrLogic
+      );
 
     } else {
-      // Standard search (no soft filters), this is the path for SIMPLE QUERIES
-      const boostMultiplier = isComplexQuery ? 1 : 1000; // 10x boost for simple queries
+      // Standard search (no soft filters)
       const searchLimit = isComplexQuery ? 20 : 200;
       const vectorLimit = isComplexQuery ? 30 : 50;
       
       if (shouldSkipVector) {
         // Hebrew simple query - fuzzy only with fallback mechanism
         console.log(`[${requestId}] Hebrew simple query - starting with fuzzy search only`);
-        const fuzzyResults = await collection.aggregate(buildEnhancedSearchPipeline(
-          cleanedHebrewText, query, hardFilters, {}, searchLimit, useOrLogic, true, boostMultiplier
+        const fuzzyResults = await collection.aggregate(buildStandardSearchPipeline(
+          cleanedHebrewText, query, hardFilters, searchLimit, useOrLogic
         )).toArray();
         
         let vectorResults = [];
         
-        // Fallback mechanism: if 0 fuzzy results, perform full translation and vector search
         if (fuzzyResults.length === 0) {
           console.log(`[${requestId}] Fallback triggered: 0 fuzzy results found for Hebrew query`);
           try {
-            console.log(`[${requestId}] Fallback: Translating query for vector search...`);
             const translatedForEmbedding = await translateQuery(query, context);
             if (translatedForEmbedding) {
-            const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
-              console.log(`[${requestId}] Fallback: Translated query: "${cleanedForEmbedding}"`);
-
+              const cleanedForEmbedding = removeWineFromQuery(translatedForEmbedding, noWord);
               const fallbackEmbedding = await getQueryEmbedding(cleanedForEmbedding);
             
               if (fallbackEmbedding) {
-                console.log(`[${requestId}] Fallback: Performing comprehensive vector search...`);
-              vectorResults = await collection.aggregate(buildEnhancedVectorSearchPipeline(
-                  fallbackEmbedding, hardFilters, {}, vectorLimit * 2, useOrLogic, true // Double the limit for fallback
-              )).toArray();
-                console.log(`[${requestId}] Fallback: Vector search found ${vectorResults.length} results`);
-            } else {
-                console.log(`[${requestId}] Fallback: Could not generate query embedding`);
+                vectorResults = await collection.aggregate(buildStandardVectorSearchPipeline(
+                  fallbackEmbedding, hardFilters, vectorLimit * 2, useOrLogic
+                )).toArray();
               }
-            } else {
-              console.log(`[${requestId}] Fallback: Translation failed`);
             }
           } catch (error) {
-            console.error(`[${requestId}] Fallback translation and vector search failed:`, error);
+            console.error(`[${requestId}] Fallback failed:`, error);
           }
         }
         
-        // Create document ranks from fuzzy results and fallback vector results
         const documentRanks = new Map();
         fuzzyResults.forEach((doc, index) => {
           documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
         });
         
-        // Add vector results if fuzzy was empty
-          vectorResults.forEach((doc, index) => {
+        vectorResults.forEach((doc, index) => {
           const existing = documentRanks.get(doc._id.toString());
           if (!existing) {
-            // Only add vector results that weren't already found by fuzzy
             documentRanks.set(doc._id.toString(), { fuzzyRank: Infinity, vectorRank: index });
           } else {
-            // Update existing with vector rank
             existing.vectorRank = index;
-        }
+          }
         });
 
         combinedResults = Array.from(documentRanks.entries())
@@ -1687,7 +1508,6 @@ app.post("/search", async (req, res) => {
             const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
                         vectorResults.find((d) => d._id.toString() === id);
             
-            // Apply keyword bonus for Hebrew queries
             let keywordBonus = 0;
             if (doc && doc.name) {
               const queryLower = query.toLowerCase();
@@ -1703,29 +1523,24 @@ app.post("/search", async (req, res) => {
             return { 
               ...doc, 
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, keywordBonus),
-              softFilterMatch: false,
-              fallbackResult: fuzzyResults.length === 0 && vectorResults.some(v => v._id.toString() === id)
+              softFilterMatch: false
             };
           })
           .sort((a, b) => b.rrf_score - a.rrf_score);
           
-        if (fuzzyResults.length === 0 && vectorResults.length > 0) {
-          console.log(`[${requestId}] Fallback successful: ${vectorResults.length} results from vector search`);
-        }
-        
       } else {
         // Combined fuzzy + vector search
         const searchPromises = [
-        collection.aggregate(buildEnhancedSearchPipeline(
-            cleanedHebrewText, query, hardFilters, {}, searchLimit, useOrLogic, true, boostMultiplier
+          collection.aggregate(buildStandardSearchPipeline(
+            cleanedHebrewText, query, hardFilters, searchLimit, useOrLogic
           )).toArray()
         ];
         
         if (queryEmbedding) {
           searchPromises.push(
-        collection.aggregate(buildEnhancedVectorSearchPipeline(
-              queryEmbedding, hardFilters, {}, vectorLimit, useOrLogic, true
-        )).toArray()
+            collection.aggregate(buildStandardVectorSearchPipeline(
+              queryEmbedding, hardFilters, vectorLimit, useOrLogic
+            )).toArray()
           );
         }
         
@@ -1733,32 +1548,32 @@ app.post("/search", async (req, res) => {
         const fuzzyResults = searchResults[0];
         const vectorResults = queryEmbedding ? searchResults[1] : [];
 
-      const documentRanks = new Map();
-      fuzzyResults.forEach((doc, index) => {
-        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-      });
-      vectorResults.forEach((doc, index) => {
-        const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-        documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
-      });
+        const documentRanks = new Map();
+        fuzzyResults.forEach((doc, index) => {
+          documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+        });
+        vectorResults.forEach((doc, index) => {
+          const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+          documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+        });
 
-      combinedResults = Array.from(documentRanks.entries())
-        .map(([id, ranks]) => {
-          const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
-                      vectorResults.find((d) => d._id.toString() === id);
+        combinedResults = Array.from(documentRanks.entries())
+          .map(([id, ranks]) => {
+            const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
+                        vectorResults.find((d) => d._id.toString() === id);
             return { 
               ...doc, 
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank),
               softFilterMatch: false
             };
-        })
-        .sort((a, b) => b.rrf_score - a.rrf_score);
+          })
+          .sort((a, b) => b.rrf_score - a.rrf_score);
       }
     }
 
     // Log search results summary
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
-    console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
+    console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches (explicit filtering)`);
 
     // LLM reordering for complex queries
     let reorderedData;
