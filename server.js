@@ -594,8 +594,8 @@ async function executeExplicitSoftCategorySearch(
 ) {
   console.log("Executing explicit soft category search");
   
-  const softCategoryLimit = 100;
-  const nonSoftCategoryLimit = 100;
+  const softCategoryLimit = 40;
+  const nonSoftCategoryLimit = 40;
   
   // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
@@ -607,7 +607,7 @@ async function executeExplicitSoftCategorySearch(
   if (queryEmbedding) {
     softCategoryPromises.push(
       collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, 30, useOrLogic
+        queryEmbedding, hardFilters, softFilters, 40, useOrLogic
       )).toArray()
     );
   }
@@ -624,7 +624,7 @@ async function executeExplicitSoftCategorySearch(
   if (queryEmbedding) {
     nonSoftCategoryPromises.push(
       collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, 30, useOrLogic
+        queryEmbedding, hardFilters, softFilters, 40, useOrLogic
       )).toArray()
     );
   }
@@ -1513,8 +1513,8 @@ app.post("/search", async (req, res) => {
 
     } else {
       // Standard search (no soft filters) - always include both fuzzy and vector search
-      const searchLimit = isComplexQuery ? 20 : 200;
-      const vectorLimit = isComplexQuery ? 30 : 50;
+      const searchLimit = 40; // Reduced from isComplexQuery ? 20 : 200
+      const vectorLimit = 40; // Reduced from isComplexQuery ? 30 : 50
       
       console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
       
