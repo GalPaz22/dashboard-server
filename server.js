@@ -301,6 +301,13 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
           should: [
             {
               text: {
+                query: query,
+                path: "name",
+                score: { boost: { value: 100 } } // Massive boost for exact matches
+              }
+            },
+            {
+              text: {
                 query: cleanedHebrewText,
                 path: "name",
                 fuzzy: {
