@@ -329,7 +329,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                   prefixLength: 2,
                   maxExpansions: 50,
                 },
-                score: { boost: { value: 10 } }
+                score: { boost: { value: 50 } }
               }
             },
             {
