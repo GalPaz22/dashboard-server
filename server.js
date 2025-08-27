@@ -780,13 +780,11 @@ Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - ONLY select from these exact Hebrew words: ${categories}. These are HARD FILTERS - products must have these categories.
-5. type - ONLY select from these exact Hebrew words: ${types}. These are HARD FILTERS - products must have these types.
-6. softCategory - ONLY select from these exact Hebrew words: ${softCategories}. These are SOFT FILTERS - products with these will be boosted but others will still be included for semantic similarity.
+4. category - ONLY select from these exact Hebrew words: ${categories}.
+5. type - ONLY select from these exact Hebrew words: ${types}.
+6. softCategory - ONLY select from these exact Hebrew words: ${softCategories}. 
 
-CRITICAL DISTINCTION:
-- category/type: Deal-breaker filters (must have)
-- softCategory: Preference filters (nice to have, boosts relevance)
+
 
 For softCategory, look for contextual hints like:
 - "for [occasion]" (e.g., "for pasta", "for dinner", "for party")
