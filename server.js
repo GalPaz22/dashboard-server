@@ -1591,7 +1591,7 @@ app.post("/search", async (req, res) => {
         const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
         const isHighlighted = llmReorderingSuccessful && reorderedIds.includes(product._id.toString());
         return {
-          id: product._id, // Ensure we use _id here
+          id: product.id, // Ensure we use _id here
         name: product.name,
         description: product.description,
         price: product.price,
