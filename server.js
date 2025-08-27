@@ -130,7 +130,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
               path: path,
               // No fuzzy here, but still allows analyzer to handle Hebrew normalization
               score: { 
-                boost: { value: 5.0 } // High boost for close matches
+                boost: { value: 100.0 } // High boost for close matches
               }
             }
           },
