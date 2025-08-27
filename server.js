@@ -798,7 +798,7 @@ Return the extracted filters in JSON format. If a filter is not present in the q
 ${example}.`;
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: "gemini-2.5-flash",
       contents: [{ text: query }],
       config: {
         systemInstruction,
