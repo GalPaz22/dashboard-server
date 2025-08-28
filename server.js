@@ -1970,7 +1970,8 @@ app.post("/search", async (req, res) => {
     const finalResults = [
       ...orderedProducts.map((product) => {
         const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
-        const isHighlighted = llmReorderingSuccessful && reorderedIds.includes(product._id.toString());
+        // Highlight products that matched soft filters
+        const isHighlighted = !!(resultData?.softFilterMatch);
         return {
           id: product._id,
           name: product.name,
@@ -1998,7 +1999,7 @@ app.post("/search", async (req, res) => {
         type: r.type,
         specialSales: r.specialSales,
         ItemID: r.ItemID,
-        highlight: false,
+        highlight: !!r.softFilterMatch, // Highlight remaining soft filter matches too
         explanation: null,
         softFilterMatch: !!r.softFilterMatch,
         simpleSearch: false,
@@ -2017,6 +2018,29 @@ app.post("/search", async (req, res) => {
     const isFilterOnlyResponse = finalResults.length > 0 && finalResults.some(r => r.filterOnly);
     const limitedResults = isFilterOnlyResponse ? finalResults : finalResults.slice(0, 200);
     const executionTime = Date.now() - searchStartTime;
+    
+    // Debug soft filter matching
+    const highlightedProducts = finalResults.filter(r => r.highlight).length;
+    console.log(`[${requestId}] Final results: ${finalResults.length} total, ${highlightedProducts} highlighted`);
+    
+    if (hasSoftFilters) {
+      console.log(`[${requestId}] Soft filters extracted:`, JSON.stringify(softFilters.softCategory));
+      console.log(`[${requestId}] Products with softFilterMatch=true:`, 
+        combinedResults.filter(r => r.softFilterMatch).slice(0, 3).map(p => ({
+          id: p._id?.toString() || p.id, 
+          name: p.name, 
+          softCategory: p.softCategory
+        }))
+      );
+      console.log(`[${requestId}] Sample highlighted products:`, 
+        limitedResults.filter(r => r.highlight).slice(0, 3).map(p => ({
+          id: p.id?.toString(), 
+          name: p.name,
+          highlight: p.highlight,
+          softFilterMatch: p.softFilterMatch
+        }))
+      );
+    }
     
     console.log(`[${requestId}] Returning ${limitedResults.length} results in ${executionTime}ms`);
     console.log(`[${requestId}] Filter-only results: ${limitedResults.filter(r => r.filterOnly).length}`);
