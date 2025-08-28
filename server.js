@@ -125,6 +125,21 @@ async function warmCache() {
   
   console.log('[CACHE WARM] Cache warming completed');
 }
+
+const app = express();
+app.use(bodyParser.json());
+app.use(cors({ origin: "*" }));
+
+// Initialize Google Generative AI client
+const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+
+// Initialize OpenAI client
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
+
+let mongodbUri = process.env.MONGODB_URI;
+
 app.use(express.json());
 
 // Cached MongoDB client
