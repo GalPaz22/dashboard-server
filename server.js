@@ -300,27 +300,41 @@ function isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText) 
 
 // Enhanced filter-only detection for the main search endpoint
 function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQuery) {
-  // Always use filter-only path if detected as such
+  // Only use filter-only path if there are hard filters BUT NO soft filters
+  const hasHardFilters = hardFilters && Object.keys(hardFilters).length > 0;
+  const hasSoftFilters = softFilters && softFilters.softCategory && softFilters.softCategory.length > 0;
+  
+  // If there are soft filters, never use filter-only path - we want full search + soft boosting
+  if (hasSoftFilters) {
+    console.log("[FILTER-ONLY] Soft filters detected - using full search with soft category boosting");
+    return false;
+  }
+  
+  // Only proceed with filter-only detection if we have hard filters but no soft filters
+  if (!hasHardFilters) {
+    return false;
+  }
+  
+  // Now check if the query is essentially just these hard filters
   const isFilterOnly = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
   
   if (isFilterOnly) {
-    console.log("[FILTER-ONLY] Query detected as filter-only based on content analysis");
+    console.log("[FILTER-ONLY] Hard filters only detected - using ultra-fast filter-only pipeline");
     return true;
   }
   
-  // Additional heuristics for filter-only detection
+  // Additional heuristics for hard-filter-only detection
   const hasOnlyPriceFilters = (hardFilters.price || hardFilters.minPrice || hardFilters.maxPrice) && 
-                              !hardFilters.category && !hardFilters.type && 
-                              (!softFilters || !softFilters.softCategory);
+                              !hardFilters.category && !hardFilters.type;
   
   if (hasOnlyPriceFilters && (!cleanedHebrewText || cleanedHebrewText.trim().length < 3)) {
     console.log("[FILTER-ONLY] Price-only query detected");
     return true;
   }
   
-  // Category/Type only with minimal text
+  // Category/Type only with minimal additional text
   const hasCategoryTypeOnly = (hardFilters.category || hardFilters.type) && 
-                              (!cleanedHebrewText || cleanedHebrewText.trim().length < 5);
+                              (!cleanedHebrewText || cleanedHebrewText.trim().length < 3);
   
   if (hasCategoryTypeOnly) {
     console.log("[FILTER-ONLY] Category/Type-only query detected");
@@ -1911,24 +1925,31 @@ app.post("/search", async (req, res) => {
           .sort((a, b) => b.rrf_score - a.rrf_score);
       }
 
-      // LLM reordering for non-filter-only queries
-      if (isComplexQueryResult && !shouldUseFilterOnly) {
+      // LLM reordering for complex queries OR queries with soft filters
+      const shouldUseLLMReranking = (isComplexQueryResult || hasSoftFilters) && !shouldUseFilterOnly;
+      
+      if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
+        console.log(`[${requestId}] Reason: Complex query: ${isComplexQueryResult}, Has soft filters: ${hasSoftFilters}`);
         try {
           const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
           reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
           llmReorderingSuccessful = true;
-          console.log(`[${requestId}] LLM reordering successful. Data received:`, JSON.stringify(reorderedData, null, 2));
+          console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
         } catch (error) {
           console.error("LLM reordering failed, falling back to RRF ordering:", error);
           reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
           llmReorderingSuccessful = false;
         }
       } else {
-        const logMessage = shouldUseFilterOnly 
-          ? `[${requestId}] Using simple ordering (filter-only query)` 
-          : `[${requestId}] Using RRF ordering (simple query)`;
-        console.log(logMessage);
+        let skipReason = "";
+        if (shouldUseFilterOnly) {
+          skipReason = "filter-only query";
+        } else if (!isComplexQueryResult && !hasSoftFilters) {
+          skipReason = "simple query with no soft filters";
+        }
+        
+        console.log(`[${requestId}] Skipping LLM reordering (${skipReason})`);
         
         reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
         llmReorderingSuccessful = false;
