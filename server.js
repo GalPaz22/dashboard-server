@@ -125,21 +125,6 @@ async function warmCache() {
   
   console.log('[CACHE WARM] Cache warming completed');
 }
-
-const app = express();
-app.use(bodyParser.json());
-app.use(cors({ origin: "*" }));
-
-// Initialize Google Generative AI client
-const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-
-// Initialize OpenAI client
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
-
-let mongodbUri = process.env.MONGODB_URI
-
 app.use(express.json());
 
 // Cached MongoDB client
@@ -1766,7 +1751,10 @@ app.post("/search", async (req, res) => {
     const querycollection = db.collection("queries");
 
     const initialFilters = {};
-    const isComplexQueryResult = !(await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context));
+    const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context);
+    const isComplexQueryResult = !isSimpleResult;
+    
+    console.log(`[${requestId}] Query classification: "${query}" → ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'}`);
     
     const translatedQuery = await translateQuery(query, context);
 
@@ -1925,12 +1913,12 @@ app.post("/search", async (req, res) => {
           .sort((a, b) => b.rrf_score - a.rrf_score);
       }
 
-      // LLM reordering for complex queries OR queries with soft filters
-      const shouldUseLLMReranking = (isComplexQueryResult || hasSoftFilters) && !shouldUseFilterOnly;
+      // LLM reordering only for complex queries (not just any query with soft filters)
+      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly;
       
       if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
-        console.log(`[${requestId}] Reason: Complex query: ${isComplexQueryResult}, Has soft filters: ${hasSoftFilters}`);
+        console.log(`[${requestId}] Reason: Complex query detected (has soft filters: ${hasSoftFilters})`);
         try {
           const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
           reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
@@ -1945,8 +1933,8 @@ app.post("/search", async (req, res) => {
         let skipReason = "";
         if (shouldUseFilterOnly) {
           skipReason = "filter-only query";
-        } else if (!isComplexQueryResult && !hasSoftFilters) {
-          skipReason = "simple query with no soft filters";
+        } else if (!isComplexQueryResult) {
+          skipReason = hasSoftFilters ? "simple query with soft filters" : "simple query";
         }
         
         console.log(`[${requestId}] Skipping LLM reordering (${skipReason})`);
@@ -1970,8 +1958,19 @@ app.post("/search", async (req, res) => {
     const finalResults = [
       ...orderedProducts.map((product) => {
         const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
-        // Highlight products that matched soft filters
-        const isHighlighted = !!(resultData?.softFilterMatch);
+        
+        // Highlighting logic based on query type:
+        // - Simple queries with soft filters: highlight soft filter matches
+        // - Complex queries with LLM rerank: highlight only LLM selections
+        let isHighlighted = false;
+        if (llmReorderingSuccessful) {
+          // Complex query with LLM rerank: highlight only LLM selections
+          isHighlighted = reorderedIds.includes(product._id.toString());
+        } else if (hasSoftFilters) {
+          // Simple query with soft filters: highlight soft filter matches
+          isHighlighted = !!(resultData?.softFilterMatch);
+        }
+        
         return {
           id: product._id,
           name: product.name,
@@ -1999,7 +1998,8 @@ app.post("/search", async (req, res) => {
         type: r.type,
         specialSales: r.specialSales,
         ItemID: r.ItemID,
-        highlight: !!r.softFilterMatch, // Highlight remaining soft filter matches too
+        // For remaining results, only highlight soft filter matches if no LLM reranking occurred
+        highlight: !llmReorderingSuccessful && hasSoftFilters ? !!r.softFilterMatch : false,
         explanation: null,
         softFilterMatch: !!r.softFilterMatch,
         simpleSearch: false,
