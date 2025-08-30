@@ -2240,85 +2240,163 @@ app.post("/search-to-cart", async (req, res) => {
     const { dbName } = store;
     const { document } = req.body;
     
-    if (!document || !document.search_query || !document.product_id) {
-      return res.status(400).json({ error: "Missing required fields in document" });
+    // Updated validation - checkout events don't require product_id
+    if (!document || !document.search_query || !document.event_type) {
+      return res.status(400).json({ error: "Missing required fields: search_query and event_type" });
     }
     
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
-    const cartCollection = db.collection('cart');
-    const queryComplexityCollection = db.collection('query_complexity_feedback');
+    
+    // Choose collection based on event type for better organization
+    let targetCollection;
+    switch (document.event_type) {
+      case 'checkout_initiated':
+      case 'checkout_completed':
+        targetCollection = db.collection('checkout_events');
+        break;
+      case 'add_to_cart':
+        targetCollection = db.collection('cart');
+        break;
+      default:
+        targetCollection = db.collection('tracking_events');
+    }
     
     if (!document.timestamp) {
       document.timestamp = new Date().toISOString();
     }
     
-    // Enhanced document with query analysis
+    // Enhanced document with event-specific metadata
     const enhancedDocument = {
       ...document,
-      conversion_type: 'add_to_cart',
       session_id: document.session_id || null,
-      user_agent: req.get('user-agent') || null
+      user_agent: req.get('user-agent') || null,
+      ip_address: req.ip || req.connection.remoteAddress,
+      created_at: new Date()
     };
     
-    // Save to cart collection
-    const cartResult = await cartCollection.insertOne(enhancedDocument);
+    // Add conversion type based on event
+    switch (document.event_type) {
+      case 'checkout_initiated':
+        enhancedDocument.conversion_type = 'checkout_initiation';
+        enhancedDocument.funnel_stage = 'checkout';
+        break;
+      case 'checkout_completed':
+        enhancedDocument.conversion_type = 'purchase_completion';
+        enhancedDocument.funnel_stage = 'purchase';
+        break;
+      case 'add_to_cart':
+        enhancedDocument.conversion_type = 'add_to_cart';
+        enhancedDocument.funnel_stage = 'cart';
+        break;
+    }
     
-    // Use pre-classified query complexity from search (much more efficient!)
-    try {
-      let classification = 'unknown';
-      let hasClassification = false;
-      
-      // Check if classification was provided from search
-      if (document.search_classification) {
-        classification = document.search_classification;
-        hasClassification = true;
-        console.log(`[COMPLEXITY FEEDBACK] Using pre-classified complexity: "${document.search_query}" → ${classification.toUpperCase()}`);
-      } else if (document.searchMetadata && document.searchMetadata.classification) {
-        classification = document.searchMetadata.classification;
-        hasClassification = true;
-        console.log(`[COMPLEXITY FEEDBACK] Using search metadata classification: "${document.search_query}" → ${classification.toUpperCase()}`);
-      } else {
-        // Fallback to re-classification only if no classification provided
-        console.log(`[COMPLEXITY FEEDBACK] No classification provided, re-classifying query: "${document.search_query}"`);
-        const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', dbName);
-        classification = queryComplexityResult ? 'simple' : 'complex';
-        hasClassification = true;
-      }
-      
-      if (hasClassification) {
-        // Store query complexity feedback
-        const complexityFeedback = {
-          query: document.search_query,
-          original_classification: classification,
-          conversion_outcome: 'successful_purchase',
-          product_id: document.product_id,
-          timestamp: new Date(),
-          feedback_type: 'conversion_based',
-          confidence_score: 0.9, // High confidence since it led to conversion
-          context: store.context || 'wine store',
-          search_metadata: document.searchMetadata || null,
-          was_pre_classified: !!document.search_classification || !!(document.searchMetadata && document.searchMetadata.classification)
-        };
+    // Save to appropriate collection
+    const insertResult = await targetCollection.insertOne(enhancedDocument);
+    
+    // Handle query complexity feedback for conversion events
+    if (document.event_type === 'checkout_completed' || document.event_type === 'checkout_initiated') {
+      try {
+        const queryComplexityCollection = db.collection('query_complexity_feedback');
+        let classification = 'unknown';
+        let hasClassification = false;
         
-        await queryComplexityCollection.insertOne(complexityFeedback);
+        // Check if classification was provided from search
+        if (document.search_classification) {
+          classification = document.search_classification;
+          hasClassification = true;
+          console.log(`[COMPLEXITY FEEDBACK] Using pre-classified complexity: "${document.search_query}" → ${classification.toUpperCase()}`);
+        } else if (document.searchMetadata && document.searchMetadata.classification) {
+          classification = document.searchMetadata.classification;
+          hasClassification = true;
+          console.log(`[COMPLEXITY FEEDBACK] Using search metadata classification: "${document.search_query}" → ${classification.toUpperCase()}`);
+        } else {
+          // Fallback to re-classification only if no classification provided
+          console.log(`[COMPLEXITY FEEDBACK] No classification provided, re-classifying query: "${document.search_query}"`);
+          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', dbName);
+          classification = queryComplexityResult ? 'simple' : 'complex';
+          hasClassification = true;
+        }
         
-        console.log(`[COMPLEXITY FEEDBACK] Query "${document.search_query}" (${classification.toUpperCase()}) led to conversion`);
+        if (hasClassification) {
+          // Store query complexity feedback
+          const complexityFeedback = {
+            query: document.search_query,
+            original_classification: classification,
+            conversion_outcome: document.event_type === 'checkout_completed' ? 'purchase_completed' : 'checkout_initiated',
+            event_type: document.event_type,
+            cart_total: document.cart_total || document.order_total || null,
+            cart_count: document.cart_count || null,
+            order_id: document.order_id || null,
+            timestamp: new Date(),
+            feedback_type: 'conversion_based',
+            confidence_score: document.event_type === 'checkout_completed' ? 0.95 : 0.8, // Higher confidence for completed purchases
+            context: store.context || 'wine store',
+            search_metadata: document.searchMetadata || null,
+            was_pre_classified: !!document.search_classification || !!(document.searchMetadata && document.searchMetadata.classification)
+          };
+          
+          await queryComplexityCollection.insertOne(complexityFeedback);
+          
+          console.log(`[COMPLEXITY FEEDBACK] Query "${document.search_query}" (${classification.toUpperCase()}) led to ${document.event_type}`);
+        }
+        
+      } catch (complexityError) {
+        console.error("Error recording query complexity feedback:", complexityError);
       }
-      
-    } catch (complexityError) {
-      console.error("Error recording query complexity feedback:", complexityError);
+    }
+    
+    // Legacy support for add_to_cart events (keep existing logic)
+    if (document.event_type === 'add_to_cart' && document.product_id) {
+      try {
+        const queryComplexityCollection = db.collection('query_complexity_feedback');
+        let classification = 'unknown';
+        let hasClassification = false;
+        
+        if (document.search_classification) {
+          classification = document.search_classification;
+          hasClassification = true;
+        } else if (document.searchMetadata && document.searchMetadata.classification) {
+          classification = document.searchMetadata.classification;
+          hasClassification = true;
+        } else {
+          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', dbName);
+          classification = queryComplexityResult ? 'simple' : 'complex';
+          hasClassification = true;
+        }
+        
+        if (hasClassification) {
+          const complexityFeedback = {
+            query: document.search_query,
+            original_classification: classification,
+            conversion_outcome: 'successful_purchase',
+            product_id: document.product_id,
+            timestamp: new Date(),
+            feedback_type: 'conversion_based',
+            confidence_score: 0.9,
+            context: store.context || 'wine store',
+            search_metadata: document.searchMetadata || null,
+            was_pre_classified: !!document.search_classification || !!(document.searchMetadata && document.searchMetadata.classification)
+          };
+          
+          await queryComplexityCollection.insertOne(complexityFeedback);
+        }
+        
+      } catch (complexityError) {
+        console.error("Error recording query complexity feedback:", complexityError);
+      }
     }
     
     res.status(201).json({
       success: true,
-      message: "Search-to-cart event saved successfully",
-      id: cartResult.insertedId,
+      message: `${document.event_type} event saved successfully`,
+      id: insertResult.insertedId,
+      collection: targetCollection.collectionName,
       complexity_feedback_recorded: true
     });
     
   } catch (error) {
-    console.error("Error saving search-to-cart event:", error);
+    console.error(`Error saving ${document.event_type || 'tracking'} event:`, error);
     res.status(500).json({ error: "Server error" });
   }
 });
