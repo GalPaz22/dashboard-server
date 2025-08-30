@@ -519,8 +519,8 @@ const buildAutocompletePipeline = (query, indexName, path) => {
         should: [
           {
             text: {
-              query: query,
-              path: path,
+        query: query,
+        path: path,
               score: { 
                 boost: { value: 100.0 }
               }
@@ -820,7 +820,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
   if (postMatchClauses.length > 0) {
     pipeline.push({ $match: { $and: postMatchClauses } });
   }
-  
+
   return pipeline;
 }
 
@@ -855,7 +855,7 @@ function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFi
       }
     });
   }
-  
+
   return pipeline;
 }
 
@@ -880,34 +880,34 @@ async function translateQuery(query, context) {
   const cacheKey = generateCacheKey('translate', query, context);
   
   return withCache(cacheKey, async () => {
-    try {
-      const needsTranslation = await isHebrew(query);
-      if (!needsTranslation) return query;
+  try {
+    const needsTranslation = await isHebrew(query);
+    if (!needsTranslation) return query;
       
-      const response = await openai.chat.completions.create({
-        model: "gpt-4o",
-        temperature: 0.1,
-        messages: [
-          {
-            role: "system",
-            content:
-              `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction. 
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o",
+      temperature: 0.1,
+      messages: [
+        {
+          role: "system",
+          content:
+            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction. 
 Instructions:
 1. Translate the text from Hebrew to English.
 2. Remove any extraneous or stop words.
 3. Output only the essential keywords and phrases that will best represent the query context 
 (remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
 Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.`
-          },
-          { role: "user", content: query },
-        ],
-      });
-      const translatedText = response.choices[0]?.message?.content?.trim();
-      return translatedText;
-    } catch (error) {
-      console.error("Error translating query:", error);
-      throw error;
-    }
+        },
+        { role: "user", content: query },
+      ],
+    });
+    const translatedText = response.choices[0]?.message?.content?.trim();
+    return translatedText;
+  } catch (error) {
+    console.error("Error translating query:", error);
+    throw error;
+  }
   }, 86400);
 }
 
@@ -1012,16 +1012,16 @@ async function getQueryEmbedding(cleanedText) {
   const cacheKey = generateCacheKey('embedding', cleanedText);
   
   return withCache(cacheKey, async () => {
-    try {
-      const response = await openai.embeddings.create({
-        model: "text-embedding-3-large",
-        input: cleanedText,
-      });
-      return response.data[0]?.embedding || null;
-    } catch (error) {
-      console.error("Error fetching query embedding:", error);
-      throw error;
-    }
+  try {
+    const response = await openai.embeddings.create({
+      model: "text-embedding-3-large",
+      input: cleanedText,
+    });
+    return response.data[0]?.embedding || null;
+  } catch (error) {
+    console.error("Error fetching query embedding:", error);
+    throw error;
+  }
   }, 86400);
 }
 
@@ -1029,8 +1029,8 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
   const cacheKey = generateCacheKey('filters', query, categories, types, softCategories, example, context);
   
   return withCache(cacheKey, async () => {
-    try {
-      const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
+  try {
+    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
 Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
@@ -1054,70 +1054,70 @@ For softCategory, look for contextual hints like:
 Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
 ${example}.`;
 
-      const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ text: query }],
-        config: {
-          systemInstruction,
-          temperature: 0.1,
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              price: {
-                type: Type.NUMBER,
-                description: "Exact price if mentioned"
-              },
-              minPrice: {
-                type: Type.NUMBER,
-                description: "Minimum price if mentioned"
-              },
-              maxPrice: {
-                type: Type.NUMBER,
-                description: "Maximum price if mentioned"
-              },
-              category: {
-                oneOf: [
-                  { type: Type.STRING },
-                  { 
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING }
-                  }
-                ],
-                description: "Hard filter - Category from the provided list only"
-              },
-              type: {
-                oneOf: [
-                  { type: Type.STRING },
-                  { 
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING }
-                  }
-                ],
-                description: "Hard filter - Type from the provided list only"
-              },
-              softCategory: {
-                oneOf: [
-                  { type: Type.STRING },
-                  { 
-                    type: Type.ARRAY,
-                    items: { type: Type.STRING }
-                  }
-                ],
-                description: "Soft filter - Categories that boost relevance but don't exclude others"
-              }
+    const response = await genAI.models.generateContent({
+      model: "gemini-2.5-flash",
+      contents: [{ text: query }],
+      config: {
+        systemInstruction,
+        temperature: 0.1,
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            price: {
+              type: Type.NUMBER,
+              description: "Exact price if mentioned"
+            },
+            minPrice: {
+              type: Type.NUMBER,
+              description: "Minimum price if mentioned"
+            },
+            maxPrice: {
+              type: Type.NUMBER,
+              description: "Maximum price if mentioned"
+            },
+            category: {
+              oneOf: [
+                { type: Type.STRING },
+                { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                }
+              ],
+              description: "Hard filter - Category from the provided list only"
+            },
+            type: {
+              oneOf: [
+                { type: Type.STRING },
+                { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                }
+              ],
+              description: "Hard filter - Type from the provided list only"
+            },
+            softCategory: {
+              oneOf: [
+                { type: Type.STRING },
+                { 
+                  type: Type.ARRAY,
+                  items: { type: Type.STRING }
+                }
+              ],
+              description: "Soft filter - Categories that boost relevance but don't exclude others"
             }
           }
         }
-      });
+      }
+    });
 
-      const content = response.text.trim();
-      const filters = JSON.parse(content);
-      return filters;
-    } catch (error) {
-      console.error("Error extracting enhanced filters:", error);
-      throw error;
-    }
+    const content = response.text.trim();
+    const filters = JSON.parse(content);
+    return filters;
+  } catch (error) {
+    console.error("Error extracting enhanced filters:", error);
+    throw error;
+  }
   }, 3600);
 }
 
@@ -1297,22 +1297,22 @@ async function reorderResultsWithGPT(
   explain = true,
   context
 ) {
-  const filtered = combinedResults.filter(
-    (p) => !alreadyDelivered.includes(p._id.toString())
-  );
-  const limitedResults = filtered.slice(0, 20);
+    const filtered = combinedResults.filter(
+      (p) => !alreadyDelivered.includes(p._id.toString())
+    );
+    const limitedResults = filtered.slice(0, 20);
   const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
   const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
-  
+    
   return withCache(cacheKey, async () => {
     try {
-      const productData = limitedResults.map((p) => ({
-        id: p._id.toString(),
-        name: p.name || "No name",
+    const productData = limitedResults.map((p) => ({
+      id: p._id.toString(),
+      name: p.name || "No name",
         description: p.description1|| "No description",
-        price: p.price || "No price",
+      price: p.price || "No price",
         softFilterMatch: p.softFilterMatch || false
-      }));
+    }));
 
     const sanitizedQuery = sanitizeQueryForLLM(query);
 
@@ -1409,14 +1409,14 @@ ${JSON.stringify(productData, null, 2)}`;
     const reorderedData = JSON.parse(text);
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
     
-      return reorderedData.map(item => ({
-        id: item.id,
-        explanation: explain ? (item.explanation || null) : null
-      }));
-    } catch (error) {
-      console.error("Error reordering results with Gemini:", error);
-      throw error;
-    }
+    return reorderedData.map(item => ({
+      id: item.id,
+      explanation: explain ? (item.explanation || null) : null
+    }));
+  } catch (error) {
+    console.error("Error reordering results with Gemini:", error);
+    throw error;
+  }
   }, 1800);
 }
 
@@ -1640,9 +1640,18 @@ async function executeExplicitSoftCategorySearch(
 ) {
   console.log("Executing explicit soft category search");
   
-  const softCategoryLimit = 100;
-  const nonSoftCategoryLimit = 100;
+  // Check if this is a pure hard category search
+  const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 && 
+    (!cleanedHebrewText || cleanedHebrewText.trim() === '' || 
+     hardFilters.category && query.toLowerCase().trim() === hardFilters.category.toLowerCase().trim());
   
+  const softCategoryLimit = isPureHardCategorySearch ? 500 : 40;
+  const nonSoftCategoryLimit = isPureHardCategorySearch ? 500 : 40;
+  const vectorLimit = isPureHardCategorySearch ? 250 : 25;
+  
+  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
+  
+  // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
     collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
       cleanedHebrewText, query, hardFilters, softFilters, softCategoryLimit, useOrLogic
@@ -1652,13 +1661,14 @@ async function executeExplicitSoftCategorySearch(
   if (queryEmbedding) {
     softCategoryPromises.push(
       collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, 30, useOrLogic
+        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
       )).toArray()
     );
   }
   
   const [softCategoryFuzzyResults, softCategoryVectorResults = []] = await Promise.all(softCategoryPromises);
   
+  // Phase 2: Get products WITHOUT soft categories
   const nonSoftCategoryPromises = [
     collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
       cleanedHebrewText, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic
@@ -1668,7 +1678,7 @@ async function executeExplicitSoftCategorySearch(
   if (queryEmbedding) {
     nonSoftCategoryPromises.push(
       collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, 30, useOrLogic
+        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
       )).toArray()
     );
   }
@@ -1830,7 +1840,7 @@ app.post("/search", async (req, res) => {
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     const queryEmbedding = await getQueryEmbedding(cleanedText);
     if (!queryEmbedding) {
-      return res.status(500).json({ error: "Error generating query embedding" });
+        return res.status(500).json({ error: "Error generating query embedding" });
     }
 
     const enhancedFilters = categories
@@ -1888,7 +1898,7 @@ app.post("/search", async (req, res) => {
     let combinedResults = [];
     let reorderedData;
     let llmReorderingSuccessful = false;
-
+      
     // ULTRA-FAST PATH: Filter-only queries (optimized for speed and completeness)
     const shouldUseFilterOnly = shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQueryResult);
 
@@ -1917,7 +1927,7 @@ app.post("/search", async (req, res) => {
         
         console.log(`[${requestId}] Filter-only path completed successfully`);
         
-      } catch (error) {
+        } catch (error) {
         console.error(`[${requestId}] Filter-only search failed, falling back to standard search:`, error);
         // Continue with standard search logic
       }
@@ -1937,11 +1947,19 @@ app.post("/search", async (req, res) => {
           queryEmbedding,
           useOrLogic
         );
-
+          
       } else {
-        const searchLimit = isComplexQueryResult ? 20 : 50;
-        const vectorLimit = isComplexQueryResult ? 30 : 50;
+        // Standard search (no soft filters) - always include both fuzzy and vector search
         
+        // Check if this is a pure hard category search (no meaningful text search)
+        const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 && 
+          (!cleanedHebrewText || cleanedHebrewText.trim() === '' || 
+           hardFilters.category && query.toLowerCase().trim() === hardFilters.category.toLowerCase().trim());
+        
+        const searchLimit = isPureHardCategorySearch ? 1000 : 40; // Unlimited for pure category searches
+        const vectorLimit = isPureHardCategorySearch ? 500 : 25;   // Higher limit for pure category searches
+        
+        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
         console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
         
         const searchPromises = [
@@ -1955,19 +1973,19 @@ app.post("/search", async (req, res) => {
         
         const [fuzzyResults, vectorResults] = await Promise.all(searchPromises);
 
-        const documentRanks = new Map();
-        fuzzyResults.forEach((doc, index) => {
-          documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-        });
-        vectorResults.forEach((doc, index) => {
-          const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-          documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
-        });
+      const documentRanks = new Map();
+      fuzzyResults.forEach((doc, index) => {
+        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+      });
+      vectorResults.forEach((doc, index) => {
+        const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+        documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+      });
 
-        combinedResults = Array.from(documentRanks.entries())
-          .map(([id, ranks]) => {
-            const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
-                        vectorResults.find((d) => d._id.toString() === id);
+      combinedResults = Array.from(documentRanks.entries())
+        .map(([id, ranks]) => {
+          const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
+                      vectorResults.find((d) => d._id.toString() === id);
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedHebrewText);
             return { 
               ...doc, 
@@ -1975,27 +1993,27 @@ app.post("/search", async (req, res) => {
               softFilterMatch: false,
               softCategoryMatches: 0
             };
-          })
-          .sort((a, b) => b.rrf_score - a.rrf_score);
-      }
+        })
+        .sort((a, b) => b.rrf_score - a.rrf_score);
+    }
 
       // LLM reordering only for complex queries (not just any query with soft filters)
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly;
-      
+    
       if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
         console.log(`[${requestId}] Reason: Complex query detected (has soft filters: ${hasSoftFilters})`);
-        try {
-          const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
+      try {
+        const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+        reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
-        } catch (error) {
+      } catch (error) {
           console.error("LLM reordering failed, falling back to RRF ordering:", error);
-          reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+        reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
           llmReorderingSuccessful = false;
-        }
-      } else {
+      }
+    } else {
         let skipReason = "";
         if (shouldUseFilterOnly) {
           skipReason = "filter-only query";
@@ -2005,7 +2023,7 @@ app.post("/search", async (req, res) => {
         
         console.log(`[${requestId}] Skipping LLM reordering (${skipReason})`);
         
-        reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+      reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
         llmReorderingSuccessful = false;
       }
     }
@@ -2039,16 +2057,16 @@ app.post("/search", async (req, res) => {
         
         return {
           id: product._id,
-          name: product.name,
-          description: product.description,
-          price: product.price,
-          image: product.image,
-          url: product.url,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
           highlight: isHighlighted,
-          type: product.type,
-          specialSales: product.specialSales,
-          ItemID: product.ItemID,
-          explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+        type: product.type,
+        specialSales: product.specialSales,
+        ItemID: product.ItemID,
+        explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
           softFilterMatch: !!(resultData?.softFilterMatch),
           softCategoryMatches: resultData?.softCategoryMatches || 0,
           simpleSearch: false,
