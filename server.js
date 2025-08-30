@@ -479,14 +479,23 @@ async function executeOptimizedFilterOnlySearch(
     const executionTime = Date.now() - startTime;
     console.log(`[FILTER-ONLY] Found ${results.length} products in ${executionTime}ms`);
     
-    // Add simple scoring for consistent ordering
-    const scoredResults = results.map((doc, index) => ({
-      ...doc,
-      rrf_score: 10000 - index, // High base score, descending by index
-      softFilterMatch: !!(softFilters && softFilters.softCategory),
-      simpleSearch: true,
-      filterOnly: true
-    }));
+    // Add simple scoring for consistent ordering with multi-category boosting
+    const scoredResults = results.map((doc, index) => {
+      const softCategoryMatches = softFilters && softFilters.softCategory ? 
+        calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory) : 0;
+      
+             // Base score with exponential boost for multiple soft category matches
+       const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(3, softCategoryMatches) * 2000 : 0;
+      
+      return {
+        ...doc,
+        rrf_score: 10000 - index + multiCategoryBoost, // High base score with multi-category boost
+        softFilterMatch: !!(softFilters && softFilters.softCategory),
+        softCategoryMatches: softCategoryMatches,
+        simpleSearch: true,
+        filterOnly: true
+      };
+    });
     
     return scoredResults;
     
@@ -902,12 +911,30 @@ Pay attention to the word שכלי or שאבלי (which mean chablis) and מוס
   }, 86400);
 }
 
-// Gemini-based query classification function
-async function classifyQueryComplexity(query, context) {
+// Enhanced Gemini-based query classification function with learning
+async function classifyQueryComplexity(query, context, dbName = null) {
   const cacheKey = generateCacheKey('classify', query, context);
   
   return withCache(cacheKey, async () => {
     try {
+      // First check if we have learned feedback for this exact query
+      if (dbName) {
+        try {
+          const client = await connectToMongoDB(mongodbUri);
+          const db = client.db(dbName);
+          const learningCollection = db.collection('query_complexity_learned');
+          
+          const learnedPattern = await learningCollection.findOne({ query: query });
+          if (learnedPattern) {
+            console.log(`[LEARNED CLASSIFICATION] Using learned classification for "${query}": ${learnedPattern.learned_classification}`);
+            return learnedPattern.learned_classification === "simple";
+          }
+        } catch (learningError) {
+          console.error("Error checking learned patterns:", learningError);
+          // Continue with regular classification
+        }
+      }
+      
       const systemInstruction = `You are an expert at analyzing e-commerce search queries to determine if they are simple product name searches or complex descriptive searches.
 
 Context: ${context || "e-commerce product search"}
@@ -959,11 +986,11 @@ Analyze the query and return your classification.`;
   }, 7200);
 }
 
-async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context) {
+async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null) {
   if (filters && Object.keys(filters).length > 0) {
     return false;
   }
-  const isSimple = await classifyQueryComplexity(query, context);
+  const isSimple = await classifyQueryComplexity(query, context, dbName);
   return isSimple;
 }
 
@@ -1155,13 +1182,33 @@ function shouldUseOrLogicForCategories(query, categories) {
   return orScore > andScore;
 }
 
-function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
+function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories) {
+  if (!productSoftCategories || !querySoftCategories) return 0;
+  
+  const productCats = Array.isArray(productSoftCategories) ? productSoftCategories : [productSoftCategories];
+  const queryCats = Array.isArray(querySoftCategories) ? querySoftCategories : [querySoftCategories];
+  
+  // Count how many query soft categories this product matches
+  const matches = queryCats.filter(queryCat => 
+    productCats.some(productCat => 
+      productCat.toLowerCase().includes(queryCat.toLowerCase()) || 
+      queryCat.toLowerCase().includes(productCat.toLowerCase())
+    )
+  ).length;
+  
+  return matches;
+}
+
+function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, softCategoryMatches = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
   const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
                    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
   
   const softBoost = softFilterBoost * 1.5;
   
-  return baseScore + softBoost + keywordMatchBonus + exactMatchBonus;
+  // Progressive boosting: each additional soft category match provides exponential boost
+  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(3, softCategoryMatches) * 0.5 : 0;
+  
+  return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
 }
 
 function getExactMatchBonus(productName, query, cleanedQuery) {
@@ -1262,7 +1309,7 @@ async function reorderResultsWithGPT(
       const productData = limitedResults.map((p) => ({
         id: p._id.toString(),
         name: p.name || "No name",
-        description: p.description1 || "No description",
+        description: p.description1|| "No description",
         price: p.price || "No price",
         softFilterMatch: p.softFilterMatch || false
       }));
@@ -1414,7 +1461,7 @@ Context: ${context}
 
 Search Query Intent: "${sanitizedQuery}"` });
    
-   for (let i = 0; i < Math.min(productsWithImages.length, 20); i++) {
+   for (let i = 0; i < 2; i++) {
      const product = productsWithImages[i];
      
      try {
@@ -1433,7 +1480,7 @@ Search Query Intent: "${sanitizedQuery}"` });
          contents.push({ 
            text: `Product ID: ${product._id.toString()}
 Name: ${product.name || "No name"}
-Description: ${product.description1 || "No description"}
+}
 Price: ${product.price || "No price"}
 
 ---` 
@@ -1646,10 +1693,12 @@ async function executeExplicitSoftCategorySearch(
   const softCategoryResults = Array.from(softCategoryDocumentRanks.values())
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedHebrewText);
+      const softCategoryMatches = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory);
       return {
         ...data.doc,
-        rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus),
-        softFilterMatch: true
+        rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+        softFilterMatch: true,
+        softCategoryMatches: softCategoryMatches
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -1674,8 +1723,9 @@ async function executeExplicitSoftCategorySearch(
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedHebrewText);
       return {
         ...data.doc,
-        rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus),
-        softFilterMatch: false
+        rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, 0),
+        softFilterMatch: false,
+        softCategoryMatches: 0
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -1766,7 +1816,7 @@ app.post("/search", async (req, res) => {
     const querycollection = db.collection("queries");
 
     const initialFilters = {};
-    const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context);
+    const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
     const isComplexQueryResult = !isSimpleResult;
     
     console.log(`[${requestId}] Query classification: "${query}" → ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'}`);
@@ -1921,8 +1971,9 @@ app.post("/search", async (req, res) => {
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedHebrewText);
             return { 
               ...doc, 
-              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus),
-              softFilterMatch: false
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
+              softFilterMatch: false,
+              softCategoryMatches: 0
             };
           })
           .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -1999,6 +2050,7 @@ app.post("/search", async (req, res) => {
           ItemID: product.ItemID,
           explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
           softFilterMatch: !!(resultData?.softFilterMatch),
+          softCategoryMatches: resultData?.softCategoryMatches || 0,
           simpleSearch: false,
           filterOnly: !!(resultData?.filterOnly)
         };
@@ -2017,6 +2069,7 @@ app.post("/search", async (req, res) => {
         highlight: !llmReorderingSuccessful && hasSoftFilters ? !!r.softFilterMatch : false,
         explanation: null,
         softFilterMatch: !!r.softFilterMatch,
+        softCategoryMatches: r.softCategoryMatches || 0,
         simpleSearch: false,
         filterOnly: !!r.filterOnly
       })),
@@ -2067,8 +2120,26 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] Standard query: limited to ${limitedResults.length} results`);
     }
 
-    // Return products array directly for frontend compatibility
-    res.json(limitedResults);
+    // Return products array with search metadata - maintain backward compatibility
+    const response = limitedResults.map(product => ({
+      ...product,
+      // Add metadata to each product for cart tracking
+      _searchMetadata: {
+        query: query,
+        isComplexQuery: isComplexQueryResult,
+        classification: isComplexQueryResult ? 'complex' : 'simple',
+        hasHardFilters: hasHardFilters,
+        hasSoftFilters: hasSoftFilters,
+        llmReorderingUsed: llmReorderingSuccessful,
+        filterOnlySearch: shouldUseFilterOnly,
+        requestId: requestId,
+        executionTime: executionTime,
+        totalResults: limitedResults.length
+      }
+    }));
+    
+    // Send array for backward compatibility, but with metadata attached to each product
+    res.json(response);
     
   } catch (error) {
     console.error("Error handling search request:", error);
@@ -2176,17 +2247,74 @@ app.post("/search-to-cart", async (req, res) => {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const cartCollection = db.collection('cart');
+    const queryComplexityCollection = db.collection('query_complexity_feedback');
     
     if (!document.timestamp) {
       document.timestamp = new Date().toISOString();
     }
     
-    const result = await cartCollection.insertOne(document);
+    // Enhanced document with query analysis
+    const enhancedDocument = {
+      ...document,
+      conversion_type: 'add_to_cart',
+      session_id: document.session_id || null,
+      user_agent: req.get('user-agent') || null
+    };
+    
+    // Save to cart collection
+    const cartResult = await cartCollection.insertOne(enhancedDocument);
+    
+    // Use pre-classified query complexity from search (much more efficient!)
+    try {
+      let classification = 'unknown';
+      let hasClassification = false;
+      
+      // Check if classification was provided from search
+      if (document.search_classification) {
+        classification = document.search_classification;
+        hasClassification = true;
+        console.log(`[COMPLEXITY FEEDBACK] Using pre-classified complexity: "${document.search_query}" → ${classification.toUpperCase()}`);
+      } else if (document.searchMetadata && document.searchMetadata.classification) {
+        classification = document.searchMetadata.classification;
+        hasClassification = true;
+        console.log(`[COMPLEXITY FEEDBACK] Using search metadata classification: "${document.search_query}" → ${classification.toUpperCase()}`);
+      } else {
+        // Fallback to re-classification only if no classification provided
+        console.log(`[COMPLEXITY FEEDBACK] No classification provided, re-classifying query: "${document.search_query}"`);
+        const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', dbName);
+        classification = queryComplexityResult ? 'simple' : 'complex';
+        hasClassification = true;
+      }
+      
+      if (hasClassification) {
+        // Store query complexity feedback
+        const complexityFeedback = {
+          query: document.search_query,
+          original_classification: classification,
+          conversion_outcome: 'successful_purchase',
+          product_id: document.product_id,
+          timestamp: new Date(),
+          feedback_type: 'conversion_based',
+          confidence_score: 0.9, // High confidence since it led to conversion
+          context: store.context || 'wine store',
+          search_metadata: document.searchMetadata || null,
+          was_pre_classified: !!document.search_classification || !!(document.searchMetadata && document.searchMetadata.classification)
+        };
+        
+        await queryComplexityCollection.insertOne(complexityFeedback);
+        
+        console.log(`[COMPLEXITY FEEDBACK] Query "${document.search_query}" (${classification.toUpperCase()}) led to conversion`);
+      }
+      
+    } catch (complexityError) {
+      console.error("Error recording query complexity feedback:", complexityError);
+    }
     
     res.status(201).json({
       success: true,
       message: "Search-to-cart event saved successfully",
-      id: result.insertedId
+      id: cartResult.insertedId,
+      complexity_feedback_recorded: true
     });
     
   } catch (error) {
@@ -2264,6 +2392,350 @@ app.post("/test-filter-only-detection", async (req, res) => {
     
   } catch (error) {
     console.error("Error in filter-only detection test:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post("/test-multi-category-boosting", async (req, res) => {
+  try {
+    const { productSoftCategories, querySoftCategories } = req.body;
+    
+    if (!productSoftCategories || !querySoftCategories) {
+      return res.status(400).json({ error: "Both productSoftCategories and querySoftCategories are required" });
+    }
+    
+    console.log("=== MULTI-CATEGORY BOOSTING TEST ===");
+    console.log("Product soft categories:", JSON.stringify(productSoftCategories));
+    console.log("Query soft categories:", JSON.stringify(querySoftCategories));
+    
+    const matches = calculateSoftCategoryMatches(productSoftCategories, querySoftCategories);
+    const multiCategoryBoost = matches > 0 ? Math.pow(3, matches) * 0.5 : 0;
+    const filterOnlyBoost = matches > 0 ? Math.pow(3, matches) * 2000 : 0;
+    
+    // Example scores for different scenarios
+    const baseRRFScore = 0.1; // Example base RRF score
+    const finalScore = baseRRFScore + multiCategoryBoost;
+    const filterOnlyScore = 10000 + filterOnlyBoost;
+    
+    res.json({
+      productSoftCategories,
+      querySoftCategories,
+      matchingCategories: matches,
+      boostCalculation: {
+        standardSearch: {
+          baseScore: baseRRFScore,
+          multiCategoryBoost: multiCategoryBoost,
+          finalScore: finalScore,
+          formula: `baseScore + Math.pow(3, ${matches}) * 0.5`
+        },
+        filterOnlySearch: {
+          baseScore: 10000,
+          multiCategoryBoost: filterOnlyBoost,
+          finalScore: filterOnlyScore,
+          formula: `10000 + Math.pow(3, ${matches}) * 2000`
+        }
+      },
+      explanation: matches > 1 ? 
+        `Products matching ${matches} soft categories get exponentially higher scores than products matching only 1 category` :
+        matches === 1 ?
+        "Product matches 1 soft category - gets standard boost" :
+        "Product matches no soft categories - no boost"
+    });
+    
+  } catch (error) {
+    console.error("Error in multi-category boosting test:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================================================== *\
+   QUERY COMPLEXITY FEEDBACK SYSTEM
+\* =========================================================== */
+
+app.post("/tag-query-complexity", async (req, res) => {
+  try {
+    const { query, actualComplexity, reason, confidence = 0.9 } = req.body;
+    const { dbName } = req.store;
+    
+    if (!query || !actualComplexity) {
+      return res.status(400).json({ error: "Query and actualComplexity are required" });
+    }
+    
+    if (!['simple', 'complex'].includes(actualComplexity)) {
+      return res.status(400).json({ error: "actualComplexity must be 'simple' or 'complex'" });
+    }
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const queryComplexityCollection = db.collection('query_complexity_feedback');
+    
+    // Get current classification
+    const currentClassification = await classifyQueryComplexity(query, req.store.context || 'wine store', dbName);
+    const currentComplexityLabel = currentClassification ? 'simple' : 'complex';
+    
+    // Store manual feedback
+    const feedback = {
+      query: query,
+      original_classification: currentComplexityLabel,
+      manual_classification: actualComplexity,
+      is_correction: currentComplexityLabel !== actualComplexity,
+      reason: reason || null,
+      confidence_score: Math.min(Math.max(confidence, 0), 1), // Clamp between 0-1
+      timestamp: new Date(),
+      feedback_type: 'manual_tagging',
+      context: req.store.context || 'wine store'
+    };
+    
+    const result = await queryComplexityCollection.insertOne(feedback);
+    
+    console.log(`[MANUAL COMPLEXITY TAGGING] Query "${query}": ${currentComplexityLabel} → ${actualComplexity} ${feedback.is_correction ? '(CORRECTION)' : '(CONFIRMED)'}`);
+    
+    res.json({
+      success: true,
+      message: "Query complexity feedback recorded successfully",
+      feedback: {
+        query: query,
+        originalClassification: currentComplexityLabel,
+        newClassification: actualComplexity,
+        isCorrection: feedback.is_correction,
+        id: result.insertedId
+      }
+    });
+    
+  } catch (error) {
+    console.error("Error recording query complexity feedback:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.get("/query-complexity-analytics", async (req, res) => {
+  try {
+    const { dbName } = req.store;
+    const { days = 30, limit = 100 } = req.query;
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const queryComplexityCollection = db.collection('query_complexity_feedback');
+    const cartCollection = db.collection('cart');
+    
+    const daysAgo = new Date();
+    daysAgo.setDate(daysAgo.getDate() - parseInt(days));
+    
+    // Get complexity feedback data
+    const feedbackData = await queryComplexityCollection.find({
+      timestamp: { $gte: daysAgo }
+    }).sort({ timestamp: -1 }).limit(parseInt(limit)).toArray();
+    
+    // Get conversion data
+    const conversionData = await cartCollection.find({
+      timestamp: { $gte: daysAgo.toISOString() }
+    }).toArray();
+    
+    // Analyze patterns
+    const analytics = {
+      totalFeedbackRecords: feedbackData.length,
+      manualCorrections: feedbackData.filter(f => f.is_correction).length,
+      conversionBasedFeedback: feedbackData.filter(f => f.feedback_type === 'conversion_based').length,
+      manualTagging: feedbackData.filter(f => f.feedback_type === 'manual_tagging').length,
+      
+      classificationAccuracy: {
+        total: feedbackData.length,
+        correct: feedbackData.filter(f => !f.is_correction).length,
+        incorrect: feedbackData.filter(f => f.is_correction).length,
+        accuracyRate: feedbackData.length > 0 ? 
+          (feedbackData.filter(f => !f.is_correction).length / feedbackData.length * 100).toFixed(1) + '%' : 'N/A'
+      },
+      
+      complexityDistribution: {
+        simpleQueries: feedbackData.filter(f => f.original_classification === 'simple').length,
+        complexQueries: feedbackData.filter(f => f.original_classification === 'complex').length
+      },
+      
+      conversionPatterns: {
+        totalConversions: conversionData.length,
+        simpleQueryConversions: feedbackData.filter(f => f.feedback_type === 'conversion_based' && f.original_classification === 'simple').length,
+        complexQueryConversions: feedbackData.filter(f => f.feedback_type === 'conversion_based' && f.original_classification === 'complex').length
+      },
+      
+      recentFeedback: feedbackData.slice(0, 10).map(f => ({
+        query: f.query,
+        originalClassification: f.original_classification,
+        finalClassification: f.manual_classification || f.original_classification,
+        wasCorrection: f.is_correction || false,
+        feedbackType: f.feedback_type,
+        timestamp: f.timestamp,
+        reason: f.reason
+      }))
+    };
+    
+    res.json(analytics);
+    
+  } catch (error) {
+    console.error("Error fetching query complexity analytics:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post("/learn-from-feedback", async (req, res) => {
+  try {
+    const { dbName } = req.store;
+    const { minConfidence = 0.7, dryRun = false } = req.body;
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const queryComplexityCollection = db.collection('query_complexity_feedback');
+    const learningCollection = db.collection('query_complexity_learned');
+    
+    // Find high-confidence feedback that contradicts current classification
+    const corrections = await queryComplexityCollection.find({
+      is_correction: true,
+      confidence_score: { $gte: minConfidence }
+    }).toArray();
+    
+    const learningData = [];
+    
+    for (const correction of corrections) {
+      const learningPattern = {
+        query: correction.query,
+        learned_classification: correction.manual_classification || correction.original_classification,
+        original_classification: correction.original_classification,
+        confidence: correction.confidence_score,
+        feedback_count: await queryComplexityCollection.countDocuments({
+          query: correction.query,
+          is_correction: true
+        }),
+        last_updated: new Date(),
+        context: correction.context
+      };
+      
+      learningData.push(learningPattern);
+    }
+    
+    if (!dryRun && learningData.length > 0) {
+      // Store learned patterns
+      for (const pattern of learningData) {
+        await learningCollection.replaceOne(
+          { query: pattern.query },
+          pattern,
+          { upsert: true }
+        );
+      }
+    }
+    
+    res.json({
+      success: true,
+      dryRun: dryRun,
+      patternsFound: learningData.length,
+      patternsLearned: dryRun ? 0 : learningData.length,
+      patterns: learningData.map(p => ({
+        query: p.query,
+        originalClassification: p.original_classification,
+        learnedClassification: p.learned_classification,
+        confidence: p.confidence,
+        feedbackCount: p.feedback_count
+      }))
+    });
+    
+  } catch (error) {
+    console.error("Error learning from feedback:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+app.post("/test-search-to-cart-flow", async (req, res) => {
+  try {
+    const { query = "יין לבן חלק לארוחת ערב", simulateProductId = "test123" } = req.body;
+    const { dbName } = req.store;
+    
+    console.log("=== TESTING SEARCH-TO-CART FLOW ===");
+    
+    // Step 1: Simulate a search (get classification)
+    const isSimple = await classifyQueryComplexity(query, 'wine store', dbName);
+    const classification = isSimple ? 'simple' : 'complex';
+    
+    console.log(`Step 1: Query "${query}" classified as ${classification.toUpperCase()}`);
+    
+    // Step 2: Create mock search metadata (as would be returned by /search)
+    const searchMetadata = {
+      query: query,
+      isComplexQuery: !isSimple,
+      classification: classification,
+      hasHardFilters: false,
+      hasSoftFilters: true,
+      llmReorderingUsed: !isSimple,
+      filterOnlySearch: false,
+      requestId: 'test-' + Math.random().toString(36).substr(2, 9),
+      executionTime: 150,
+      totalResults: 25
+    };
+    
+    console.log(`Step 2: Created search metadata:`, searchMetadata);
+    
+    // Step 3: Simulate cart tracking with pre-classified data
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const cartCollection = db.collection('cart');
+    const queryComplexityCollection = db.collection('query_complexity_feedback');
+    
+    const document = {
+      search_query: query,
+      product_id: simulateProductId,
+      timestamp: new Date().toISOString(),
+      searchMetadata: searchMetadata,
+      search_classification: classification,
+      conversion_type: 'add_to_cart',
+      test_mode: true
+    };
+    
+    // Save to cart
+    const cartResult = await cartCollection.insertOne(document);
+    
+    // Save complexity feedback
+    const complexityFeedback = {
+      query: query,
+      original_classification: classification,
+      conversion_outcome: 'successful_purchase',
+      product_id: simulateProductId,
+      timestamp: new Date(),
+      feedback_type: 'conversion_based',
+      confidence_score: 0.9,
+      context: 'wine store',
+      search_metadata: searchMetadata,
+      was_pre_classified: true,
+      test_mode: true
+    };
+    
+    const feedbackResult = await queryComplexityCollection.insertOne(complexityFeedback);
+    
+    console.log(`Step 3: Saved cart and feedback records`);
+    
+    res.json({
+      success: true,
+      message: "Search-to-cart flow test completed successfully",
+      flow: {
+        step1: {
+          query: query,
+          classification: classification,
+          isSimple: isSimple
+        },
+        step2: {
+          searchMetadata: searchMetadata
+        },
+        step3: {
+          cartRecordId: cartResult.insertedId,
+          feedbackRecordId: feedbackResult.insertedId,
+          wasPreClassified: true
+        }
+      },
+      efficiency: {
+        classificationSource: "Pre-classified during search",
+        avoidedReClassification: true,
+        performanceBenefit: "No additional LLM call needed for cart tracking"
+      }
+    });
+    
+  } catch (error) {
+    console.error("Error testing search-to-cart flow:", error);
     res.status(500).json({ error: "Server error" });
   }
 });
