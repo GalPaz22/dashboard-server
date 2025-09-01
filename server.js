@@ -1541,7 +1541,7 @@ Focus only on visual elements that match the search intent.`;
        };
 
    const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash",
+     model: "gemini-2.5-flash-lite",
      contents: contents,
      config: { 
        temperature: 0.1,
