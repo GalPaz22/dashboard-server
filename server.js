@@ -1747,7 +1747,81 @@ async function executeExplicitSoftCategorySearch(
   
   console.log(`Soft category matches: ${softCategoryResults.length}, Non-soft category matches: ${nonSoftCategoryResults.length}`);
   
-  return combinedResults;
+  // Phase 3: Complete soft category sweep - get ALL products with soft category
+  console.log("Phase 3: Performing complete soft category sweep");
+  const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+  
+  // Build query for complete soft category sweep with hard filters applied
+  const sweepQuery = {
+    softCategory: { $in: softCats }
+  };
+  
+  // Apply hard filters to the sweep
+  if (hardFilters.category) {
+    sweepQuery.category = Array.isArray(hardFilters.category) 
+      ? { $in: hardFilters.category } 
+      : hardFilters.category;
+  }
+  
+  if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
+    sweepQuery.type = Array.isArray(hardFilters.type) 
+      ? { $in: hardFilters.type } 
+      : hardFilters.type;
+  }
+  
+  // Apply price filters
+  if (hardFilters.minPrice && hardFilters.maxPrice) {
+    sweepQuery.price = { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice };
+  } else if (hardFilters.minPrice) {
+    sweepQuery.price = { $gte: hardFilters.minPrice };
+  } else if (hardFilters.maxPrice) {
+    sweepQuery.price = { $lte: hardFilters.maxPrice };
+  } else if (hardFilters.price) {
+    const price = hardFilters.price;
+    const priceRange = price * 0.15;
+    sweepQuery.price = { $gte: price - priceRange, $lte: price + priceRange };
+  }
+  
+  // Add stock status filter
+  sweepQuery.$or = [
+    { stockStatus: { $exists: false } },
+    { stockStatus: "instock" }
+  ];
+  
+  const allSoftCategoryProducts = await collection.find(sweepQuery).toArray();
+  console.log(`Phase 3: Found ${allSoftCategoryProducts.length} total products with soft category`);
+  
+  // Merge Phase 3 results with existing results, avoiding duplicates
+  const existingProductIds = new Set([
+    ...softCategoryResults.map(p => p._id.toString()),
+    ...nonSoftCategoryResults.map(p => p._id.toString())
+  ]);
+  
+  // Add sweep products that weren't found in the search-based phases
+  const sweepOnlyProducts = allSoftCategoryProducts
+    .filter(product => !existingProductIds.has(product._id.toString()))
+    .map(product => {
+      const exactMatchBonus = getExactMatchBonus(product.name, query, cleanedHebrewText);
+      return {
+        ...product,
+        rrf_score: 100 + exactMatchBonus, // Lower base score for sweep-only products
+        softFilterMatch: true,
+        sweepResult: true // Mark as sweep result for debugging
+      };
+    });
+  
+  console.log(`Phase 3: Added ${sweepOnlyProducts.length} additional products from sweep`);
+  
+  // Combine all results: search-based results first (higher scores), then sweep results
+  const finalCombinedResults = [
+    ...softCategoryResults,
+    ...nonSoftCategoryResults,
+    ...sweepOnlyProducts
+  ];
+  
+  console.log(`Total combined results: ${finalCombinedResults.length} (${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
+  
+  return finalCombinedResults;
 }
 
 /* =========================================================== *\
