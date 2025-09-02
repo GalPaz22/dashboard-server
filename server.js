@@ -1182,35 +1182,17 @@ function shouldUseOrLogicForCategories(query, categories) {
   return orScore > andScore;
 }
 
+// Function to calculate number of soft category matches
 function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories) {
   if (!productSoftCategories || !querySoftCategories) return 0;
   
   const productCats = Array.isArray(productSoftCategories) ? productSoftCategories : [productSoftCategories];
   const queryCats = Array.isArray(querySoftCategories) ? querySoftCategories : [querySoftCategories];
   
-  // Count how many query soft categories this product matches
-  const matches = queryCats.filter(queryCat => 
-    productCats.some(productCat => 
-      productCat.toLowerCase().includes(queryCat.toLowerCase()) || 
-      queryCat.toLowerCase().includes(productCat.toLowerCase())
-    )
-  ).length;
-  
-  return matches;
+  return queryCats.filter(cat => productCats.includes(cat)).length;
 }
 
-function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, softCategoryMatches = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
-  const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
-                   VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
-  
-  const softBoost = softFilterBoost * 1.5;
-  
-  // Progressive boosting: each additional soft category match provides exponential boost
-  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(3, softCategoryMatches) * 0.5 : 0;
-  
-  return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
-}
-
+// Function to detect exact text matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
   if (!productName || !query) return 0;
   
@@ -1802,10 +1784,12 @@ async function executeExplicitSoftCategorySearch(
     .filter(product => !existingProductIds.has(product._id.toString()))
     .map(product => {
       const exactMatchBonus = getExactMatchBonus(product.name, query, cleanedHebrewText);
+      const softCategoryMatches = calculateSoftCategoryMatches(product.softCategory, softFilters.softCategory);
       return {
         ...product,
         rrf_score: 100 + exactMatchBonus, // Lower base score for sweep-only products
         softFilterMatch: true,
+        softCategoryMatches: softCategoryMatches,
         sweepResult: true // Mark as sweep result for debugging
       };
     });
@@ -2106,6 +2090,45 @@ app.post("/search", async (req, res) => {
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
 
+    // BINARY SORTING: Soft category matches ALWAYS first, regardless of score
+    if (hasSoftFilters) {
+      console.log(`[${requestId}] Applying binary soft category sorting`);
+      
+      combinedResults.sort((a, b) => {
+        const aHasSoftMatch = a.softFilterMatch || false;
+        const bHasSoftMatch = b.softFilterMatch || false;
+        
+        // If one has soft match and other doesn't, soft match wins
+        if (aHasSoftMatch !== bHasSoftMatch) {
+          return aHasSoftMatch ? -1 : 1;
+        }
+        
+        // If both have soft matches, sort by number of soft category matches (more matches first)
+        if (aHasSoftMatch && bHasSoftMatch) {
+          const aMatches = a.softCategoryMatches || 0;
+          const bMatches = b.softCategoryMatches || 0;
+          
+          if (aMatches !== bMatches) {
+            return bMatches - aMatches; // More matches first
+          }
+        }
+        
+        // Within same match status and count, sort by original score
+        return b.rrf_score - a.rrf_score;
+      });
+      
+      const topSoftMatches = combinedResults.filter(r => r.softFilterMatch).slice(0, 5);
+      console.log(`[${requestId}] Top soft category matches:`, 
+        topSoftMatches.map(p => ({
+          name: p.name,
+          softCategoryMatches: p.softCategoryMatches || 0,
+          rrf_score: p.rrf_score
+        }))
+      );
+    }
+
+    // LLM reordering for complex queries
+
     // Prepare final results
     const reorderedIds = reorderedData.map(item => item.id);
     const explanationsMap = new Map(reorderedData.map(item => [item.id, item.explanation]));
@@ -2174,9 +2197,9 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // For filter-only queries, return all results. For other queries, limit to 200
-    const isFilterOnlyResponse = finalResults.length > 0 && finalResults.some(r => r.filterOnly);
-    const limitedResults = isFilterOnlyResponse ? finalResults : finalResults.slice(0, 200);
+    // Dynamic result limit: higher for soft category searches to show all matching products
+    const resultLimit = hasSoftFilters ? 1000 : 200;
+    const limitedResults = finalResults.slice(0, resultLimit);
     const executionTime = Date.now() - searchStartTime;
     
     // Debug soft filter matching
@@ -2202,14 +2225,14 @@ app.post("/search", async (req, res) => {
       );
     }
     
-    console.log(`[${requestId}] Returning ${limitedResults.length} results in ${executionTime}ms`);
-    console.log(`[${requestId}] Filter-only results: ${limitedResults.filter(r => r.filterOnly).length}`);
+    console.log(`[${requestId}] Returning ${limitedResults.length} results in ${executionTime}ms (limit: ${resultLimit})`);
+    console.log(`[${requestId}] Soft filter matches in final results: ${limitedResults.filter(r => r.softFilterMatch).length}`);
     console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
     
-    if (isFilterOnlyResponse) {
-      console.log(`[${requestId}] Filter-only query: returning ALL ${limitedResults.length} matching products`);
+    if (hasSoftFilters) {
+      console.log(`[${requestId}] Soft filter query: using expanded limit of ${resultLimit} to show all matching products`);
     } else {
-      console.log(`[${requestId}] Standard query: limited to ${limitedResults.length} results`);
+      console.log(`[${requestId}] Standard query: limited to ${resultLimit} results`);
     }
 
     // Return products array with search metadata - maintain backward compatibility
