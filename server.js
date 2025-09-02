@@ -1192,6 +1192,22 @@ function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories
   return queryCats.filter(cat => productCats.includes(cat)).length;
 }
 
+// Enhanced RRF calculation that accounts for soft filter boosting and exact matches
+function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, softCategoryMatches = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
+  const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
+                   VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
+  
+  // Add soft filter boost
+  const softBoost = softFilterBoost * 1.5;
+  
+  // Progressive boosting: each additional soft category match provides exponential boost
+  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(2, softCategoryMatches) * 0.5 : 0;
+  
+  // Add keyword match bonus for strong text matches
+  // Add MASSIVE exact match bonus to ensure exact matches appear first
+  return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
+}
+
 // Function to detect exact text matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
   if (!productName || !query) return 0;
