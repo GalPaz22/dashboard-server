@@ -1893,6 +1893,55 @@ app.post("/search", async (req, res) => {
     });
   }
 
+  // Check if this is a digits-only query for SKU search
+  if (isDigitsOnlyQuery(query)) {
+    console.log(`[${requestId}] Digits-only query detected: "${query}" - activating SKU search`);
+    
+    try {
+      const client = await connectToMongoDB(mongodbUri);
+      const db = client.db(dbName);
+      const collection = db.collection(collectionName);
+      
+      // Execute SKU search
+      const skuResults = await executeSKUSearch(collection, query.trim());
+      
+      // Format SKU results for response
+      const formattedSKUResults = skuResults.map((product) => ({
+        id: product._id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        highlight: true, // Highlight SKU matches as they are exact matches
+        type: product.type,
+        specialSales: product.specialSales,
+        ItemID: product.ItemID,
+        explanation: null,
+        softFilterMatch: false,
+        softCategoryMatches: 0,
+        simpleSearch: false,
+        skuSearch: true,
+        searchRank: product.searchRank
+      }));
+      
+      console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
+      
+      // Log the query (with empty filters since no filter extraction for SKU search)
+      try {
+        await logQuery(querycollection, query, {});
+      } catch (logError) {
+        console.error(`[${requestId}] Failed to log SKU query:`, logError.message);
+      }
+      
+      return res.json(formattedSKUResults);
+      
+    } catch (error) {
+      console.error(`[${requestId}] SKU search failed:`, error);
+      return res.status(500).json({ error: "SKU search error" });
+    }
+  }
+
   try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
@@ -3033,3 +3082,108 @@ app.listen(PORT, async () => {
     }
   }, 5000);
 });
+
+// Function to detect if query is digits-only (for SKU search)
+function isDigitsOnlyQuery(query) {
+  if (!query || typeof query !== 'string') return false;
+  const trimmed = query.trim();
+  return /^\d+$/.test(trimmed) && trimmed.length > 0;
+}
+
+// SKU search pipeline - optimized for exact digit matches
+function buildSKUSearchPipeline(skuQuery, limit = 50) {
+  console.log(`Building SKU search pipeline for: ${skuQuery}`);
+  
+  const pipeline = [
+    {
+      $search: {
+        index: "default",
+        compound: {
+          should: [
+            // Exact SKU match gets highest priority
+            {
+              text: {
+                query: skuQuery,
+                path: "sku",
+                score: { boost: { value: 1000 } } // Massive boost for exact SKU match
+              }
+            },
+            // ItemID exact match
+            {
+              text: {
+                query: skuQuery,
+                path: "ItemID", 
+                score: { boost: { value: 900 } } // High boost for ItemID match
+              }
+            },
+            // Product ID match
+            {
+              text: {
+                query: skuQuery,
+                path: "id",
+                score: { boost: { value: 800 } } // High boost for ID match
+              }
+            },
+            // Barcode match if available
+            {
+              text: {
+                query: skuQuery,
+                path: "barcode",
+                score: { boost: { value: 700 } } // Boost for barcode match
+              }
+            },
+            // Fallback: search in name for products that might have the number in their name
+            {
+              text: {
+                query: skuQuery,
+                path: "name",
+                score: { boost: { value: 100 } } // Lower boost for name matches
+              }
+            }
+          ],
+          minimumShouldMatch: 1
+        }
+      }
+    },
+    // Stock status filter
+    {
+      $match: {
+        $or: [
+          { stockStatus: { $exists: false } },
+          { stockStatus: "instock" }
+        ]
+      }
+    },
+    { $limit: limit }
+  ];
+  
+  return pipeline;
+}
+
+// Function to execute SKU search
+async function executeSKUSearch(collection, skuQuery) {
+  console.log(`Executing SKU search for: ${skuQuery}`);
+  
+  try {
+    const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 100)).toArray();
+    
+    // Add SKU-specific scoring and metadata
+    const processedResults = skuResults.map((product, index) => ({
+      ...product,
+      rrf_score: 2000 - index, // High base scores for SKU matches, decreasing by rank
+      softFilterMatch: false,
+      softCategoryMatches: 0,
+      skuSearch: true, // Mark as SKU search result
+      searchRank: index + 1
+    }));
+    
+    console.log(`SKU search found ${processedResults.length} results`);
+    return processedResults;
+    
+  } catch (error) {
+    console.error("Error in SKU search:", error);
+    return [];
+  }
+}
+
+// Function to detect exact text matches
