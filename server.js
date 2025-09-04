@@ -2124,19 +2124,66 @@ app.post("/search", async (req, res) => {
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly;
     
       if (shouldUseLLMReranking) {
-        console.log(`[${requestId}] Applying LLM reordering`);
+        console.log(`[${requestId}] Applying LLM reordering with soft category preservation`);
         console.log(`[${requestId}] Reason: Complex query detected (has soft filters: ${hasSoftFilters})`);
-      try {
-        const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-        reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
+        
+        try {
+          // If we have soft filters, we need to preserve the binary sorting
+          if (hasSoftFilters) {
+            // Separate soft matches from non-soft matches
+            const softMatches = combinedResults.filter(r => r.softFilterMatch);
+            const nonSoftMatches = combinedResults.filter(r => !r.softFilterMatch);
+            
+            console.log(`[${requestId}] Preserving soft category priority: ${softMatches.length} soft matches, ${nonSoftMatches.length} non-soft matches`);
+            
+            // Reorder each group separately
+            const softMatchPromises = [];
+            const nonSoftMatchPromises = [];
+            
+            if (softMatches.length > 0) {
+              softMatchPromises.push(
+                (async () => {
+                  const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+                  return await reorderFn(softMatches, translatedQuery, query, [], explain, context);
+                })()
+              );
+            }
+            
+            if (nonSoftMatches.length > 0) {
+              nonSoftMatchPromises.push(
+                (async () => {
+                  const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+                  return await reorderFn(nonSoftMatches, translatedQuery, query, [], explain, context);
+                })()
+              );
+            }
+            
+            // Wait for both reorderings to complete
+            const [softReordered = [], nonSoftReordered = []] = await Promise.all([
+              softMatchPromises.length > 0 ? softMatchPromises[0] : Promise.resolve([]),
+              nonSoftMatchPromises.length > 0 ? nonSoftMatchPromises[0] : Promise.resolve([])
+            ]);
+            
+            // Combine with soft matches first
+            reorderedData = [...softReordered, ...nonSoftReordered];
+            
+            console.log(`[${requestId}] LLM reordering completed with soft category preservation: ${softReordered.length} soft + ${nonSoftReordered.length} non-soft`);
+            
+          } else {
+            // No soft filters, normal LLM reordering
+            const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+            reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context);
+          }
+          
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
-      } catch (error) {
-          console.error("LLM reordering failed, falling back to RRF ordering:", error);
-        reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+          
+        } catch (error) {
+          console.error("Error reordering results with Gemini:", error);
+          reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
           llmReorderingSuccessful = false;
-      }
-    } else {
+        }
+      } else {
         let skipReason = "";
         if (shouldUseFilterOnly) {
           skipReason = "filter-only query";
