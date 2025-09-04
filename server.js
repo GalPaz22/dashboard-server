@@ -1049,7 +1049,7 @@ For softCategory, look for contextual hints like:
 - "suitable for [context]"
 - Food pairing mentions
 - Occasion mentions
-- Geographic/origin references (e.g., "Spanish", "Italian", "French")
+- Geographic/origin references- extract the only as they appear in the softCategory list!!
 
 Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
 ${example}.`;
