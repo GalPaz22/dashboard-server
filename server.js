@@ -566,6 +566,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
         url: 1,
         image: 1,
         price: 1,
+        id: 1,
       },
     }
   );
