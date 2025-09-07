@@ -430,13 +430,14 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   pipeline.push({ 
     $sort: { 
       price: 1,
-      _id: 1  // Secondary sort for consistent pagination
+      id: 1  // Secondary sort for consistent pagination
     } 
   });
 
   // Project only needed fields to reduce network overhead
   pipeline.push({
     $project: {
+      id: 1,
       name: 1,
       description: 1,
       price: 1,
@@ -1297,16 +1298,16 @@ async function reorderResultsWithGPT(
   context
 ) {
     const filtered = combinedResults.filter(
-      (p) => !alreadyDelivered.includes(p._id.toString())
+      (p) => !alreadyDelivered.includes(p.id)
     );
     const limitedResults = filtered.slice(0, 20);
-  const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
+  const productIds = limitedResults.map(p => p.id).sort().join(',');
   const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
     
   return withCache(cacheKey, async () => {
     try {
     const productData = limitedResults.map((p) => ({
-      id: p._id.toString(),
+      id: p.id,
       name: p.name || "No name",
         description: p.description1|| "No description",
       price: p.price || "No price",
@@ -1433,7 +1434,7 @@ async function reorderImagesWithGPT(
    }
 
    const filteredResults = combinedResults.filter(
-     (product) => !alreadyDelivered.includes(product._id.toString())
+     (product) => !alreadyDelivered.includes(product.id)
    );
 
    const limitedResults = filteredResults.slice(0, 25);
@@ -1477,7 +1478,7 @@ Search Query Intent: "${sanitizedQuery}"` });
          });
          
          contents.push({ 
-           text: `Product ID: ${product._id.toString()}
+           text: `Product ID: ${product.id}
 Name: ${product.name || "No name"}
 }
 Price: ${product.price || "No price"}
@@ -1486,7 +1487,7 @@ Price: ${product.price || "No price"}
          });
        }
      } catch (imageError) {
-       console.error(`Failed to fetch image for product ${product._id}:`, imageError);
+       console.error(`Failed to fetch image for product ${product.id}:`, imageError);
      }
    }
 
@@ -1584,17 +1585,11 @@ async function getProductsByIds(ids, dbName, collectionName) {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
-    const objectIdArray = ids.map((id) => {
-      try {
-        return new ObjectId(id);
-      } catch (error) {
-        console.error(`Invalid ObjectId format: ${id}`);
-        return null;
-      }
-    }).filter((id) => id !== null);
-    const products = await collection.find({ _id: { $in: objectIdArray } }).toArray();
+    
+    // Use id field instead of _id for lookups
+    const products = await collection.find({ id: { $in: ids } }).toArray();
     const orderedProducts = ids.map((id) =>
-      products.find((p) => p && p._id.toString() === id)
+      products.find((p) => p && p.id === id)
     ).filter((product) => product !== undefined);
     return orderedProducts;
   } catch (error) {
@@ -1686,11 +1681,11 @@ async function executeExplicitSoftCategorySearch(
   
   const softCategoryDocumentRanks = new Map();
   softCategoryFuzzyResults.forEach((doc, index) => {
-    softCategoryDocumentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+    softCategoryDocumentRanks.set(doc.id, { fuzzyRank: index, vectorRank: Infinity, doc });
   });
 
   softCategoryVectorResults.forEach((doc, index) => {
-    const id = doc._id.toString();
+    const id = doc.id;
     const existing = softCategoryDocumentRanks.get(id);
     if (existing) {
       existing.vectorRank = index;
@@ -1714,11 +1709,11 @@ async function executeExplicitSoftCategorySearch(
   
   const nonSoftCategoryDocumentRanks = new Map();
   nonSoftCategoryFuzzyResults.forEach((doc, index) => {
-    nonSoftCategoryDocumentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+    nonSoftCategoryDocumentRanks.set(doc.id, { fuzzyRank: index, vectorRank: Infinity, doc });
   });
 
   nonSoftCategoryVectorResults.forEach((doc, index) => {
-    const id = doc._id.toString();
+    const id = doc.id;
     const existing = nonSoftCategoryDocumentRanks.get(id);
     if (existing) {
       existing.vectorRank = index;
@@ -1792,13 +1787,13 @@ async function executeExplicitSoftCategorySearch(
   
   // Merge Phase 3 results with existing results, avoiding duplicates
   const existingProductIds = new Set([
-    ...softCategoryResults.map(p => p._id.toString()),
-    ...nonSoftCategoryResults.map(p => p._id.toString())
+    ...softCategoryResults.map(p => p.id),
+    ...nonSoftCategoryResults.map(p => p.id)
   ]);
   
   // Add sweep products that weren't found in the search-based phases
   const sweepOnlyProducts = allSoftCategoryProducts
-    .filter(product => !existingProductIds.has(product._id.toString()))
+    .filter(product => !existingProductIds.has(product.id))
     .map(product => {
       const exactMatchBonus = getExactMatchBonus(product.name, query, cleanedHebrewText);
       const softCategoryMatches = calculateSoftCategoryMatches(product.softCategory, softFilters.softCategory);
@@ -1908,7 +1903,7 @@ app.post("/search", async (req, res) => {
       
       // Format SKU results for response
       const formattedSKUResults = skuResults.map((product) => ({
-        id: product._id,
+        id: product.id,
         name: product.name,
         description: product.description,
         price: product.price,
@@ -2044,7 +2039,7 @@ app.post("/search", async (req, res) => {
         
         // Set reorderedData to maintain consistent response structure
         reorderedData = combinedResults.slice(0, 50).map((result) => ({ 
-          id: result._id.toString(), 
+          id: result.id, 
           explanation: null 
         }));
         llmReorderingSuccessful = false; // No LLM reordering for filter-only
@@ -2099,17 +2094,17 @@ app.post("/search", async (req, res) => {
 
       const documentRanks = new Map();
       fuzzyResults.forEach((doc, index) => {
-        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+        documentRanks.set(doc.id, { fuzzyRank: index, vectorRank: Infinity });
       });
       vectorResults.forEach((doc, index) => {
-        const existingRanks = documentRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-        documentRanks.set(doc._id.toString(), { ...existingRanks, vectorRank: index });
+        const existingRanks = documentRanks.get(doc.id) || { fuzzyRank: Infinity, vectorRank: Infinity };
+        documentRanks.set(doc.id, { ...existingRanks, vectorRank: index });
       });
 
       combinedResults = Array.from(documentRanks.entries())
         .map(([id, ranks]) => {
-          const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
-                      vectorResults.find((d) => d._id.toString() === id);
+          const doc = fuzzyResults.find((d) => d.id === id) ||
+                      vectorResults.find((d) => d.id === id);
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedHebrewText);
             return { 
               ...doc, 
@@ -2181,7 +2176,7 @@ app.post("/search", async (req, res) => {
           
         } catch (error) {
           console.error("Error reordering results with Gemini:", error);
-          reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+          reorderedData = combinedResults.map((result) => ({ id: result.id, explanation: null }));
           llmReorderingSuccessful = false;
         }
       } else {
@@ -2194,7 +2189,7 @@ app.post("/search", async (req, res) => {
         
         console.log(`[${requestId}] Skipping LLM reordering (${skipReason})`);
         
-      reorderedData = combinedResults.map((result) => ({ id: result._id.toString(), explanation: null }));
+      reorderedData = combinedResults.map((result) => ({ id: result.id, explanation: null }));
         llmReorderingSuccessful = false;
       }
     }
@@ -2247,11 +2242,11 @@ app.post("/search", async (req, res) => {
     const explanationsMap = new Map(reorderedData.map(item => [item.id, item.explanation]));
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
     const reorderedProductIds = new Set(reorderedIds);
-    const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
+    const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r.id));
      
     const finalResults = [
       ...orderedProducts.map((product) => {
-        const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
+        const resultData = combinedResults.find(r => r.id === product.id);
         
         // Highlighting logic based on query type:
         // - Simple queries with soft filters: highlight soft filter matches
@@ -2266,7 +2261,7 @@ app.post("/search", async (req, res) => {
         }
         
         return {
-          id: product._id,
+          id: product.id,
         name: product.name,
         description: product.description,
         price: product.price,
@@ -2276,7 +2271,7 @@ app.post("/search", async (req, res) => {
         type: product.type,
         specialSales: product.specialSales,
         ItemID: product.ItemID,
-        explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+        explanation: explain ? (explanationsMap.get(product.id) || null) : null,
           softFilterMatch: !!(resultData?.softFilterMatch),
           softCategoryMatches: resultData?.softCategoryMatches || 0,
           simpleSearch: false,
@@ -2393,7 +2388,7 @@ app.get("/products", async (req, res) => {
     const collection = db.collection(collectionName);
     const products = await collection.find().limit(Number(limit)).toArray();
     const results = products.map((product) => ({
-      id: product._id,
+      id: product.id,
       name: product.name,
       description: product.description,
       price: product.price,
@@ -2441,7 +2436,7 @@ app.post("/recommend", async (req, res) => {
     ];
     const similarProducts = await collection.aggregate(pipeline).toArray();
     const results = similarProducts.map((product) => ({
-      id: product._id,
+      id: product.id,
       name: product.name,
       description: product.description,
       price: product.price,
