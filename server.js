@@ -1639,11 +1639,11 @@ async function executeExplicitSoftCategorySearch(
     (!cleanedHebrewText || cleanedHebrewText.trim() === '' || 
      hardFilters.category && query.toLowerCase().trim() === hardFilters.category.toLowerCase().trim());
   
-  const softCategoryLimit = isPureHardCategorySearch ? 500 : 40;
-  const nonSoftCategoryLimit = isPureHardCategorySearch ? 500 : 40;
+  const softCategoryLimit = isPureHardCategorySearch ? 250 : 40;
+  const nonSoftCategoryLimit = isPureHardCategorySearch ? 250 : 40;
   const vectorLimit = isPureHardCategorySearch ? 250 : 25;
   
-  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
+  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (all capped at 250 for performance)`);
   
   // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
@@ -2075,10 +2075,10 @@ app.post("/search", async (req, res) => {
           (!cleanedHebrewText || cleanedHebrewText.trim() === '' || 
            hardFilters.category && query.toLowerCase().trim() === hardFilters.category.toLowerCase().trim());
         
-        const searchLimit = isPureHardCategorySearch ? 1000 : 40; // Unlimited for pure category searches
-        const vectorLimit = isPureHardCategorySearch ? 500 : 25;   // Higher limit for pure category searches
+        const searchLimit = isPureHardCategorySearch ? 250 : 40; // Capped at 250 for pure category searches
+        const vectorLimit = isPureHardCategorySearch ? 250 : 25;   // Capped at 250 for pure category searches
         
-        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
+        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit} (capped at 250 for performance)`);
         console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
         
         const searchPromises = [
@@ -2254,7 +2254,7 @@ app.post("/search", async (req, res) => {
         let isHighlighted = false;
         if (llmReorderingSuccessful) {
           // Complex query with LLM rerank: highlight only LLM selections
-          isHighlighted = reorderedIds.includes(product._id.toString());
+          isHighlighted = reorderedIds.includes(product.id);
         } else if (hasSoftFilters) {
           // Simple query with soft filters: highlight soft filter matches
           isHighlighted = !!(resultData?.softFilterMatch);
@@ -2305,8 +2305,8 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Dynamic result limit: higher for soft category searches to show all matching products
-    const resultLimit = hasSoftFilters ? 1000 : 200;
+    // Dynamic result limit: higher for soft category searches to show all matching products, capped at 250
+    const resultLimit = hasSoftFilters ? 250 : 200;
     const limitedResults = finalResults.slice(0, resultLimit);
     const executionTime = Date.now() - searchStartTime;
     
@@ -2318,14 +2318,14 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] Soft filters extracted:`, JSON.stringify(softFilters.softCategory));
       console.log(`[${requestId}] Products with softFilterMatch=true:`, 
         combinedResults.filter(r => r.softFilterMatch).slice(0, 3).map(p => ({
-          id: p._id?.toString() || p.id, 
+          id: p.id, 
           name: p.name, 
           softCategory: p.softCategory
         }))
       );
       console.log(`[${requestId}] Sample highlighted products:`, 
         limitedResults.filter(r => r.highlight).slice(0, 3).map(p => ({
-          id: p.id?.toString(), 
+          id: p.id, 
           name: p.name,
           highlight: p.highlight,
           softFilterMatch: p.softFilterMatch
@@ -2338,7 +2338,7 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
     
     if (hasSoftFilters) {
-      console.log(`[${requestId}] Soft filter query: using expanded limit of ${resultLimit} to show all matching products`);
+      console.log(`[${requestId}] Soft filter query: using expanded limit of ${resultLimit} to show matching products (capped at 250 for performance)`);
     } else {
       console.log(`[${requestId}] Standard query: limited to ${resultLimit} results`);
     }
