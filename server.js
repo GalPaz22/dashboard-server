@@ -1203,7 +1203,7 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
   const softBoost = softFilterBoost * 1.5;
   
   // Progressive boosting: each additional soft category match provides exponential boost
-  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(2, softCategoryMatches) * 0.5 : 0;
+  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(3, softCategoryMatches) * 1000 : 0;
   
   // Add keyword match bonus for strong text matches
   // Add MASSIVE exact match bonus to ensure exact matches appear first
@@ -1707,9 +1707,12 @@ async function executeExplicitSoftCategorySearch(
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedHebrewText);
       const softCategoryMatches = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory);
+      const baseScore = calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches);
+      // Additional multi-category boost for soft category results
+      const multiCategoryBoost = softCategoryMatches > 1 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
       return {
         ...data.doc,
-        rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+        rrf_score: baseScore + 10000 + multiCategoryBoost, // Base boost + multi-category boost
         softFilterMatch: true,
         softCategoryMatches: softCategoryMatches
       };
@@ -1748,7 +1751,11 @@ async function executeExplicitSoftCategorySearch(
     ...nonSoftCategoryResults
   ];
   
-  console.log(`Soft category matches: ${softCategoryResults.length}, Non-soft category matches: ${nonSoftCategoryResults.length}`);
+  console.log(`Soft category matches: ${softCategoryResults.length} (boosted +10000 + multi-category), Non-soft category matches: ${nonSoftCategoryResults.length}`);
+  
+  // Log multi-category distribution
+  const multiCategoryCount = softCategoryResults.filter(r => r.softCategoryMatches > 1).length;
+  console.log(`Multi-category products: ${multiCategoryCount} (will rank higher than single-category)`);
   
   // Phase 3: Complete soft category sweep - get ALL products with soft category
   console.log("Phase 3: Performing complete soft category sweep");
@@ -1806,9 +1813,11 @@ async function executeExplicitSoftCategorySearch(
     .map(product => {
       const exactMatchBonus = getExactMatchBonus(product.name, query, cleanedHebrewText);
       const softCategoryMatches = calculateSoftCategoryMatches(product.softCategory, softFilters.softCategory);
+      // Additional multi-category boost for sweep results
+      const multiCategoryBoost = softCategoryMatches > 1 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
       return {
         ...product,
-        rrf_score: 100 + exactMatchBonus, // Lower base score for sweep-only products
+        rrf_score: 100 + exactMatchBonus + 10000 + multiCategoryBoost, // Base boost + multi-category boost
         softFilterMatch: true,
         softCategoryMatches: softCategoryMatches,
         sweepResult: true // Mark as sweep result for debugging
