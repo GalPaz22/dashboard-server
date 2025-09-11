@@ -576,10 +576,13 @@ const buildAutocompletePipeline = (query, indexName, path) => {
 };
 
 // Standard search pipeline without soft filter boosting
-const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 200, useOrLogic = false) => {
+const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 200, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = [];
   
   if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
+    // Reduce text search boosts significantly in image mode with soft categories
+    const textBoostMultiplier = isImageModeWithSoftCategories ? 0.1 : 1.0;
+    
     const searchStage = {
       $search: {
         index: "default",
@@ -589,14 +592,14 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
               text: {
                 query: query,
                 path: "name",
-                score: { boost: { value: 100 } }
+                score: { boost: { value: 100 * textBoostMultiplier } }
               }
             },
             {
               text: {
                 query: cleanedHebrewText,
                 path: "name",
-                score: { boost: { value: 50 } }
+                score: { boost: { value: 50 * textBoostMultiplier } }
               }
             },
             {
@@ -608,7 +611,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                   prefixLength: 2,
                   maxExpansions: 50,
                 },
-                score: { boost: { value: 10 } }
+                score: { boost: { value: 10 * textBoostMultiplier } }
               }
             },
             {
@@ -620,7 +623,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                   prefixLength: 3,
                   maxExpansions: 50,
                 },
-                score: { boost: { value: 3 } }
+                score: { boost: { value: 3 * textBoostMultiplier } }
               }
             },
             {
@@ -631,7 +634,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                   maxEdits: 2,
                   prefixLength: 3
                 },
-                score: { boost: { value: 5 } }
+                score: { boost: { value: 5 * textBoostMultiplier } }
               }
             }
           ]
@@ -719,8 +722,8 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
 };
 
 // Search pipeline WITH soft category filter
-const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false) => {
-  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic);
+const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
   
   if (softFilters && softFilters.softCategory) {
     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
@@ -738,8 +741,8 @@ const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardF
 };
 
 // Search pipeline WITHOUT soft category filter 
-const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false) => {
-  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic);
+const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
   
   if (softFilters && softFilters.softCategory) {
     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
@@ -1639,7 +1642,8 @@ async function executeExplicitSoftCategorySearch(
   hardFilters, 
   softFilters, 
   queryEmbedding,
-  useOrLogic = false
+  useOrLogic = false,
+  isImageModeWithSoftCategories = false
 ) {
   console.log("Executing explicit soft category search");
   
@@ -1657,7 +1661,7 @@ async function executeExplicitSoftCategorySearch(
   // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
     collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
-      cleanedHebrewText, query, hardFilters, softFilters, softCategoryLimit, useOrLogic
+      cleanedHebrewText, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
     )).toArray()
   ];
   
@@ -1674,7 +1678,7 @@ async function executeExplicitSoftCategorySearch(
   // Phase 2: Get products WITHOUT soft categories
   const nonSoftCategoryPromises = [
     collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
-      cleanedHebrewText, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic
+      cleanedHebrewText, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
     )).toArray()
   ];
   
@@ -1756,6 +1760,10 @@ async function executeExplicitSoftCategorySearch(
   // Log multi-category distribution
   const multiCategoryCount = softCategoryResults.filter(r => r.softCategoryMatches > 1).length;
   console.log(`Multi-category products: ${multiCategoryCount} (will rank higher than single-category)`);
+  
+  if (isImageModeWithSoftCategories) {
+    console.log(`Image mode: Text search boosts reduced to 10% (visual + soft categories prioritized)`);
+  }
   
   // Phase 3: Complete soft category sweep - get ALL products with soft category
   console.log("Phase 3: Performing complete soft category sweep");
@@ -2075,6 +2083,12 @@ app.post("/search", async (req, res) => {
       if (hasSoftFilters) {
         console.log(`[${requestId}] Executing explicit soft category search`, softFilters.softCategory);
         
+        // Check if we're in image mode with soft categories
+        const isImageModeWithSoftCategories = syncMode === 'image';
+        if (isImageModeWithSoftCategories) {
+          console.log(`[${requestId}] Image mode detected - reducing text search boosts by 90%`);
+        }
+        
         combinedResults = await executeExplicitSoftCategorySearch(
           collection,
           cleanedHebrewText,
@@ -2082,7 +2096,8 @@ app.post("/search", async (req, res) => {
           hardFilters,
           softFilters,
           queryEmbedding,
-          useOrLogic
+          useOrLogic,
+          isImageModeWithSoftCategories
         );
           
       } else {
