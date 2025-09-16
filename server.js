@@ -1464,7 +1464,7 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: "gemini-2.5-flash",
       contents: userContent,
       config: { 
         systemInstruction, 
@@ -1646,7 +1646,7 @@ Focus only on visual elements that match the search intent.`;
        };
 
    const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash-lite",
+     model: "gemini-2.5-flash",
      contents: contents,
      config: { 
        temperature: 0.1,
@@ -2387,34 +2387,50 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] Applying binary soft category sorting`);
       
       combinedResults.sort((a, b) => {
+        const aMatches = a.softCategoryMatches || 0;
+        const bMatches = b.softCategoryMatches || 0;
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
         
-        // If one has soft match and other doesn't, soft match wins
+        // ABSOLUTE PRIORITY: Multi-category products (2+ matches) always first
+        const aIsMultiCategory = aMatches >= 2;
+        const bIsMultiCategory = bMatches >= 2;
+        
+        if (aIsMultiCategory !== bIsMultiCategory) {
+          return aIsMultiCategory ? -1 : 1; // Multi-category products always win
+        }
+        
+        // Within multi-category products, sort by number of matches (more matches first)
+        if (aIsMultiCategory && bIsMultiCategory) {
+          if (aMatches !== bMatches) {
+            return bMatches - aMatches; // More matches first within multi-category
+          }
+          // Within same match count, sort by score
+          return b.rrf_score - a.rrf_score;
+        }
+        
+        // For single-category or non-soft products: soft match wins over non-soft
         if (aHasSoftMatch !== bHasSoftMatch) {
           return aHasSoftMatch ? -1 : 1;
         }
         
-        // If both have soft matches, sort by number of soft category matches (more matches first)
-        if (aHasSoftMatch && bHasSoftMatch) {
-          const aMatches = a.softCategoryMatches || 0;
-          const bMatches = b.softCategoryMatches || 0;
-          
-          if (aMatches !== bMatches) {
-            return bMatches - aMatches; // More matches first
-          }
-        }
-        
-        // Within same match status and count, sort by original score
+        // Within same soft match status, sort by score
         return b.rrf_score - a.rrf_score;
       });
       
-      const topSoftMatches = combinedResults.filter(r => r.softFilterMatch).slice(0, 5);
-      console.log(`[${requestId}] Top soft category matches:`, 
-        topSoftMatches.map(p => ({
+      const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2);
+      const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1);
+      
+      console.log(`[${requestId}] Multi-category products (2+ matches): ${multiCategoryProducts.length} - ABSOLUTE PRIORITY`);
+      console.log(`[${requestId}] Single-category products: ${singleCategoryProducts.length}`);
+      
+      const topResults = combinedResults.slice(0, 5);
+      console.log(`[${requestId}] Top 5 results after multi-category priority sorting:`, 
+        topResults.map(p => ({
           name: p.name,
           softCategoryMatches: p.softCategoryMatches || 0,
-          rrf_score: p.rrf_score
+          rrf_score: p.rrf_score,
+          isMultiCategory: (p.softCategoryMatches || 0) >= 2
         }))
       );
     }
