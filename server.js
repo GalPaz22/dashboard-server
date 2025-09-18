@@ -1575,7 +1575,7 @@ Search Query Intent: "${sanitizedQuery}"` });
          });
          
          contents.push({ 
-           text: `Product ID: ${product._id.toString()}
+           text: `_id: ${product._id.toString()}
 Name: ${product.name || "No name"}
 Description: ${product.description || "No description"}
 Price: ${product.price || "No price"}
@@ -1606,7 +1606,7 @@ Focus only on visual elements that match the search intent.`
 
 CRITICAL: 
 - Maximum 4 products in response
-- The '_id' in your response MUST EXACTLY MATCH one of the 'Product ID' values from the input products.
+- The '_id' in your response MUST EXACTLY MATCH one of the '_id' values from the input products. DO NOT invent or alter them.
 - Respond in the same language as the search query
 
 Required format:
@@ -2318,56 +2318,19 @@ app.post("/search", async (req, res) => {
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly;
     
       if (shouldUseLLMReranking) {
-        console.log(`[${requestId}] Applying LLM reordering with soft category preservation`);
-        console.log(`[${requestId}] Reason: Complex query detected (has soft filters: ${hasSoftFilters})`);
+        console.log(`[${requestId}] Applying LLM reordering`);
         
         try {
-          // If we have soft filters, we need to preserve the binary sorting
+          const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+          let resultsForLLM = combinedResults;
+
+          // If soft filters are active, ONLY send soft-matched products to the LLM
           if (hasSoftFilters) {
-            // Separate soft matches from non-soft matches
-            const softMatches = combinedResults.filter(r => r.softFilterMatch);
-            const nonSoftMatches = combinedResults.filter(r => !r.softFilterMatch);
-            
-            console.log(`[${requestId}] Preserving soft category priority: ${softMatches.length} soft matches, ${nonSoftMatches.length} non-soft matches`);
-            
-            // Reorder each group separately
-            const softMatchPromises = [];
-            const nonSoftMatchPromises = [];
-            
-            if (softMatches.length > 0) {
-              softMatchPromises.push(
-                (async () => {
-                  const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-                  return await reorderFn(softMatches, translatedQuery, query, [], explain, context, softFilters);
-                })()
-              );
-            }
-            
-            if (nonSoftMatches.length > 0) {
-              nonSoftMatchPromises.push(
-                (async () => {
-                  const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-                  return await reorderFn(nonSoftMatches, translatedQuery, query, [], explain, context, softFilters);
-                })()
-              );
-            }
-            
-            // Wait for both reorderings to complete
-            const [softReordered = [], nonSoftReordered = []] = await Promise.all([
-              softMatchPromises.length > 0 ? softMatchPromises[0] : Promise.resolve([]),
-              nonSoftMatchPromises.length > 0 ? nonSoftMatchPromises[0] : Promise.resolve([])
-            ]);
-            
-            // Combine with soft matches first
-            reorderedData = [...softReordered, ...nonSoftReordered];
-            
-            console.log(`[${requestId}] LLM reordering completed with soft category preservation: ${softReordered.length} soft + ${nonSoftReordered.length} non-soft`);
-            
-          } else {
-            // No soft filters, normal LLM reordering
-            const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-            reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters);
+            resultsForLLM = combinedResults.filter(r => r.softFilterMatch);
+            console.log(`[${requestId}] Soft filters active. Sending ONLY ${resultsForLLM.length} soft-matched products to LLM for re-ranking.`);
           }
+          
+          reorderedData = await reorderFn(resultsForLLM, translatedQuery, query, [], explain, context, softFilters);
           
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
