@@ -1489,30 +1489,10 @@ ${JSON.stringify(productData, null, 2)}`;
     const reorderedData = JSON.parse(text);
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
     
-    let finalData = reorderedData;
-
-    if (finalData.length > 4) {
-      console.log(`[Gemini Rerank] Warning: LLM returned ${finalData.length} products, limited to 4`);
-      finalData = finalData.slice(0, 4);
-    }
-
-    // When explain is true, ensure we always have 4 results by padding if necessary
-    if (explain && finalData.length < 4) {
-      console.log(`[Gemini Rerank] Explain mode returned only ${finalData.length} products. Padding to 4.`);
-      const returnedIds = new Set(finalData.map(item => item._id));
-      const remainingProducts = limitedResults
-        .filter(p => !returnedIds.has(p._id.toString()))
-        .slice(0, 4 - finalData.length);
-
-      const paddedProducts = remainingProducts.map(p => ({
-        _id: p._id.toString(),
-        explanation: null // No explanation for padded products
-      }));
-      
-      finalData.push(...paddedProducts);
-    }
+    // Trusting the LLM's response length, guided by the `maxItems: 4` schema constraint.
+    // No more forced slicing or padding.
     
-    return finalData.map(item => ({
+    return reorderedData.map(item => ({
       _id: item._id,
       explanation: explain ? (item.explanation || null) : null
     }));
@@ -1700,30 +1680,10 @@ Focus only on visual elements that match the search intent.`;
      throw new Error("Invalid response format from Gemini. Expected an array of objects.");
    }
    
-   let finalData = reorderedData;
-
-   if (finalData.length > 4) {
-     console.log(`[Gemini Image Rerank] Warning: LLM returned ${finalData.length} products, limited to 4`);
-     finalData = finalData.slice(0, 4);
-   }
-
-    // When explain is true, ensure we always have 4 results by padding if necessary
-    if (explain && finalData.length < 4) {
-      console.log(`[Gemini Image Rerank] Explain mode returned only ${finalData.length} products. Padding to 4.`);
-      const returnedIds = new Set(finalData.map(item => item._id));
-      const remainingProducts = productsWithImages
-        .filter(p => !returnedIds.has(p._id.toString()))
-        .slice(0, 4 - finalData.length);
-      
-      const paddedProducts = remainingProducts.map(p => ({
-        _id: p._id.toString(),
-        explanation: null // No explanation for padded products
-      }));
-      
-      finalData.push(...paddedProducts);
-    }
+    // Trusting the LLM's response length, guided by the `maxItems: 4` schema constraint.
+    // No more forced slicing or padding.
    
-   return finalData.map(item => ({
+   return reorderedData.map(item => ({
      _id: item._id,
      explanation: explain ? (item.explanation || null) : null
    }));
