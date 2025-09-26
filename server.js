@@ -1089,27 +1089,29 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
   return withCache(cacheKey, async () => {
   try {
     const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
+
+CRITICAL: You can ONLY extract filters that EXACTLY match the provided lists. DO NOT interpret, translate, or find similar matches.
+
 Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - ONLY select from these exact Hebrew words: ${categories}. These are HARD FILTERS - products must have these categories.
-5. type - ONLY select from these exact Hebrew words: ${types}. These are HARD FILTERS - products must have these types.
-6. softCategory - ONLY select from these exact Hebrew words: ${softCategories}. These are SOFT FILTERS - products with these will be boosted but others will still be included for semantic similarity.
+4. category - You MUST ONLY select from these EXACT words: ${categories}. If the query contains a category word that is not in this exact list, DO NOT extract it.
+5. type - You MUST ONLY select from these EXACT words: ${types}. If the query contains a type word that is not in this exact list, DO NOT extract it.
+6. softCategory - You MUST ONLY select from these EXACT words: ${softCategories}. If the query contains a soft category word that is not in this exact list, DO NOT extract it.
+
+STRICT MATCHING RULES:
+- NO translations or interpretations
+- NO partial matches or similar words
+- NO creative extraction
+- ONLY exact string matches from the provided lists
+- If you cannot find an EXACT match in the lists, omit that filter completely
 
 CRITICAL DISTINCTION:
-- category/type: Deal-breaker filters (must have)
-- softCategory: Preference filters (nice to have, boosts relevance)
+- category/type: Deal-breaker filters (must have) - ONLY from the exact lists provided
+- softCategory: Preference filters (nice to have, boosts relevance) - ONLY from the exact list provided
 
-For softCategory, look for contextual hints like:
-- "for [occasion]" (e.g., "for pasta", "for dinner", "for party")
-- "good for [use]" 
-- "suitable for [context]"
-- Food pairing mentions
-- Occasion mentions
-- Geographic/origin references- extract the only as they appear in the softCategory list!!
-
-Return the extracted filters in JSON format. If a filter is not present in the query, omit it from the JSON response. For example:
+Return the extracted filters in JSON format. If a filter is not present in the query OR not found in the exact lists, omit it from the JSON response.
 ${example}.`;
 
     const response = await genAI.models.generateContent({
@@ -2322,15 +2324,12 @@ app.post("/search", async (req, res) => {
         
         try {
           const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-          let resultsForLLM = combinedResults;
-
-          // If soft filters are active, ONLY send soft-matched products to the LLM
-          if (hasSoftFilters) {
-            resultsForLLM = combinedResults.filter(r => r.softFilterMatch);
-            console.log(`[${requestId}] Soft filters active. Sending ONLY ${resultsForLLM.length} soft-matched products to LLM for re-ranking.`);
-          }
           
-          reorderedData = await reorderFn(resultsForLLM, translatedQuery, query, [], explain, context, softFilters);
+          // Always send all results to LLM for maximum flexibility
+          // The LLM will use soft category context to make informed decisions
+          console.log(`[${requestId}] Sending all ${combinedResults.length} products to LLM for re-ranking with soft category context.`);
+          
+          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters);
           
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
