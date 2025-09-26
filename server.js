@@ -1090,28 +1090,34 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
   try {
     const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
 
-CRITICAL: You can ONLY extract filters that EXACTLY match the provided lists. DO NOT interpret, translate, or find similar matches.
+CRITICAL: You can ONLY extract filters that match the provided lists, but you may use intelligent interpretation to map related terms.
 
 Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - You MUST ONLY select from these EXACT words: ${categories}. If the query contains a category word that is not in this exact list, DO NOT extract it.
-5. type - You MUST ONLY select from these EXACT words: ${types}. If the query contains a type word that is not in this exact list, DO NOT extract it.
-6. softCategory - You MUST ONLY select from these EXACT words: ${softCategories}. If the query contains a soft category word that is not in this exact list, DO NOT extract it.
+4. category - You MUST ONLY select from this list: ${categories}. You may intelligently map related terms (e.g., if query mentions a region and you have a country in the list, extract the country).
+5. type - You MUST ONLY select from this list: ${types}. You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list.
+6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list).
 
-STRICT MATCHING RULES:
-- NO translations or interpretations
-- NO partial matches or similar words
-- NO creative extraction
-- ONLY exact string matches from the provided lists
-- If you cannot find an EXACT match in the lists, omit that filter completely
+INTELLIGENT MAPPING RULES:
+- You may interpret and map related terms to items in the provided lists
+- Geographic regions can map to countries if the country is in the list
+- Synonyms and related concepts can map to list items
+- BUT you must NEVER extract anything not represented in the provided lists
+- If no reasonable mapping exists to the provided lists, omit that filter
 
 CRITICAL DISTINCTION:
-- category/type: Deal-breaker filters (must have) - ONLY from the exact lists provided
-- softCategory: Preference filters (nice to have, boosts relevance) - ONLY from the exact list provided
+- category/type: Deal-breaker filters (must have) - map intelligently to exact list items
+- softCategory: Preference filters (nice to have, boosts relevance) - map intelligently to exact list items
 
-Return the extracted filters in JSON format. If a filter is not present in the query OR not found in the exact lists, omit it from the JSON response.
+For softCategory, look for contextual hints and map them intelligently:
+- Geographic references (regions, cities) → countries/origins in the list
+- Food pairing mentions → items in the list
+- Occasion mentions → items in the list
+- Related concepts → items in the list
+
+Return the extracted filters in JSON format. Only extract if you can map to the provided lists.
 ${example}.`;
 
     const response = await genAI.models.generateContent({
