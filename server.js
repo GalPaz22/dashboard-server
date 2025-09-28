@@ -1530,23 +1530,32 @@ async function reorderImagesWithGPT(
    );
 
    const limitedResults = filteredResults.slice(0, 25);
+   const sanitizedQuery = sanitizeQueryForLLM(query);
    const productsWithImages = limitedResults.filter(product => product.image && product.image.trim() !== '');
 
    if (productsWithImages.length === 0) {
      return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters);
    }
 
-   const sanitizedQuery = sanitizeQueryForLLM(query);
-   const contents = [];
-   
-   // Build soft category context
-   let softCategoryContext = "";
-   if (softFilters && softFilters.softCategory) {
-     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-     softCategoryContext = `\n\nExtracted Soft Categories: ${softCats.join(', ')} - These represent the user's visual and categorical preferences.`;
-   }
-   
-   contents.push({ text: `You are an advanced AI model for e-commerce product ranking with image analysis. Your ONLY task is to analyze product visual relevance and return a JSON array.
+   const cacheKey = generateCacheKey(
+     "imageReorder",
+     sanitizedQuery,
+     JSON.stringify(softFilters),
+     ...productsWithImages.map(p => p._id.toString()).sort()
+   );
+
+   return withCache(cacheKey, async () => {
+     try {
+       const contents = [];
+       
+       // Build soft category context
+       let softCategoryContext = "";
+       if (softFilters && softFilters.softCategory) {
+         const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+         softCategoryContext = `\n\nExtracted Soft Categories: ${softCats.join(', ')} - These represent the user's visual and categorical preferences.`;
+       }
+       
+       contents.push({ text: `You are an advanced AI model for e-commerce product ranking with image analysis. Your ONLY task is to analyze product visual relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
 - Return EXACTLY 4 products maximum. NO MORE THAN 4 PRODUCTS EVER.
@@ -1565,40 +1574,40 @@ STRICT RULES:
 Context: ${context}${softCategoryContext}
 
 Search Query Intent: "${sanitizedQuery}"` });
-   
-   for (let i = 0; i < 2; i++) {
-     const product = productsWithImages[i];
-     
-     try {
-       const response = await fetch(product.image);
-       if (response.ok) {
-         const imageArrayBuffer = await response.arrayBuffer();
-         const base64ImageData = Buffer.from(imageArrayBuffer).toString('base64');
+       
+       for (let i = 0; i < 2; i++) {
+         const product = productsWithImages[i];
          
-         contents.push({
-           inlineData: {
-             mimeType: 'image/jpeg',
-             data: base64ImageData,
-           },
-         });
-         
-         contents.push({ 
-           text: `_id: ${product._id.toString()}
+         try {
+           const response = await fetch(product.image);
+           if (response.ok) {
+             const imageArrayBuffer = await response.arrayBuffer();
+             const base64ImageData = Buffer.from(imageArrayBuffer).toString('base64');
+             
+             contents.push({
+               inlineData: {
+                 mimeType: 'image/jpeg',
+                 data: base64ImageData,
+               },
+             });
+             
+             contents.push({ 
+               text: `_id: ${product._id.toString()}
 Name: ${product.name || "No name"}
 Description: ${product.description || "No description"}
 Price: ${product.price || "No price"}
 Soft Categories: ${(product.softCategory || []).join(', ')}
 
 ---` 
-         });
+             });
+           }
+         } catch (imageError) {
+           console.error(`Failed to fetch image for product ${product._id.toString()}:`, imageError);
+         }
        }
-     } catch (imageError) {
-       console.error(`Failed to fetch image for product ${product._id.toString()}:`, imageError);
-     }
-   }
 
-   const finalInstruction = explain 
-     ? `Analyze the product images and descriptions above. Return JSON array of EXACTLY 4 most visually relevant products maximum.
+       const finalInstruction = explain 
+         ? `Analyze the product images and descriptions above. Return JSON array of EXACTLY 4 most visually relevant products maximum.
 
 CRITICAL: 
 - Maximum 4 products in response
@@ -1610,7 +1619,7 @@ Required format:
 2. 'explanation': Factual visual relevance (max 15 words, same language as search query)
 
 Focus only on visual elements that match the search intent.`
-     : `Analyze the product images and descriptions above. Return JSON array of EXACTLY 4 most visually relevant products maximum.
+         : `Analyze the product images and descriptions above. Return JSON array of EXACTLY 4 most visually relevant products maximum.
 
 CRITICAL: 
 - Maximum 4 products in response
@@ -1622,79 +1631,85 @@ Required format:
 
 Focus only on visual elements that match the search intent.`;
 
-   contents.push({ text: finalInstruction });
+       contents.push({ text: finalInstruction });
 
-   const responseSchema = explain 
-     ? {
-         type: Type.ARRAY,
-         maxItems: 4,
-         items: {
-           type: Type.OBJECT,
-           properties: {
-             _id: {
-               type: Type.STRING,
-               description: "Product ID",
+       const responseSchema = explain 
+         ? {
+             type: Type.ARRAY,
+             maxItems: 4,
+             items: {
+               type: Type.OBJECT,
+               properties: {
+                 _id: {
+                   type: Type.STRING,
+                   description: "Product ID",
+                 },
+                 explanation: {
+                   type: Type.STRING,
+                   description: "Factual visual relevance explanation, maximum 15 words, same language as query",
+                 },
+               },
+               required: ["_id", "explanation"],
              },
-             explanation: {
-               type: Type.STRING,
-               description: "Factual visual relevance explanation, maximum 15 words, same language as query",
+           }
+         : {
+             type: Type.ARRAY,
+             maxItems: 4,
+             items: {
+               type: Type.OBJECT,
+               properties: {
+                 _id: {
+                   type: Type.STRING,
+                   description: "Product ID",
+                 },
+               },
+               required: ["_id"],
              },
+           };
+
+       const response = await genAI.models.generateContent({
+         model: "gemini-2.s-flash",
+         contents: contents,
+         config: { 
+           temperature: 0.1,
+           thinkingConfig: {
+             thinkingBudget: 0,
            },
-           required: ["_id", "explanation"],
+           responseMimeType: "application/json",
+           responseSchema: responseSchema,
          },
+       });
+
+       const responseText = response.text.trim();
+       console.log(`[Gemini Image Rerank] Query: "${sanitizedQuery}"`);
+       if (softFilters && softFilters.softCategory) {
+         const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+         console.log(`[Gemini Image Rerank] Soft Categories: ${softCats.join(', ')}`);
        }
-     : {
-         type: Type.ARRAY,
-         maxItems: 4,
-         items: {
-           type: Type.OBJECT,
-           properties: {
-             _id: {
-               type: Type.STRING,
-               description: "Product ID",
-             },
-           },
-           required: ["_id"],
-         },
-       };
+       console.log(`[Gemini Image Rerank] Response: ${responseText}`);
 
-   const response = await genAI.models.generateContent({
-     model: "gemini-2.5-flash",
-     contents: contents,
-     config: { 
-       temperature: 0.1,
-       thinkingConfig: {
-         thinkingBudget: 0,
-       },
-       responseMimeType: "application/json",
-       responseSchema: responseSchema,
-     },
+       if (!responseText) {
+         throw new Error("No content returned from Gemini");
+       }
+
+       const reorderedData = JSON.parse(responseText);
+       if (!Array.isArray(reorderedData)) {
+         throw new Error("Invalid response format from Gemini. Expected an array of objects.");
+       }
+       
+       // Trusting the LLM's response length, guided by the `maxItems: 4` schema constraint.
+       // No more forced slicing or padding.
+       
+       return reorderedData.map(item => ({
+         _id: item._id,
+         explanation: explain ? (item.explanation || null) : null
+       }));
+     } catch (error) {
+       console.error("Error reordering results with Gemini image analysis:", error);
+       // Fallback to the non-image reordering function on error
+       return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters);
+     }
    });
-
-   const responseText = response.text.trim();
-   console.log(`[Gemini Image Rerank] Query: "${sanitizedQuery}"`);
-   if (softFilters && softFilters.softCategory) {
-     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-     console.log(`[Gemini Image Rerank] Soft Categories: ${softCats.join(', ')}`);
-   }
-   console.log(`[Gemini Image Rerank] Response: ${responseText}`);
-
-   if (!responseText) {
-     throw new Error("No content returned from Gemini");
-   }
-
-   const reorderedData = JSON.parse(responseText);
-   if (!Array.isArray(reorderedData)) {
-     throw new Error("Invalid response format from Gemini. Expected an array of objects.");
-   }
-   
-    // Trusting the LLM's response length, guided by the `maxItems: 4` schema constraint.
-    // No more forced slicing or padding.
-   
-   return reorderedData.map(item => ({
-     _id: item._id,
-     explanation: explain ? (item.explanation || null) : null
-   }));
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
    return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters);
