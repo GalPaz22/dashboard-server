@@ -1096,7 +1096,7 @@ Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - You MUST ONLY select from this list: ${categories}. be as STRICT as possible with this list, extract the exact category that is mentioned in the query.
+4. category - You MUST ONLY select from this list: ${categories}. be as STRICT as possible with this list, extract the exact category that is mentioned in the query (if the query says 'red vermout' and you cant find 'red' in the list, do not extract any category what so ever! ) .
 5. type - You MUST ONLY select from this list: ${types}. You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list. do not ever make up a type that is not in the list.
 6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list).
 
@@ -1121,7 +1121,7 @@ Return the extracted filters in JSON format. Only extract if you can map to the 
 ${example}.`;
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.5-pro",
       contents: [{ text: query }],
       config: {
         systemInstruction,
