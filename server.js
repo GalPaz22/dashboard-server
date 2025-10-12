@@ -2145,6 +2145,16 @@ app.post("/search", async (req, res) => {
     const enhancedFilters = categories
       ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
       : {};
+
+    // For simple queries: only allow type and softCategory; drop category and price filters
+    if (isSimpleResult) {
+      if (enhancedFilters) {
+        enhancedFilters.category = undefined;
+        enhancedFilters.price = undefined;
+        enhancedFilters.minPrice = undefined;
+        enhancedFilters.maxPrice = undefined;
+      }
+    }
     
     const hardFilters = {
       category: enhancedFilters.category,
