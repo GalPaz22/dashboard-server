@@ -1802,7 +1802,11 @@ async function executeExplicitSoftCategorySearch(
   // Check if this is a pure hard category search
   const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 && 
     (!cleanedTextForExactMatch || cleanedTextForExactMatch.trim() === '' || 
-     hardFilters.category && query.toLowerCase().trim() === hardFilters.category.toLowerCase().trim());
+     (hardFilters.category && (() => {
+       const categoriesArray = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
+       const lowerQuery = query.toLowerCase().trim();
+       return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
+     })()));
   
   const softCategoryLimit = isPureHardCategorySearch ? 250 : 40;
   const nonSoftCategoryLimit = isPureHardCategorySearch ? 250 : 40;
@@ -2294,7 +2298,11 @@ app.post("/search", async (req, res) => {
         // Check if this is a pure hard category search (no meaningful text search)
         const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 && 
           (!cleanedText || cleanedText.trim() === '' || 
-           hardFilters.category && query.toLowerCase().trim() === hardFilters.category.toLowerCase().trim());
+           (hardFilters.category && (() => {
+             const categoriesArray = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
+             const lowerQuery = query.toLowerCase().trim();
+             return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
+           })()));
         
         const searchLimit = isPureHardCategorySearch ? 250 : 40; // Capped at 250 for pure category searches
         const vectorLimit = isPureHardCategorySearch ? 250 : 25;   // Capped at 250 for pure category searches
