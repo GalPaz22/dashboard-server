@@ -763,7 +763,7 @@ const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, ha
 };
 
 // Standard vector search pipeline
-function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 50, useOrLogic = false) {
+function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 100, useOrLogic = false) {
   const filter = {};
 
   if (hardFilters.category) {
@@ -830,7 +830,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 }
 
 // Vector search pipeline WITH soft category filter
-function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 50, useOrLogic = false) {
+function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 100, useOrLogic = false) {
   const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
   if (softFilters && softFilters.softCategory) {
@@ -846,7 +846,7 @@ function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilte
 }
 
 // Vector search pipeline WITHOUT soft category filter
-function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 50, useOrLogic = false) {
+function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 100, useOrLogic = false) {
   const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
   if (softFilters && softFilters.softCategory) {
@@ -1808,11 +1808,11 @@ async function executeExplicitSoftCategorySearch(
        return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
      })()));
   
-  const softCategoryLimit = isPureHardCategorySearch ? 100 : 40; // cap soft-category results at 100 max
-  const nonSoftCategoryLimit = isPureHardCategorySearch ? 120 : 40;
-  const vectorLimit = isPureHardCategorySearch ? 120 : 25;
+  const softCategoryLimit = 100;
+  const nonSoftCategoryLimit = 100;
+  const vectorLimit = 100;
   
-  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (all capped at 250 for performance)`);
+  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (capped at 100)`);
   
   // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
@@ -2265,7 +2265,7 @@ app.post("/search", async (req, res) => {
         console.log(`[${requestId}] Filter-only results: ${combinedResults.length} products in ${filterExecutionTime}ms (ALL matching products returned)`);
         
         // Set reorderedData to maintain consistent response structure
-        reorderedData = combinedResults.slice(0, 50).map((result) => ({ 
+        reorderedData = combinedResults.slice(0, 100).map((result) => ({ 
           _id: result._id.toString(), 
           explanation: null 
         }));
@@ -2314,10 +2314,10 @@ app.post("/search", async (req, res) => {
              return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
            })()));
         
-        const searchLimit = isPureHardCategorySearch ? 250 : 40; // Capped at 250 for pure category searches
-        const vectorLimit = isPureHardCategorySearch ? 250 : 25;   // Capped at 250 for pure category searches
+        const searchLimit = 100; // Capped at 100
+        const vectorLimit = 100; // Capped at 100
         
-        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit} (capped at 250 for performance)`);
+        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit} (capped at 100)`);
         console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
         
         const searchPromises = [
@@ -2522,8 +2522,8 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Dynamic result limit: higher for soft category searches to show all matching products, capped at 250
-    const resultLimit = hasSoftFilters ? 250 : 200;
+    // Dynamic result limit: capped at 100 for all queries
+    const resultLimit = 100;
     const limitedResults = finalResults.slice(0, resultLimit);
     const executionTime = Date.now() - searchStartTime;
     
@@ -2554,11 +2554,7 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] Soft filter matches in final results: ${limitedResults.filter(r => r.softFilterMatch).length}`);
     console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
     
-    if (hasSoftFilters) {
-      console.log(`[${requestId}] Soft filter query: using expanded limit of ${resultLimit} to show matching products (capped at 250 for performance)`);
-    } else {
-      console.log(`[${requestId}] Standard query: limited to ${resultLimit} results`);
-    }
+    console.log(`[${requestId}] Result limit enforced: ${resultLimit}`);
 
     // Return products array with search metadata - maintain backward compatibility
     const response = limitedResults.map(product => ({
