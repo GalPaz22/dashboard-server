@@ -1808,7 +1808,7 @@ async function executeExplicitSoftCategorySearch(
        return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
      })()));
   
-  const softCategoryLimit = isPureHardCategorySearch ? 120 : 40;
+  const softCategoryLimit = isPureHardCategorySearch ? 100 : 40; // cap soft-category results at 100 max
   const nonSoftCategoryLimit = isPureHardCategorySearch ? 120 : 40;
   const vectorLimit = isPureHardCategorySearch ? 120 : 25;
   
@@ -1962,8 +1962,8 @@ async function executeExplicitSoftCategorySearch(
     { stockStatus: "instock" }
   ];
   
-  const allSoftCategoryProducts = await collection.find(sweepQuery).toArray();
-  console.log(`Phase 3: Found ${allSoftCategoryProducts.length} total products with soft category`);
+  const allSoftCategoryProducts = await collection.find(sweepQuery).limit(100).toArray();
+  console.log(`Phase 3: Found ${allSoftCategoryProducts.length} total products with soft category (capped at 100)`);
   
   // Merge Phase 3 results with existing results, avoiding duplicates
   const existingProductIds = new Set([
