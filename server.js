@@ -1808,9 +1808,9 @@ async function executeExplicitSoftCategorySearch(
        return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
      })()));
   
-  const softCategoryLimit = isPureHardCategorySearch ? 250 : 40;
-  const nonSoftCategoryLimit = isPureHardCategorySearch ? 250 : 40;
-  const vectorLimit = isPureHardCategorySearch ? 250 : 25;
+  const softCategoryLimit = isPureHardCategorySearch ? 120 : 40;
+  const nonSoftCategoryLimit = isPureHardCategorySearch ? 120 : 40;
+  const vectorLimit = isPureHardCategorySearch ? 120 : 25;
   
   console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (all capped at 250 for performance)`);
   
