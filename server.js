@@ -6,27 +6,71 @@ import cors from "cors";
 import dotenv from "dotenv";
 import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from 'redis';
-import NodeCache from 'node-cache';
 import crypto from 'crypto';
 
 dotenv.config();
 
-// Cache Configuration
-const memoryCache = new NodeCache({
-  stdTTL: 3600, // 1 hour default TTL
-  checkperiod: 600, // Check for expired keys every 10 minutes
-  useClones: false // Better performance, but be careful with object mutations
-});
-
-// Redis client for distributed caching (optional)
+// Redis Configuration - Robust distributed caching
 let redisClient = null;
-if (process.env.REDIS_URL) {
-  redisClient = createClient({
-    url: process.env.REDIS_URL
-  });
-  redisClient.on('error', (err) => console.log('Redis Client Error', err));
-  redisClient.connect().catch(console.error);
+let redisReady = false;
+
+async function initializeRedis() {
+  const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
+  
+  try {
+    redisClient = createClient({
+      url: redisUrl,
+      socket: {
+        reconnectStrategy: (retries) => {
+          if (retries > 10) {
+            console.error('[REDIS] Too many reconnection attempts, giving up');
+            return new Error('Redis reconnection failed');
+          }
+          const delay = Math.min(retries * 100, 3000);
+          console.log(`[REDIS] Reconnecting in ${delay}ms... (attempt ${retries})`);
+          return delay;
+        },
+        connectTimeout: 10000,
+      },
+      // Enable offline queue to buffer commands when disconnected
+      enableOfflineQueue: true,
+    });
+
+    redisClient.on('error', (err) => {
+      console.error('[REDIS] Error:', err.message);
+      redisReady = false;
+    });
+
+    redisClient.on('connect', () => {
+      console.log('[REDIS] Connecting...');
+    });
+
+    redisClient.on('ready', () => {
+      console.log('[REDIS] Ready and connected successfully');
+      redisReady = true;
+    });
+
+    redisClient.on('reconnecting', () => {
+      console.log('[REDIS] Reconnecting...');
+      redisReady = false;
+    });
+
+    redisClient.on('end', () => {
+      console.log('[REDIS] Connection closed');
+      redisReady = false;
+    });
+
+    await redisClient.connect();
+    console.log('[REDIS] Initial connection successful');
+    
+  } catch (error) {
+    console.error('[REDIS] Failed to initialize:', error.message);
+    console.error('[REDIS] Caching will be disabled. Please check your Redis configuration.');
+  }
 }
+
+// Initialize Redis connection
+initializeRedis();
 
 // Cache key generators
 function generateCacheKey(prefix, ...args) {
@@ -35,68 +79,126 @@ function generateCacheKey(prefix, ...args) {
   return `${prefix}:${hash}`;
 }
 
-// Cache wrapper function
+// Cache wrapper function - Redis only
 async function withCache(cacheKey, fn, ttl = 3600) {
-  // Try memory cache first
-  let cached = memoryCache.get(cacheKey);
-  if (cached !== undefined) {
-    console.log(`[CACHE HIT] Memory: ${cacheKey}`);
-    return cached;
+  // Check if Redis is available and ready
+  if (!redisClient || !redisReady) {
+    console.log(`[CACHE BYPASS] Redis not available, executing function directly for: ${cacheKey}`);
+    return await fn();
   }
 
-  // Try Redis cache if available
-  if (redisClient) {
-    try {
-      const redisCached = await redisClient.get(cacheKey);
-      if (redisCached) {
-        const parsed = JSON.parse(redisCached);
-        memoryCache.set(cacheKey, parsed, ttl); // Also cache in memory
-        console.log(`[CACHE HIT] Redis: ${cacheKey}`);
-        return parsed;
+  try {
+    // Try to get from Redis cache
+    const cached = await redisClient.get(cacheKey);
+    
+    if (cached !== null && cached !== undefined) {
+      console.log(`[CACHE HIT] ${cacheKey}`);
+      try {
+        return JSON.parse(cached);
+      } catch (parseError) {
+        console.error(`[CACHE ERROR] Failed to parse cached data for ${cacheKey}:`, parseError.message);
+        // If parsing fails, delete the corrupted cache entry
+        await redisClient.del(cacheKey);
       }
-    } catch (error) {
-      console.error(`[CACHE ERROR] Redis get failed for ${cacheKey}:`, error);
     }
+  } catch (error) {
+    console.error(`[CACHE ERROR] Redis get failed for ${cacheKey}:`, error.message);
+    // Continue to execute function if cache read fails
   }
 
   // Cache miss - execute function
   console.log(`[CACHE MISS] ${cacheKey}`);
   const result = await fn();
 
-  // Store in both caches
-  memoryCache.set(cacheKey, result, ttl);
-  if (redisClient) {
+  // Store in Redis cache
+  if (redisClient && redisReady) {
     try {
       await redisClient.setEx(cacheKey, ttl, JSON.stringify(result));
+      console.log(`[CACHE SET] ${cacheKey} (TTL: ${ttl}s)`);
     } catch (error) {
-      console.error(`[CACHE ERROR] Redis set failed for ${cacheKey}:`, error);
+      console.error(`[CACHE ERROR] Redis set failed for ${cacheKey}:`, error.message);
+      // Don't throw - return the result even if caching fails
     }
   }
 
   return result;
 }
 
-// Cache invalidation functions
-function invalidateCache(pattern) {
-  const keys = memoryCache.keys();
-  const matchingKeys = keys.filter(key => key.includes(pattern));
-  
-  matchingKeys.forEach(key => {
-    memoryCache.del(key);
-    console.log(`[CACHE INVALIDATED] Memory: ${key}`);
-  });
-
-  if (redisClient) {
-    redisClient.keys(`*${pattern}*`).then(redisKeys => {
-      if (redisKeys.length > 0) {
-        redisClient.del(redisKeys).then(() => {
-          console.log(`[CACHE INVALIDATED] Redis: ${redisKeys.length} keys`);
-        });
-      }
-    }).catch(console.error);
+// Cache invalidation functions - Redis only
+async function invalidateCache(pattern) {
+  if (!redisClient || !redisReady) {
+    console.log(`[CACHE INVALIDATE] Redis not available, skipping invalidation for pattern: ${pattern}`);
+    return 0;
   }
 
-  return matchingKeys.length;
+  try {
+    // Use SCAN instead of KEYS for better performance in production
+    // KEYS command blocks the server, SCAN is non-blocking
+    const matchingKeys = [];
+    let cursor = 0;
+
+    do {
+      const reply = await redisClient.scan(cursor, {
+        MATCH: `*${pattern}*`,
+        COUNT: 100
+      });
+      
+      cursor = reply.cursor;
+      matchingKeys.push(...reply.keys);
+    } while (cursor !== 0);
+
+    if (matchingKeys.length > 0) {
+      await redisClient.del(matchingKeys);
+      console.log(`[CACHE INVALIDATED] ${matchingKeys.length} keys matching pattern: ${pattern}`);
+      matchingKeys.forEach(key => console.log(`  - ${key}`));
+    } else {
+      console.log(`[CACHE INVALIDATE] No keys found matching pattern: ${pattern}`);
+    }
+
+    return matchingKeys.length;
+  } catch (error) {
+    console.error(`[CACHE ERROR] Failed to invalidate cache for pattern ${pattern}:`, error.message);
+    return 0;
+  }
+}
+
+// Invalidate cache by exact key
+async function invalidateCacheKey(key) {
+  if (!redisClient || !redisReady) {
+    console.log(`[CACHE INVALIDATE] Redis not available, skipping invalidation for key: ${key}`);
+    return false;
+  }
+
+  try {
+    const result = await redisClient.del(key);
+    if (result > 0) {
+      console.log(`[CACHE INVALIDATED] Key: ${key}`);
+      return true;
+    } else {
+      console.log(`[CACHE INVALIDATE] Key not found: ${key}`);
+      return false;
+    }
+  } catch (error) {
+    console.error(`[CACHE ERROR] Failed to invalidate key ${key}:`, error.message);
+    return false;
+  }
+}
+
+// Clear all cache
+async function clearAllCache() {
+  if (!redisClient || !redisReady) {
+    console.log(`[CACHE CLEAR] Redis not available`);
+    return 0;
+  }
+
+  try {
+    await redisClient.flushDb();
+    console.log(`[CACHE CLEARED] All cache entries cleared`);
+    return true;
+  } catch (error) {
+    console.error(`[CACHE ERROR] Failed to clear all cache:`, error.message);
+    return false;
+  }
 }
 
 // Cache warming function for common queries
@@ -3257,56 +3359,158 @@ app.post("/test-search-to-cart-flow", async (req, res) => {
 });
 
 /* =========================================================== *\
+   HEALTH CHECK ENDPOINT
+\* =========================================================== */
+
+app.get("/health", async (req, res) => {
+  const health = {
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    uptime: process.uptime(),
+    services: {
+      redis: {
+        connected: redisReady,
+        client: !!redisClient
+      },
+      mongodb: {
+        connected: !!client
+      }
+    }
+  };
+
+  // Check Redis health
+  if (redisClient && redisReady) {
+    try {
+      const pingResult = await redisClient.ping();
+      health.services.redis.ping = pingResult === 'PONG';
+      health.services.redis.status = 'healthy';
+    } catch (error) {
+      health.services.redis.status = 'unhealthy';
+      health.services.redis.error = error.message;
+      health.status = 'degraded';
+    }
+  } else {
+    health.services.redis.status = 'disconnected';
+    health.status = 'degraded';
+  }
+
+  // Check MongoDB health
+  if (client) {
+    try {
+      await client.db().admin().ping();
+      health.services.mongodb.status = 'healthy';
+    } catch (error) {
+      health.services.mongodb.status = 'unhealthy';
+      health.services.mongodb.error = error.message;
+      health.status = 'degraded';
+    }
+  } else {
+    health.services.mongodb.status = 'disconnected';
+    health.status = 'degraded';
+  }
+
+  const statusCode = health.status === 'healthy' ? 200 : 503;
+  res.status(statusCode).json(health);
+});
+
+/* =========================================================== *\
    CACHE MANAGEMENT ENDPOINTS
 \* =========================================================== */
 
-app.get("/cache/stats", (req, res) => {
+app.get("/cache/stats", async (req, res) => {
   try {
-    const memoryStats = memoryCache.getStats();
+    if (!redisClient || !redisReady) {
+      return res.json({
+        redis: {
+          connected: false,
+          ready: false,
+          url: process.env.REDIS_URL || 'redis://localhost:6379',
+          message: 'Redis not connected'
+        }
+      });
+    }
+
+    // Get Redis server info
+    const info = await redisClient.info();
+    const dbSize = await redisClient.dbSize();
+    
+    // Parse info string for relevant stats
+    const stats = {};
+    info.split('\r\n').forEach(line => {
+      if (line.includes(':')) {
+        const [key, value] = line.split(':');
+        stats[key] = value;
+      }
+    });
+
     const cacheInfo = {
-      memory: {
-        keys: memoryStats.keys,
-        hits: memoryStats.hits,
-        misses: memoryStats.misses,
-        hitRate: memoryStats.hits / (memoryStats.hits + memoryStats.misses) || 0,
-        ksize: memoryStats.ksize,
-        vsize: memoryStats.vsize
-      },
       redis: {
-        connected: !!redisClient?.isReady,
-        url: process.env.REDIS_URL ? "configured" : "not configured"
+        connected: true,
+        ready: redisReady,
+        url: process.env.REDIS_URL || 'redis://localhost:6379',
+        dbSize: dbSize,
+        version: stats.redis_version,
+        uptime: stats.uptime_in_seconds ? `${Math.floor(stats.uptime_in_seconds / 3600)}h ${Math.floor((stats.uptime_in_seconds % 3600) / 60)}m` : 'unknown',
+        usedMemory: stats.used_memory_human,
+        connectedClients: stats.connected_clients,
+        totalConnectionsReceived: stats.total_connections_received,
+        totalCommandsProcessed: stats.total_commands_processed,
+        keyspaceHits: stats.keyspace_hits,
+        keyspaceMisses: stats.keyspace_misses,
+        hitRate: stats.keyspace_hits && stats.keyspace_misses 
+          ? (parseInt(stats.keyspace_hits) / (parseInt(stats.keyspace_hits) + parseInt(stats.keyspace_misses)) * 100).toFixed(2) + '%'
+          : 'N/A'
       }
     };
     
     res.json(cacheInfo);
   } catch (error) {
     console.error("Error getting cache stats:", error);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ 
+      error: "Server error",
+      message: error.message,
+      redis: {
+        connected: redisReady,
+        url: process.env.REDIS_URL || 'redis://localhost:6379'
+      }
+    });
   }
 });
 
-app.post("/cache/clear", (req, res) => {
+app.post("/cache/clear", async (req, res) => {
   try {
-    const { type } = req.body;
+    const { pattern } = req.body;
     
-    if (type === 'memory' || !type) {
-      memoryCache.flushAll();
-      console.log("Memory cache cleared");
+    if (!redisClient || !redisReady) {
+      return res.status(503).json({ 
+        success: false, 
+        message: "Redis cache not available" 
+      });
     }
     
-    if ((type === 'redis' || !type) && redisClient) {
-      redisClient.flushAll().then(() => {
-        console.log("Redis cache cleared");
-      }).catch(console.error);
+    if (pattern) {
+      // Clear specific pattern
+      const count = await invalidateCache(pattern);
+      res.json({ 
+        success: true, 
+        message: `Cleared ${count} cache entries matching pattern: ${pattern}`,
+        count: count
+      });
+    } else {
+      // Clear all cache
+      const result = await clearAllCache();
+      res.json({ 
+        success: result, 
+        message: result ? "All cache cleared successfully" : "Failed to clear cache"
+      });
     }
-    
-    res.json({ 
-      success: true, 
-      message: `${type || 'all'} cache(s) cleared` 
-    });
   } catch (error) {
     console.error("Error clearing cache:", error);
-    res.status(500).json({ error: "Server error" });
+    res.status(500).json({ 
+      success: false,
+      error: "Server error",
+      message: error.message 
+    });
   }
 });
 
@@ -3323,13 +3527,102 @@ app.post("/cache/warm", async (req, res) => {
   }
 });
 
+app.get("/cache/keys", async (req, res) => {
+  try {
+    const { pattern, limit = 100 } = req.query;
+    
+    if (!redisClient || !redisReady) {
+      return res.status(503).json({ 
+        success: false, 
+        message: "Redis cache not available" 
+      });
+    }
+
+    const keys = [];
+    let cursor = 0;
+
+    do {
+      const reply = await redisClient.scan(cursor, {
+        MATCH: pattern || '*',
+        COUNT: 100
+      });
+      
+      cursor = reply.cursor;
+      keys.push(...reply.keys);
+      
+      // Stop if we've reached the limit
+      if (keys.length >= limit) {
+        break;
+      }
+    } while (cursor !== 0);
+
+    // Limit the results
+    const limitedKeys = keys.slice(0, limit);
+    
+    // Get TTL for each key
+    const keysWithTTL = await Promise.all(
+      limitedKeys.map(async (key) => {
+        try {
+          const ttl = await redisClient.ttl(key);
+          return { key, ttl: ttl === -1 ? 'no expiry' : `${ttl}s` };
+        } catch (error) {
+          return { key, ttl: 'error' };
+        }
+      })
+    );
+
+    res.json({
+      success: true,
+      total: keys.length,
+      showing: limitedKeys.length,
+      hasMore: keys.length > limit,
+      keys: keysWithTTL
+    });
+  } catch (error) {
+    console.error("Error getting cache keys:", error);
+    res.status(500).json({ 
+      success: false,
+      error: "Server error",
+      message: error.message 
+    });
+  }
+});
+
+app.delete("/cache/key/:key", async (req, res) => {
+  try {
+    const { key } = req.params;
+    
+    if (!redisClient || !redisReady) {
+      return res.status(503).json({ 
+        success: false, 
+        message: "Redis cache not available" 
+      });
+    }
+
+    const result = await invalidateCacheKey(key);
+    
+    res.json({
+      success: result,
+      message: result ? `Cache key deleted: ${key}` : `Cache key not found: ${key}`
+    });
+  } catch (error) {
+    console.error("Error deleting cache key:", error);
+    res.status(500).json({ 
+      success: false,
+      error: "Server error",
+      message: error.message 
+    });
+  }
+});
+
 /* =========================================================== *\
    SERVER STARTUP
 \* =========================================================== */
 
 const PORT = process.env.PORT || 8000;
-app.listen(PORT, async () => {
+const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
+  console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
   
   // Warm cache on startup
   setTimeout(async () => {
@@ -3339,6 +3632,64 @@ app.listen(PORT, async () => {
       console.error('Cache warming failed on startup:', error);
     }
   }, 5000);
+});
+
+/* =========================================================== *\
+   GRACEFUL SHUTDOWN
+\* =========================================================== */
+
+async function gracefulShutdown(signal) {
+  console.log(`\n[${signal}] Shutting down gracefully...`);
+  
+  // Stop accepting new connections
+  server.close(() => {
+    console.log('[SHUTDOWN] HTTP server closed');
+  });
+  
+  // Close Redis connection
+  if (redisClient) {
+    try {
+      await redisClient.quit();
+      console.log('[SHUTDOWN] Redis connection closed');
+    } catch (error) {
+      console.error('[SHUTDOWN] Error closing Redis:', error.message);
+      // Force close if graceful quit fails
+      try {
+        await redisClient.disconnect();
+        console.log('[SHUTDOWN] Redis forcefully disconnected');
+      } catch (disconnectError) {
+        console.error('[SHUTDOWN] Error disconnecting Redis:', disconnectError.message);
+      }
+    }
+  }
+  
+  // Close MongoDB connection
+  if (client) {
+    try {
+      await client.close();
+      console.log('[SHUTDOWN] MongoDB connection closed');
+    } catch (error) {
+      console.error('[SHUTDOWN] Error closing MongoDB:', error.message);
+    }
+  }
+  
+  console.log('[SHUTDOWN] Cleanup complete, exiting...');
+  process.exit(0);
+}
+
+// Handle shutdown signals
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Handle uncaught errors
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[FATAL] Unhandled Rejection at:', promise, 'reason:', reason);
+  // Application specific logging, throwing an error, or other logic here
+});
+
+process.on('uncaughtException', (error) => {
+  console.error('[FATAL] Uncaught Exception:', error);
+  gracefulShutdown('UNCAUGHT_EXCEPTION');
 });
 
 // Function to detect if query is digits-only (for SKU search)
