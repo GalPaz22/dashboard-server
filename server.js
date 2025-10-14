@@ -678,7 +678,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
 };
 
 // Standard search pipeline without soft filter boosting
-const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 200, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 65, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = [];
   
   if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
@@ -824,7 +824,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
 };
 
 // Search pipeline WITH soft category filter
-const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 65, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
   
   if (softFilters && softFilters.softCategory) {
@@ -843,7 +843,7 @@ const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardF
 };
 
 // Search pipeline WITHOUT soft category filter 
-const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 200, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 65, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
   
   if (softFilters && softFilters.softCategory) {
@@ -865,7 +865,7 @@ const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, ha
 };
 
 // Standard vector search pipeline
-function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 100, useOrLogic = false) {
+function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 65, useOrLogic = false) {
   const filter = {};
 
   if (hardFilters.category) {
@@ -932,7 +932,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 }
 
 // Vector search pipeline WITH soft category filter
-function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 100, useOrLogic = false) {
+function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 65, useOrLogic = false) {
   const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
   if (softFilters && softFilters.softCategory) {
@@ -948,7 +948,7 @@ function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilte
 }
 
 // Vector search pipeline WITHOUT soft category filter
-function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 100, useOrLogic = false) {
+function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 65, useOrLogic = false) {
   const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
   if (softFilters && softFilters.softCategory) {
@@ -1910,11 +1910,11 @@ async function executeExplicitSoftCategorySearch(
        return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
      })()));
   
-  const softCategoryLimit = 100;
-  const nonSoftCategoryLimit = 100;
-  const vectorLimit = 100;
+  const softCategoryLimit = 65;
+  const nonSoftCategoryLimit = 65;
+  const vectorLimit = 65;
   
-  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (capped at 100)`);
+  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (capped at 65)`);
   
   // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
@@ -2416,10 +2416,10 @@ app.post("/search", async (req, res) => {
              return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
            })()));
         
-        const searchLimit = 100; // Capped at 100
-        const vectorLimit = 100; // Capped at 100
+        const searchLimit = 65; // Capped at 65
+        const vectorLimit = 65; // Capped at 65
         
-        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit} (capped at 100)`);
+        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit} (capped at 65)`);
         console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
         
         const searchPromises = [
@@ -2624,8 +2624,8 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Dynamic result limit: capped at 100 for all queries
-    const resultLimit = 100;
+    // Dynamic result limit: capped at 65 for all queries
+    const resultLimit = 65;
     const limitedResults = finalResults.slice(0, resultLimit);
     const executionTime = Date.now() - searchStartTime;
     
@@ -3700,7 +3700,7 @@ function isDigitsOnlyQuery(query) {
 }
 
 // SKU search pipeline - optimized for exact digit matches
-function buildSKUSearchPipeline(skuQuery, limit = 50) {
+function buildSKUSearchPipeline(skuQuery, limit = 65) {
   console.log(`Building SKU search pipeline for: ${skuQuery}`);
   
   const pipeline = [
@@ -3774,7 +3774,7 @@ async function executeSKUSearch(collection, skuQuery) {
   console.log(`Executing SKU search for: ${skuQuery}`);
   
   try {
-    const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 100)).toArray();
+    const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 65)).toArray();
     
     // Add SKU-specific scoring and metadata
     const processedResults = skuResults.map((product, index) => ({
