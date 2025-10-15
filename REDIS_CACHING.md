@@ -223,10 +223,10 @@ Cache keys follow a structured naming convention:
 
 | Prefix | Purpose | Example | TTL |
 |--------|---------|---------|-----|
-| `translate:*` | Query translations | `translate:abc123...` | 1 hour |
-| `complexity:*` | Query complexity classification | `complexity:def456...` | 1 hour |
-| `search:*` | Search results | `search:ghi789...` | 30 min |
-| `embed:*` | Vector embeddings | `embed:jkl012...` | 24 hours |
+| `translate:*` | Query translations | `translate:abc123...` | 1 week |
+| `complexity:*` | Query complexity classification | `complexity:def456...` | 1 week |
+| `search:*` | Search results | `search:ghi789...` | 1 week |
+| `embed:*` | Vector embeddings | `embed:jkl012...` | 1 week |
 
 Keys are hashed using MD5 to ensure consistent length and valid Redis key format.
 
@@ -235,14 +235,11 @@ Keys are hashed using MD5 to ensure consistent length and valid Redis key format
 ### 1. Optimal TTL Values
 
 ```javascript
-// Short-lived data (search results)
-await withCache(key, fn, 1800);  // 30 minutes
+// All cached data now uses 1 week TTL
+await withCache(key, fn);  // Default: 1 week (604800 seconds)
 
-// Medium-lived data (translations)
-await withCache(key, fn, 3600);  // 1 hour
-
-// Long-lived data (embeddings)
-await withCache(key, fn, 86400); // 24 hours
+// Or explicitly set to 1 week
+await withCache(key, fn, 604800); // 1 week (604800 seconds)
 ```
 
 ### 2. Cache Warming
@@ -406,8 +403,8 @@ const products = await withCache(
   generateCacheKey('products', userId, category),
   async () => {
     return await db.collection('products').find({ category }).toArray();
-  },
-  3600 // 1 hour TTL
+  }
+  // Default: 1 week TTL (604800 seconds)
 );
 
 // Cache an API call
@@ -415,8 +412,8 @@ const translation = await withCache(
   generateCacheKey('translate', query, language),
   async () => {
     return await translateAPI.translate(query, language);
-  },
-  7200 // 2 hours TTL
+  }
+  // Default: 1 week TTL (604800 seconds)
 );
 
 // Invalidate cache when data changes

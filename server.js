@@ -80,7 +80,7 @@ function generateCacheKey(prefix, ...args) {
 }
 
 // Cache wrapper function - Redis only
-async function withCache(cacheKey, fn, ttl = 3600) {
+async function withCache(cacheKey, fn, ttl = 604800) {
   // Check if Redis is available and ready
   if (!redisClient || !redisReady) {
     console.log(`[CACHE BYPASS] Redis not available, executing function directly for: ${cacheKey}`);
@@ -1015,7 +1015,7 @@ Pay attention to the word שכלי or שאבלי (which mean chablis) and מוס
     console.error("Error translating query:", error);
     throw error;
   }
-  }, 86400);
+  }, 604800);
 }
 
 // Enhanced Gemini-based query classification function with learning
@@ -1182,7 +1182,7 @@ async function getQueryEmbedding(cleanedText) {
     console.error("Error fetching query embedding:", error);
     throw error;
   }
-  }, 86400);
+  }, 604800);
 }
 
 async function extractFiltersFromQueryEnhanced(query, categories, types, softCategories, example, context) {
@@ -1286,7 +1286,7 @@ ${example}.`;
     console.error("Error extracting enhanced filters:", error);
     throw error;
   }
-  }, 3600);
+  }, 604800);
 }
 
 function shouldUseOrLogicForCategories(query, categories) {
