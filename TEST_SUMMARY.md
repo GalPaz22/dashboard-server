@@ -33,11 +33,12 @@ curl http://localhost:8000/cache/stats
 
 ### **4. Auto-Load-More Implementation** ✅
 
-#### **New Endpoints:**
+#### **Main Search Endpoint:**
 
-1. **`GET /autocomplete?query=wine`** - Initial search
+1. **`POST /search`** - Main search endpoint
+   - Body: `{"query": "wine", "context": "wine store"}`
    - Returns: First 20 products
-   - Includes: `pagination.secondBatchToken`
+   - Includes: `pagination.secondBatchToken` for auto-load
    - Cached: Results stored for 5 minutes
 
 2. **`GET /search/auto-load-more?token=...`** - Second batch
@@ -115,9 +116,11 @@ curl http://localhost:8000/health
 # Cache stats
 curl http://localhost:8000/cache/stats
 
-# Search with your API key
-curl "http://localhost:8000/autocomplete?query=wine" \
-  -H "X-API-Key: semantix_688736e523c0352ad78525fe_1753691812345"
+# Main search with your API key (POST /search)
+curl -X POST http://localhost:8000/search \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: semantix_688736e523c0352ad78525fe_1753691812345" \
+  -d '{"query": "wine", "context": "wine store"}'
 
 # Auto-load second batch (use secondBatchToken from first response)
 curl "http://localhost:8000/search/auto-load-more?token=SECOND_BATCH_TOKEN_HERE"
