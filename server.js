@@ -2108,6 +2108,213 @@ async function executeExplicitSoftCategorySearch(
    AUTOCOMPLETE ENDPOINT
 \* =========================================================== */
 
+/* =========================================================== *\
+   LOAD MORE / PAGINATION ENDPOINT
+\* =========================================================== */
+
+/* =========================================================== *\
+   AUTO LOAD MORE ENDPOINT (Second Batch)
+\* =========================================================== */
+
+app.get("/search/auto-load-more", async (req, res) => {
+  const { token } = req.query;
+  const requestId = `auto-load-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
+  console.log(`[${requestId}] Auto load-more request received`);
+  
+  if (!token) {
+    return res.status(400).json({ 
+      error: "Second batch token is required",
+      requestId: requestId
+    });
+  }
+  
+  try {
+    // Decode second batch token
+    let batchData;
+    try {
+      const decoded = Buffer.from(token, 'base64').toString('utf-8');
+      batchData = JSON.parse(decoded);
+    } catch (error) {
+      return res.status(400).json({ 
+        error: "Invalid second batch token",
+        requestId: requestId
+      });
+    }
+    
+    const { query, filters, timestamp } = batchData;
+    
+    // Check if token is expired (1 minute)
+    const tokenAge = Date.now() - timestamp;
+    if (tokenAge > 60000) {
+      return res.status(410).json({ 
+        error: "Second batch token expired",
+        requestId: requestId
+      });
+    }
+    
+    console.log(`[${requestId}] Auto-loading second batch for query: "${query}"`);
+    
+    // Get cached second batch from Redis
+    const secondBatchCacheKey = generateCacheKey('search-second-batch', query, JSON.stringify(filters));
+    let secondBatch = null;
+    
+    if (redisClient && redisReady) {
+      try {
+        const cached = await redisClient.get(secondBatchCacheKey);
+        if (cached) {
+          secondBatch = JSON.parse(cached);
+          console.log(`[${requestId}] Found cached second batch: ${secondBatch.length} products`);
+        }
+      } catch (error) {
+        console.error(`[${requestId}] Error retrieving cached second batch:`, error.message);
+      }
+    }
+    
+    if (!secondBatch || secondBatch.length === 0) {
+      return res.status(404).json({ 
+        error: "Second batch not found or expired",
+        requestId: requestId
+      });
+    }
+    
+    console.log(`[${requestId}] Returning second batch: ${secondBatch.length} products`);
+    
+    // Return second batch
+    res.json({
+      products: secondBatch,
+      pagination: {
+        hasMore: false, // No more auto-load-more batches
+        totalAvailable: null,
+        returned: secondBatch.length,
+        batchNumber: 2
+      },
+      metadata: {
+        query: query,
+        requestId: requestId,
+        cached: true,
+        autoLoaded: true
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${requestId}] Error in auto-load-more:`, error);
+    res.status(500).json({ 
+      error: "Server error",
+      message: error.message,
+      requestId: requestId
+    });
+  }
+});
+
+app.get("/search/load-more", async (req, res) => {
+  const { token, limit = 20 } = req.query;
+  const requestId = `load-more-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  
+  console.log(`[${requestId}] Load more request received`);
+  
+  if (!token) {
+    return res.status(400).json({ 
+      error: "Pagination token is required",
+      requestId: requestId
+    });
+  }
+  
+  try {
+    // Decode pagination token
+    let paginationData;
+    try {
+      const decoded = Buffer.from(token, 'base64').toString('utf-8');
+      paginationData = JSON.parse(decoded);
+    } catch (error) {
+      return res.status(400).json({ 
+        error: "Invalid pagination token",
+        requestId: requestId
+      });
+    }
+    
+    const { query, filters, offset, timestamp } = paginationData;
+    
+    // Check if token is expired (5 minutes)
+    const tokenAge = Date.now() - timestamp;
+    if (tokenAge > 300000) {
+      return res.status(410).json({ 
+        error: "Pagination token expired",
+        requestId: requestId
+      });
+    }
+    
+    console.log(`[${requestId}] Loading more for query: "${query}", offset: ${offset}`);
+    
+    // Try to get cached results from Redis
+    const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(filters));
+    let cachedResults = null;
+    
+    if (redisClient && redisReady) {
+      try {
+        const cached = await redisClient.get(cacheKey);
+        if (cached) {
+          cachedResults = JSON.parse(cached);
+          console.log(`[${requestId}] Found cached results: ${cachedResults.length} products`);
+        }
+      } catch (error) {
+        console.error(`[${requestId}] Error retrieving cached results:`, error.message);
+      }
+    }
+    
+    if (!cachedResults) {
+      return res.status(404).json({ 
+        error: "Cached results not found. Please perform a new search.",
+        requestId: requestId
+      });
+    }
+    
+    // Calculate pagination
+    const startIndex = offset;
+    const endIndex = Math.min(startIndex + parseInt(limit), cachedResults.length);
+    const nextOffset = endIndex;
+    const hasMore = endIndex < cachedResults.length;
+    
+    // Get the requested slice
+    const paginatedResults = cachedResults.slice(startIndex, endIndex);
+    
+    // Create next pagination token if there's more
+    const nextToken = hasMore ? Buffer.from(JSON.stringify({
+      query,
+      filters,
+      offset: nextOffset,
+      timestamp: timestamp // Keep original timestamp
+    })).toString('base64') : null;
+    
+    console.log(`[${requestId}] Returning ${paginatedResults.length} products (${startIndex}-${endIndex} of ${cachedResults.length})`);
+    
+    // Return paginated results
+    res.json({
+      products: paginatedResults,
+      pagination: {
+        hasMore: hasMore,
+        totalAvailable: cachedResults.length,
+        returned: paginatedResults.length,
+        offset: startIndex,
+        nextToken: nextToken
+      },
+      metadata: {
+        query: query,
+        requestId: requestId,
+        cached: true
+      }
+    });
+    
+  } catch (error) {
+    console.error(`[${requestId}] Error in load-more:`, error);
+    res.status(500).json({ 
+      error: "Server error",
+      message: error.message,
+      requestId: requestId
+    });
+  }
+});
+
 app.get("/autocomplete", async (req, res) => {
   const { query } = req.query;
   const { dbName } = req.store;
@@ -2624,9 +2831,13 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Dynamic result limit: capped at 65 for all queries
-    const resultLimit = 65;
-    const limitedResults = finalResults.slice(0, resultLimit);
+    // Auto-load-more: Split first 40 results across 2 automatic responses
+    const firstBatchSize = 20;
+    const secondBatchSize = 20;
+    const autoLoadMoreEnabled = true;
+    
+    const limitedResults = finalResults.slice(0, firstBatchSize);
+    const secondBatch = finalResults.slice(firstBatchSize, firstBatchSize + secondBatchSize);
     const executionTime = Date.now() - searchStartTime;
     
     // Debug soft filter matching
@@ -2658,7 +2869,39 @@ app.post("/search", async (req, res) => {
     
     console.log(`[${requestId}] Result limit enforced: ${resultLimit}`);
 
-    // Return products array with search metadata - maintain backward compatibility
+    // Create pagination metadata
+    const hasMore = finalResults.length > firstBatchSize;
+    const hasSecondBatch = finalResults.length > firstBatchSize;
+    const totalAvailable = finalResults.length;
+    const paginationToken = hasMore ? Buffer.from(JSON.stringify({
+      query,
+      filters: enhancedFilters,
+      offset: firstBatchSize + secondBatchSize,
+      timestamp: Date.now()
+    })).toString('base64') : null;
+    
+    // Cache the full results for auto-load-more and manual load-more
+    const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(enhancedFilters));
+    if (redisClient && redisReady) {
+      try {
+        await redisClient.setEx(cacheKey, 300, JSON.stringify(finalResults)); // Cache for 5 minutes
+      } catch (error) {
+        console.error(`[${requestId}] Failed to cache pagination results:`, error.message);
+      }
+    }
+    
+    // Cache second batch for auto-load-more (separate cache with shorter TTL)
+    const secondBatchCacheKey = generateCacheKey('search-second-batch', query, JSON.stringify(enhancedFilters));
+    if (redisClient && redisReady && hasSecondBatch) {
+      try {
+        await redisClient.setEx(secondBatchCacheKey, 60, JSON.stringify(secondBatch)); // Cache for 1 minute
+        console.log(`[${requestId}] Cached second batch for auto-load-more: ${secondBatch.length} products`);
+      } catch (error) {
+        console.error(`[${requestId}] Failed to cache second batch:`, error.message);
+      }
+    }
+    
+    // Return products array with search metadata and pagination
     const response = limitedResults.map(product => ({
       ...product,
       // Add metadata to each product for cart tracking
@@ -2676,8 +2919,30 @@ app.post("/search", async (req, res) => {
       }
     }));
     
-    // Send array for backward compatibility, but with metadata attached to each product
-    res.json(response);
+    // Send response with pagination metadata and auto-load-more info
+    res.json({
+      products: response,
+      pagination: {
+        hasMore: hasMore,
+        hasSecondBatch: hasSecondBatch,
+        totalAvailable: totalAvailable,
+        returned: limitedResults.length,
+        nextToken: paginationToken,
+        autoLoadMore: autoLoadMoreEnabled && hasSecondBatch,
+        secondBatchToken: hasSecondBatch ? Buffer.from(JSON.stringify({
+          query,
+          filters: enhancedFilters,
+          batch: 2,
+          timestamp: Date.now()
+        })).toString('base64') : null
+      },
+      metadata: {
+        query: query,
+        requestId: requestId,
+        executionTime: executionTime,
+        batchNumber: 1
+      }
+    });
     
   } catch (error) {
     console.error("Error handling search request:", error);
