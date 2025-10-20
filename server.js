@@ -315,9 +315,11 @@ async function authenticate(req, res, next) {
   }
 }
 
-// Apply authentication to all routes except test endpoints
+// Apply authentication to all routes except test endpoints, health, and cache management
 app.use((req, res, next) => {
-  if (req.path.startsWith('/test-')) {
+  if (req.path.startsWith('/test-') || 
+      req.path === '/health' || 
+      req.path.startsWith('/cache/')) {
     return next();
   }
   return authenticate(req, res, next);
@@ -2863,11 +2865,11 @@ app.post("/search", async (req, res) => {
       );
     }
     
-    console.log(`[${requestId}] Returning ${limitedResults.length} results in ${executionTime}ms (limit: ${resultLimit})`);
+    console.log(`[${requestId}] Returning ${limitedResults.length} results in ${executionTime}ms (first batch: ${firstBatchSize}, second batch: ${secondBatch.length})`);
     console.log(`[${requestId}] Soft filter matches in final results: ${limitedResults.filter(r => r.softFilterMatch).length}`);
     console.log(`[${requestId}] LLM reordering successful: ${llmReorderingSuccessful}`);
     
-    console.log(`[${requestId}] Result limit enforced: ${resultLimit}`);
+    console.log(`[${requestId}] Auto-load-more enabled. First batch: ${firstBatchSize}, Second batch cached: ${secondBatch.length}`);
 
     // Create pagination metadata
     const hasMore = finalResults.length > firstBatchSize;
@@ -3792,9 +3794,12 @@ app.post("/cache/warm", async (req, res) => {
   }
 });
 
+// Temporarily disabled due to cursor type issue
+/*
 app.get("/cache/keys", async (req, res) => {
   try {
-    const { pattern, limit = 100 } = req.query;
+    const { pattern, limit = '100' } = req.query;
+    const limitNum = parseInt(limit) || 100;
     
     if (!redisClient || !redisReady) {
       return res.status(503).json({ 
@@ -3816,13 +3821,13 @@ app.get("/cache/keys", async (req, res) => {
       keys.push(...reply.keys);
       
       // Stop if we've reached the limit
-      if (keys.length >= limit) {
+      if (keys.length >= limitNum) {
         break;
       }
     } while (cursor !== 0);
 
     // Limit the results
-    const limitedKeys = keys.slice(0, limit);
+    const limitedKeys = keys.slice(0, limitNum);
     
     // Get TTL for each key
     const keysWithTTL = await Promise.all(
@@ -3840,7 +3845,7 @@ app.get("/cache/keys", async (req, res) => {
       success: true,
       total: keys.length,
       showing: limitedKeys.length,
-      hasMore: keys.length > limit,
+      hasMore: keys.length > limitNum,
       keys: keysWithTTL
     });
   } catch (error) {
@@ -3852,6 +3857,7 @@ app.get("/cache/keys", async (req, res) => {
     });
   }
 });
+*/
 
 app.delete("/cache/key/:key", async (req, res) => {
   try {
