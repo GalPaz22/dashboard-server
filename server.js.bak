@@ -315,13 +315,11 @@ async function authenticate(req, res, next) {
   }
 }
 
-// Apply authentication to all routes except test endpoints, health, cache management, and pagination
+// Apply authentication to all routes except test endpoints, health, and cache management
 app.use((req, res, next) => {
   if (req.path.startsWith('/test-') || 
       req.path === '/health' || 
-      req.path.startsWith('/cache/') ||
-      req.path === '/search/auto-load-more' ||
-      req.path === '/search/load-more') {
+      req.path.startsWith('/cache/')) {
     return next();
   }
   return authenticate(req, res, next);
@@ -682,7 +680,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
 };
 
 // Standard search pipeline without soft filter boosting
-const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false, excludeIds = []) => {
+const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 65, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = [];
   
   if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
@@ -762,22 +760,6 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     },
   });
 
-  // Exclude already delivered IDs
-  if (excludeIds && excludeIds.length > 0) {
-    const objectIds = excludeIds.map(id => {
-      try {
-        return new ObjectId(id);
-      } catch (e) {
-        return id;
-      }
-    });
-    pipeline.push({
-      $match: {
-        _id: { $nin: objectIds }
-      }
-    });
-  }
-
   // Apply hard filters
   if (hardFilters && Object.keys(hardFilters).length > 0) {
     if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
@@ -844,7 +826,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
 };
 
 // Search pipeline WITH soft category filter
-const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 65, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
   
   if (softFilters && softFilters.softCategory) {
@@ -863,7 +845,7 @@ const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardF
 };
 
 // Search pipeline WITHOUT soft category filter 
-const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 65, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
   
   if (softFilters && softFilters.softCategory) {
@@ -885,7 +867,7 @@ const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, ha
 };
 
 // Standard vector search pipeline
-function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 12, useOrLogic = false, excludeIds = []) {
+function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 65, useOrLogic = false) {
   const filter = {};
 
   if (hardFilters.category) {
@@ -944,20 +926,6 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     ],
   });
 
-  // Exclude already delivered IDs
-  if (excludeIds && excludeIds.length > 0) {
-    const objectIds = excludeIds.map(id => {
-      try {
-        return new ObjectId(id);
-      } catch (e) {
-        return id;
-      }
-    });
-    postMatchClauses.push({
-      _id: { $nin: objectIds }
-    });
-  }
-
   if (postMatchClauses.length > 0) {
     pipeline.push({ $match: { $and: postMatchClauses } });
   }
@@ -966,7 +934,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 }
 
 // Vector search pipeline WITH soft category filter
-function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 12, useOrLogic = false) {
+function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 65, useOrLogic = false) {
   const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
   if (softFilters && softFilters.softCategory) {
@@ -982,7 +950,7 @@ function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilte
 }
 
 // Vector search pipeline WITHOUT soft category filter
-function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 12, useOrLogic = false) {
+function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 65, useOrLogic = false) {
   const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
   
   if (softFilters && softFilters.softCategory) {
@@ -1944,11 +1912,11 @@ async function executeExplicitSoftCategorySearch(
        return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
      })()));
   
-  const softCategoryLimit = 12;
-  const nonSoftCategoryLimit = 12;
-  const vectorLimit = 12;
+  const softCategoryLimit = 65;
+  const nonSoftCategoryLimit = 65;
+  const vectorLimit = 65;
   
-  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
+  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit} (capped at 65)`);
   
   // Phase 1: Get products WITH soft categories
   const softCategoryPromises = [
@@ -2098,8 +2066,8 @@ async function executeExplicitSoftCategorySearch(
     { stockStatus: "instock" }
   ];
   
-  const allSoftCategoryProducts = await collection.find(sweepQuery).limit(8).toArray();
-  console.log(`Phase 3: Found ${allSoftCategoryProducts.length} total products with soft category (capped at 8)`);
+  const allSoftCategoryProducts = await collection.find(sweepQuery).limit(100).toArray();
+  console.log(`Phase 3: Found ${allSoftCategoryProducts.length} total products with soft category (capped at 100)`);
   
   // Merge Phase 3 results with existing results, avoiding duplicates
   const existingProductIds = new Set([
@@ -2155,7 +2123,7 @@ app.get("/search/auto-load-more", async (req, res) => {
   const requestId = `auto-load-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
   
-  console.log(`[${requestId}] Auto load-more request - fetching next 40 products`);
+  console.log(`[${requestId}] Auto load-more request - fetching next 20 products`);
   
   if (!token) {
     return res.status(400).json({ 
@@ -2280,16 +2248,16 @@ app.get("/search/auto-load-more", async (req, res) => {
       } else {
         console.log(`[${requestId}] Using standard search`);
         
-        // Increased limits: 30 fuzzy + 30 vector = ~40-50 total after RRF
-        const searchLimit = 30;
-        const vectorLimit = 30;
+        // Minimal limits: 15 fuzzy + 15 vector = ~20-25 total after RRF
+        const searchLimit = 15;
+        const vectorLimit = 15;
       
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
-          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, false, deliveredIds
+          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic
         )).toArray(),
         queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
-          queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
+          queryEmbedding, hardFilters, vectorLimit, useOrLogic
         )).toArray() : Promise.resolve([])
       ];
       
@@ -2360,71 +2328,18 @@ app.get("/search/auto-load-more", async (req, res) => {
       });
     }
     
-    console.log(`[${requestId}] Search found ${combinedResults.length} new results`);
+    console.log(`[${requestId}] Search found ${combinedResults.length} total results`);
     
-    // No need to filter - already excluded in MongoDB query
-    let newResults = combinedResults;
+    // IMPORTANT: Filter out already delivered products
+    const deliveredIdSet = new Set(deliveredIds);
+    const newResults = combinedResults.filter(result => 
+      !deliveredIdSet.has(result._id.toString())
+    );
     
-    // FALLBACK: If no new results and we had soft filters, retry with simple search (no soft filters)
-    if (newResults.length === 0 && hasSoftFilters) {
-      console.log(`[${requestId}] No results with soft filters - falling back to simple search without soft categories`);
-      
-      const searchLimit = 30;
-      const vectorLimit = 30;
-      
-      const fallbackPromises = [
-        collection.aggregate(buildStandardSearchPipeline(
-          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, false, deliveredIds
-        )).toArray(),
-        queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
-          queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
-        )).toArray() : Promise.resolve([])
-      ];
-      
-      const [fallbackFuzzy, fallbackVector] = await Promise.all(fallbackPromises);
-      
-      const fallbackRanks = new Map();
-      fallbackFuzzy.forEach((doc, index) => {
-        fallbackRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
-      });
-      
-      fallbackVector.forEach((doc, index) => {
-        const id = doc._id.toString();
-        const existing = fallbackRanks.get(id);
-        if (existing) {
-          existing.vectorRank = index;
-        } else {
-          fallbackRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
-        }
-      });
-      
-      const fallbackResults = Array.from(fallbackRanks.values())
-        .map(data => {
-          const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
-          return {
-            ...data.doc,
-            rrf_score: calculateEnhancedRRFScore(
-              data.fuzzyRank, 
-              data.vectorRank, 
-              0, 
-              0, 
-              exactMatchBonus, 
-              0
-            ),
-            softFilterMatch: false,
-            softCategoryMatches: 0
-          };
-        })
-        .sort((a, b) => b.rrf_score - a.rrf_score);
-      
-      // No need to filter - already excluded in MongoDB query
-      newResults = fallbackResults;
-      
-      console.log(`[${requestId}] Fallback search found ${newResults.length} new results (without soft filters)`);
-    }
+    console.log(`[${requestId}] After filtering: ${newResults.length} new results available`);
     
-    // Take next 40 products
-    const BATCH_SIZE = 40;
+    // Take next 20 products
+    const BATCH_SIZE = 20;
     const nextBatch = newResults.slice(0, BATCH_SIZE);
     
     // Format results
@@ -2916,10 +2831,10 @@ app.post("/search", async (req, res) => {
              return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
            })()));
         
-        const searchLimit = 12; // Minimal: ~20 total after RRF
-        const vectorLimit = 12;
+        const searchLimit = 65; // Capped at 65
+        const vectorLimit = 65; // Capped at 65
         
-        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
+        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit} (capped at 65)`);
         console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
         
         const searchPromises = [
@@ -3155,10 +3070,11 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] Returning ${limitedResults.length} results in ${executionTime}ms`);
 
     // Create pagination metadata
+    const hasMore = finalResults.length > BATCH_SIZE;
     const totalAvailable = finalResults.length;
     
-    // ALWAYS create token for auto-load-more (second batch) - we'll do a fresh search
-    const secondBatchToken = Buffer.from(JSON.stringify({
+    // Create token for auto-load-more (second batch) with all search context
+    const secondBatchToken = hasMore ? Buffer.from(JSON.stringify({
       query,
       filters: enhancedFilters,
       deliveredIds: limitedResults.map(p => p._id), // Track delivered IDs to exclude them
@@ -3174,9 +3090,28 @@ app.post("/search", async (req, res) => {
       syncMode,
       explain,
       timestamp: Date.now()
-    })).toString('base64');
+    })).toString('base64') : null;
     
-    console.log(`[${requestId}] Auto-load ALWAYS enabled (will perform fresh search for batch 2)`);
+    // Create token for manual load-more (third batch onwards)
+    const loadMoreToken = hasMore ? Buffer.from(JSON.stringify({
+      query,
+      filters: enhancedFilters,
+      deliveredIds: limitedResults.map(p => p._id), // Will be updated on each load
+      batchNumber: 2,
+      dbName,
+      collectionName,
+      context,
+      categories,
+      types,
+      softCategories: finalSoftCategories,
+      noWord,
+      noHebrewWord,
+      syncMode,
+      explain,
+      timestamp: Date.now()
+    })).toString('base64') : null;
+    
+    console.log(`[${requestId}] Has more results: ${hasMore}, Auto-load enabled: ${hasMore}`);
     
     // Return products array with search metadata and pagination
     const response = limitedResults.map(product => ({
@@ -3200,11 +3135,13 @@ app.post("/search", async (req, res) => {
     res.json({
       products: response,
       pagination: {
+        hasMore: hasMore,
         totalAvailable: totalAvailable,
         returned: response.length,
         batchNumber: 1,
-        autoLoadMore: true, // ALWAYS enable auto-load (batch 2 will do fresh search)
-        secondBatchToken: secondBatchToken // Token for automatic second batch
+        autoLoadMore: hasMore, // Enable auto-load if more results available
+        secondBatchToken: secondBatchToken, // Token for automatic second batch
+        nextToken: loadMoreToken // Token for manual load-more (if needed)
       },
       metadata: {
         query: query,

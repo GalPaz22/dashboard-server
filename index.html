@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Dashboard - Local Testing</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .header {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        h1 {
+            color: #667eea;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #666;
+            font-size: 14px;
+        }
+
+        .search-box {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        input[type="text"],
+        input[type="password"] {
+            width: 100%;
+            padding: 12px 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="password"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 10px;
+        }
+
+        button {
+            padding: 12px 24px;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .btn-primary {
+            background: #667eea;
+            color: white;
+            flex: 1;
+        }
+
+        .btn-primary:hover {
+            background: #5568d3;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-secondary {
+            background: #f5f5f5;
+            color: #333;
+        }
+
+        .btn-secondary:hover {
+            background: #e0e0e0;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            color: #666;
+        }
+
+        .spinner {
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid #667eea;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .results {
+            background: white;
+            border-radius: 12px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .results-count {
+            font-size: 18px;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .batch-indicator {
+            background: #667eea;
+            color: white;
+            padding: 6px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+
+        .products-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 20px;
+            margin-bottom: 20px;
+        }
+
+        .product-card {
+            border: 2px solid #f0f0f0;
+            border-radius: 12px;
+            padding: 16px;
+            transition: all 0.3s;
+            cursor: pointer;
+        }
+
+        .product-card:hover {
+            border-color: #667eea;
+            transform: translateY(-4px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+        }
+
+        .product-card.highlighted {
+            border-color: #667eea;
+            background: #f8f9ff;
+        }
+
+        .product-image {
+            width: 100%;
+            height: 200px;
+            object-fit: contain;
+            border-radius: 8px;
+            margin-bottom: 12px;
+            background: #f9f9f9;
+        }
+
+        .product-name {
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #333;
+            font-size: 16px;
+            line-height: 1.4;
+        }
+
+        .product-price {
+            font-size: 20px;
+            font-weight: 700;
+            color: #667eea;
+            margin-bottom: 8px;
+        }
+
+        .product-badges {
+            display: flex;
+            gap: 6px;
+            flex-wrap: wrap;
+            margin-top: 8px;
+        }
+
+        .badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .badge-highlight {
+            background: #667eea;
+            color: white;
+        }
+
+        .badge-soft {
+            background: #ffd700;
+            color: #333;
+        }
+
+        .badge-type {
+            background: #e0e0e0;
+            color: #666;
+        }
+
+        .explanation {
+            margin-top: 12px;
+            padding: 10px;
+            background: #f9f9f9;
+            border-radius: 6px;
+            font-size: 13px;
+            color: #666;
+            font-style: italic;
+        }
+
+        .load-more-section {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        .btn-load-more {
+            background: #764ba2;
+            color: white;
+            padding: 14px 32px;
+        }
+
+        .btn-load-more:hover {
+            background: #663399;
+        }
+
+        .metadata {
+            margin-top: 20px;
+            padding: 15px;
+            background: #f9f9f9;
+            border-radius: 8px;
+            font-size: 13px;
+            color: #666;
+        }
+
+        .metadata-item {
+            margin-bottom: 5px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            margin-right: 6px;
+        }
+
+        .status-online {
+            background: #4caf50;
+        }
+
+        .status-offline {
+            background: #f44336;
+        }
+
+        .error {
+            background: #ffebee;
+            border: 2px solid #f44336;
+            color: #c62828;
+            padding: 16px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .auto-load-notice {
+            background: #e3f2fd;
+            border: 2px solid #2196f3;
+            color: #1565c0;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            text-align: center;
+            font-size: 14px;
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔍 Search Dashboard</h1>
+            <p class="subtitle">Testing interface for local server (http://localhost:8000)</p>
+        </div>
+
+        <div class="search-box">
+            <div class="form-group">
+                <label for="apiKey">API Key</label>
+                <input type="password" id="apiKey" placeholder="Enter your API key">
+            </div>
+
+            <div class="form-group">
+                <label for="searchQuery">Search Query</label>
+                <input type="text" id="searchQuery" placeholder="Enter search query (e.g., יין אדום)">
+            </div>
+
+            <div class="button-group">
+                <button class="btn-primary" onclick="performSearch()">🔍 Search</button>
+                <button class="btn-secondary" onclick="checkHealth()">💚 Health Check</button>
+                <button class="btn-secondary" onclick="checkCache()">📊 Cache Stats</button>
+            </div>
+        </div>
+
+        <div id="loadingIndicator" class="search-box hidden">
+            <div class="loading">
+                <div class="spinner"></div>
+                <p>Searching...</p>
+            </div>
+        </div>
+
+        <div id="autoLoadNotice" class="hidden">
+            <div class="auto-load-notice">
+                ✨ Auto-loading second batch of results...
+            </div>
+        </div>
+
+        <div id="errorContainer" class="hidden"></div>
+
+        <div id="resultsContainer" class="hidden">
+            <div class="results">
+                <div class="results-header">
+                    <div class="results-count" id="resultsCount">0 products found</div>
+                    <div class="batch-indicator" id="batchIndicator">Batch 1</div>
+                </div>
+
+                <div class="products-grid" id="productsGrid"></div>
+
+                <div id="loadMoreSection" class="load-more-section hidden">
+                    <button class="btn-load-more" onclick="loadMore()">Load More Products</button>
+                </div>
+
+                <div class="metadata" id="metadata"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentSearchData = null;
+        let allProducts = [];
+        let currentBatch = 1;
+
+        async function performSearch() {
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const query = document.getElementById('searchQuery').value.trim();
+
+            if (!apiKey) {
+                showError('Please enter an API key');
+                return;
+            }
+
+            if (!query) {
+                showError('Please enter a search query');
+                return;
+            }
+
+            // Reset state
+            allProducts = [];
+            currentBatch = 1;
+            hideError();
+            hideResults();
+            showLoading();
+
+            try {
+                // First batch
+                const response = await fetch('http://localhost:8000/search', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-API-Key': apiKey
+                    },
+                    body: JSON.stringify({
+                        query: query,
+                        context: 'wine store',
+                        explain: true
+                    })
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Search failed');
+                }
+
+                const data = await response.json();
+                currentSearchData = data;
+                allProducts = data.products || [];
+
+                hideLoading();
+                displayResults(data);
+
+                // Auto-load second batch if available
+                console.log('Pagination data:', data.pagination);
+                console.log('Auto-load check:', {
+                    autoLoadMore: data.pagination?.autoLoadMore,
+                    hasToken: !!data.pagination?.secondBatchToken
+                });
+                
+                if (data.pagination?.autoLoadMore && data.pagination?.secondBatchToken) {
+                    console.log('✅ Auto-load enabled! Triggering in 500ms...');
+                    setTimeout(() => autoLoadSecondBatch(data.pagination.secondBatchToken), 500);
+                } else {
+                    console.log('❌ Auto-load NOT triggered:', {
+                        autoLoadMore: data.pagination?.autoLoadMore,
+                        hasToken: !!data.pagination?.secondBatchToken
+                    });
+                }
+
+            } catch (error) {
+                hideLoading();
+                showError(error.message);
+            }
+        }
+
+        async function autoLoadSecondBatch(token) {
+            console.log('🔄 Auto-loading second batch...');
+            document.getElementById('autoLoadNotice').classList.remove('hidden');
+
+            try {
+                console.log('Making request to /search/auto-load-more');
+                const response = await fetch(`http://localhost:8000/search/auto-load-more?token=${encodeURIComponent(token)}`, {
+                    method: 'GET'
+                });
+
+                console.log('Response status:', response.status);
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    console.error('❌ Auto-load failed:', errorData.error);
+                    return;
+                }
+
+                const data = await response.json();
+                console.log('✅ Auto-load response received:', {
+                    products: data.products?.length,
+                    batchNumber: data.pagination?.batchNumber,
+                    hasMore: data.pagination?.hasMore
+                });
+                
+                if (data.products && data.products.length > 0) {
+                    currentBatch = data.pagination?.batchNumber || 2;
+                    allProducts = [...allProducts, ...data.products];
+                    
+                    // Update UI
+                    document.getElementById('batchIndicator').textContent = `Batch 1-${currentBatch} (${allProducts.length} total)`;
+                    appendProducts(data.products);
+                    
+                    // Update currentSearchData for further pagination
+                    if (data.pagination?.nextToken) {
+                        currentSearchData.pagination.nextToken = data.pagination.nextToken;
+                        currentSearchData.pagination.hasMore = data.pagination.hasMore;
+                        document.getElementById('loadMoreSection').classList.remove('hidden');
+                    } else {
+                        document.getElementById('loadMoreSection').classList.add('hidden');
+                    }
+                    
+                    console.log(`✅ Auto-loaded batch ${currentBatch}: ${data.products.length} products (${data.metadata?.executionTime}ms)`);
+                } else {
+                    console.log('⚠️ No products in second batch');
+                }
+
+            } catch (error) {
+                console.error('❌ Auto-load error:', error);
+            } finally {
+                document.getElementById('autoLoadNotice').classList.add('hidden');
+            }
+        }
+
+        async function loadMore() {
+            if (!currentSearchData?.pagination?.nextToken) return;
+
+            const token = currentSearchData.pagination.nextToken;
+            showLoading();
+
+            try {
+                const response = await fetch(`http://localhost:8000/search/auto-load-more?token=${encodeURIComponent(token)}`, {
+                    method: 'GET'
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Load more failed');
+                }
+
+                const data = await response.json();
+                hideLoading();
+                
+                if (data.products && data.products.length > 0) {
+                    currentBatch = data.pagination?.batchNumber || (currentBatch + 1);
+                    allProducts = [...allProducts, ...data.products];
+                    appendProducts(data.products);
+                    
+                    // Update UI
+                    document.getElementById('batchIndicator').textContent = `Batch 1-${currentBatch} (${allProducts.length} total)`;
+                    
+                    // Update pagination
+                    currentSearchData.pagination.nextToken = data.pagination?.nextToken;
+                    currentSearchData.pagination.hasMore = data.pagination?.hasMore;
+                    
+                    // Hide load more if no more results
+                    if (!data.pagination?.hasMore) {
+                        document.getElementById('loadMoreSection').classList.add('hidden');
+                    }
+                    
+                    console.log(`Loaded batch ${currentBatch}: ${data.products.length} products (${data.metadata?.executionTime}ms)`);
+                }
+
+            } catch (error) {
+                hideLoading();
+                showError(error.message);
+            }
+        }
+
+        function displayResults(data) {
+            const resultsContainer = document.getElementById('resultsContainer');
+            const productsGrid = document.getElementById('productsGrid');
+            const resultsCount = document.getElementById('resultsCount');
+            const batchIndicator = document.getElementById('batchIndicator');
+            const loadMoreSection = document.getElementById('loadMoreSection');
+            const metadata = document.getElementById('metadata');
+
+            // Clear previous results
+            productsGrid.innerHTML = '';
+
+            // Update count
+            const total = data.products?.length || 0;
+            resultsCount.textContent = `${total} products found`;
+            batchIndicator.textContent = 'Batch 1';
+
+            // Display products
+            if (data.products && data.products.length > 0) {
+                data.products.forEach(product => {
+                    productsGrid.appendChild(createProductCard(product));
+                });
+            }
+
+            // Show/hide load more
+            if (data.pagination?.hasMore) {
+                loadMoreSection.classList.remove('hidden');
+            } else {
+                loadMoreSection.classList.add('hidden');
+            }
+
+            // Display metadata
+            metadata.innerHTML = `
+                <div class="metadata-item"><strong>Query:</strong> ${data.metadata?.query || 'N/A'}</div>
+                <div class="metadata-item"><strong>Request ID:</strong> ${data.metadata?.requestId || 'N/A'}</div>
+                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms (Batch 1 only)</div>
+                <div class="metadata-item"><strong>Batch Size:</strong> 20 products per batch</div>
+                <div class="metadata-item"><strong>Has More:</strong> ${data.pagination?.hasMore ? 'Yes (will auto-load)' : 'No'}</div>
+                <div class="metadata-item"><strong>Mechanism:</strong> Fresh search per batch (excludes delivered products)</div>
+            `;
+
+            resultsContainer.classList.remove('hidden');
+        }
+
+        function appendProducts(products) {
+            const productsGrid = document.getElementById('productsGrid');
+            const resultsCount = document.getElementById('resultsCount');
+            
+            products.forEach(product => {
+                productsGrid.appendChild(createProductCard(product));
+            });
+
+            resultsCount.textContent = `${allProducts.length} products found`;
+        }
+
+        function createProductCard(product) {
+            const card = document.createElement('div');
+            card.className = `product-card ${product.highlight ? 'highlighted' : ''}`;
+
+            const badges = [];
+            if (product.highlight) badges.push('<span class="badge badge-highlight">⭐ Highlighted</span>');
+            if (product.softFilterMatch) badges.push(`<span class="badge badge-soft">Soft Match (${product.softCategoryMatches || 0})</span>`);
+            if (product.type) badges.push(`<span class="badge badge-type">${product.type}</span>`);
+
+            card.innerHTML = `
+                ${product.image ? `<img class="product-image" src="${product.image}" alt="${product.name}">` : ''}
+                <div class="product-name">${product.name || 'No name'}</div>
+                <div class="product-price">₪${product.price || 'N/A'}</div>
+                <div class="product-badges">
+                    ${badges.join('')}
+                </div>
+                ${product.explanation ? `<div class="explanation">${product.explanation}</div>` : ''}
+            `;
+
+            if (product.url) {
+                card.onclick = () => window.open(product.url, '_blank');
+            }
+
+            return card;
+        }
+
+        async function checkHealth() {
+            hideError();
+            showLoading();
+
+            try {
+                const response = await fetch('http://localhost:8000/health');
+                const data = await response.json();
+
+                hideLoading();
+
+                const redisStatus = data.services?.redis?.connected ? 'online' : 'offline';
+                const mongoStatus = data.services?.mongodb?.connected ? 'online' : 'offline';
+
+                alert(`
+Server Status: ${data.status}
+Uptime: ${Math.floor(data.uptime || 0)}s
+
+Redis: ${redisStatus} ${data.services?.redis?.connected ? '✅' : '❌'}
+MongoDB: ${mongoStatus} ${data.services?.mongodb?.connected ? '✅' : '❌'}
+                `);
+
+            } catch (error) {
+                hideLoading();
+                showError('Health check failed: ' + error.message);
+            }
+        }
+
+        async function checkCache() {
+            hideError();
+            showLoading();
+
+            try {
+                const response = await fetch('http://localhost:8000/cache/stats');
+                const data = await response.json();
+
+                hideLoading();
+
+                if (data.redis?.connected) {
+                    alert(`
+Cache Statistics:
+
+Keys: ${data.redis.dbSize || 0}
+Memory Used: ${data.redis.usedMemory || 'N/A'}
+Hit Rate: ${data.redis.hitRate || 'N/A'}
+Uptime: ${data.redis.uptime || 'N/A'}
+Version: ${data.redis.version || 'N/A'}
+                    `);
+                } else {
+                    showError('Redis not connected');
+                }
+
+            } catch (error) {
+                hideLoading();
+                showError('Cache stats failed: ' + error.message);
+            }
+        }
+
+        function showLoading() {
+            document.getElementById('loadingIndicator').classList.remove('hidden');
+        }
+
+        function hideLoading() {
+            document.getElementById('loadingIndicator').classList.add('hidden');
+        }
+
+        function showError(message) {
+            const errorContainer = document.getElementById('errorContainer');
+            errorContainer.innerHTML = `<div class="error">❌ Error: ${message}</div>`;
+            errorContainer.classList.remove('hidden');
+        }
+
+        function hideError() {
+            document.getElementById('errorContainer').classList.add('hidden');
+        }
+
+        function hideResults() {
+            document.getElementById('resultsContainer').classList.add('hidden');
+        }
+
+        // Enter key support
+        document.getElementById('searchQuery').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                performSearch();
+            }
+        });
+
+        document.getElementById('apiKey').addEventListener('keypress', function(e) {
+            if (e.key === 'Enter') {
+                document.getElementById('searchQuery').focus();
+            }
+        });
+    </script>
+</body>
+</html>
+
