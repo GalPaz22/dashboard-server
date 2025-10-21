@@ -2427,7 +2427,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     const BATCH_SIZE = 40;
     const nextBatch = newResults.slice(0, BATCH_SIZE);
     
-    // Format results
+    // Format results - matching original client response format
     const formattedResults = nextBatch.map((result) => ({
       _id: result._id.toString(),
       id: result.id,
@@ -2436,10 +2436,10 @@ app.get("/search/auto-load-more", async (req, res) => {
       price: result.price,
       image: result.image,
       url: result.url,
+      highlight: hasSoftFilters ? !!result.softFilterMatch : false,
       type: result.type,
       specialSales: result.specialSales,
       ItemID: result.ItemID,
-      highlight: !!result.softFilterMatch,
       explanation: null,
       softFilterMatch: !!result.softFilterMatch,
       softCategoryMatches: result.softCategoryMatches || 0,
