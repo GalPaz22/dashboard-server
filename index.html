@@ -417,7 +417,8 @@
                     body: JSON.stringify({
                         query: query,
                         context: 'wine store',
-                        explain: true
+                        explain: true,
+                        modern: true
                     })
                 });
 
@@ -579,7 +580,7 @@
             }
 
             // Show/hide load more
-            if (data.pagination?.hasMore) {
+            if (data.pagination?.hasMore && data.pagination?.nextToken) {
                 loadMoreSection.classList.remove('hidden');
             } else {
                 loadMoreSection.classList.add('hidden');
@@ -589,10 +590,10 @@
             metadata.innerHTML = `
                 <div class="metadata-item"><strong>Query:</strong> ${data.metadata?.query || 'N/A'}</div>
                 <div class="metadata-item"><strong>Request ID:</strong> ${data.metadata?.requestId || 'N/A'}</div>
-                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms (Batch 1 only)</div>
-                <div class="metadata-item"><strong>Batch Size:</strong> 20 products per batch</div>
-                <div class="metadata-item"><strong>Has More:</strong> ${data.pagination?.hasMore ? 'Yes (will auto-load)' : 'No'}</div>
-                <div class="metadata-item"><strong>Mechanism:</strong> Fresh search per batch (excludes delivered products)</div>
+                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms (Batch 1)</div>
+                <div class="metadata-item"><strong>Total Available:</strong> ${data.pagination?.totalAvailable || 'N/A'}</div>
+                <div class="metadata-item"><strong>Auto-Load More:</strong> ${data.pagination?.autoLoadMore ? '✅ Enabled' : '❌ Disabled'}</div>
+                <div class="metadata-item"><strong>Mechanism:</strong> Independent fresh search for each batch.</div>
             `;
 
             resultsContainer.classList.remove('hidden');

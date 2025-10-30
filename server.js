@@ -2281,8 +2281,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         console.log(`[${requestId}] Using standard search`);
         
         // Increased limits: 30 fuzzy + 30 vector = ~40-50 total after RRF
-        const searchLimit = 30;
-        const vectorLimit = 30;
+        const searchLimit = 20;
+        const vectorLimit = 20;
       
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
@@ -2439,6 +2439,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       highlight: hasSoftFilters ? !!result.softFilterMatch : false,
       type: result.type,
       specialSales: result.specialSales,
+      onSale: !!(result.specialSales && Array.isArray(result.specialSales) && result.specialSales.length > 0),
       ItemID: result.ItemID,
       explanation: null,
       softFilterMatch: !!result.softFilterMatch,
@@ -2472,7 +2473,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       timestamp: Date.now() // New timestamp for next batch
     })).toString('base64') : null;
     
-    res.json({
+    const autoLoadResponse = {
       products: formattedResults,
       pagination: {
         hasMore: hasMore,
@@ -2488,7 +2489,20 @@ app.get("/search/auto-load-more", async (req, res) => {
         freshSearch: true,
         excludedCount: deliveredIds.length
       }
+    };
+    
+    console.log(`[${requestId}] === AUTO-LOAD-MORE RESPONSE ===`);
+    console.log(`[${requestId}] Products returned: ${autoLoadResponse.products.length}`);
+    if (autoLoadResponse.products.length > 0) {
+      console.log(`[${requestId}] First product sample:`, JSON.stringify(autoLoadResponse.products[0], null, 2));
+    }
+    console.log(`[${requestId}] Response structure:`, {
+      productsCount: autoLoadResponse.products.length,
+      pagination: autoLoadResponse.pagination,
+      metadata: autoLoadResponse.metadata
     });
+    
+    res.json(autoLoadResponse);
     
   } catch (error) {
     console.error(`[${requestId}] Error in auto-load-more:`, error);
@@ -2661,8 +2675,13 @@ app.post("/search", async (req, res) => {
   const searchStartTime = Date.now();
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
   
-  const { query, example, noWord, noHebrewWord, context, useImages } = req.body;
+  const { query, example, noWord, noHebrewWord, context, useImages, modern } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain } = req.store;
+  
+  // Default to legacy mode (array only) for backward compatibility
+  // Only use modern format (with pagination) if explicitly requested
+  const isModernMode = modern === true || modern === 'true';
+  const isLegacyMode = !isModernMode;
   
   const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט,ספרדי,איטלקי,צרפתי,פורטוגלי,ארגנטיני,צ'ילה,דרום אפריקה,אוסטרליה";
   const finalSoftCategories = softCategories || defaultSoftCategories;
@@ -2697,6 +2716,7 @@ app.post("/search", async (req, res) => {
         highlight: true, // Highlight SKU matches as they are exact matches
         type: product.type,
         specialSales: product.specialSales,
+        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
         ItemID: product.ItemID,
         explanation: null,
         softFilterMatch: false,
@@ -3088,6 +3108,7 @@ app.post("/search", async (req, res) => {
           highlight: isHighlighted,
           type: product.type,
           specialSales: product.specialSales,
+          onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
           ItemID: product.ItemID,
           explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
           softFilterMatch: !!(resultData?.softFilterMatch),
@@ -3104,11 +3125,12 @@ app.post("/search", async (req, res) => {
         price: r.price,
         image: r.image,
         url: r.url,
-        type: r.type,
-        specialSales: r.specialSales,
-        ItemID: r.ItemID,
         // For remaining results, only highlight soft filter matches if no LLM reranking occurred
         highlight: !llmReorderingSuccessful && hasSoftFilters ? !!r.softFilterMatch : false,
+        type: r.type,
+        specialSales: r.specialSales,
+        onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
+        ItemID: r.ItemID,
         explanation: null,
         softFilterMatch: !!r.softFilterMatch,
         softCategoryMatches: r.softCategoryMatches || 0,
@@ -3178,26 +3200,11 @@ app.post("/search", async (req, res) => {
     
     console.log(`[${requestId}] Auto-load ALWAYS enabled (will perform fresh search for batch 2)`);
     
-    // Return products array with search metadata and pagination
-    const response = limitedResults.map(product => ({
-      ...product,
-      // Add metadata to each product for cart tracking
-      _searchMetadata: {
-        query: query,
-        isComplexQuery: isComplexQueryResult,
-        classification: isComplexQueryResult ? 'complex' : 'simple',
-        hasHardFilters: hasHardFilters,
-        hasSoftFilters: hasSoftFilters,
-        llmReorderingUsed: llmReorderingSuccessful,
-        filterOnlySearch: shouldUseFilterOnly,
-        requestId: requestId,
-        executionTime: executionTime,
-        totalResults: limitedResults.length
-      }
-    }));
+    // Return products array without per-product metadata (for backward compatibility)
+    const response = limitedResults;
     
     // Send response with pagination metadata and auto-load-more info
-    res.json({
+    const searchResponse = {
       products: response,
       pagination: {
         totalAvailable: totalAvailable,
@@ -3211,7 +3218,39 @@ app.post("/search", async (req, res) => {
         requestId: requestId,
         executionTime: executionTime
       }
-    });
+    };
+    
+    console.log(`[${requestId}] === SEARCH RESPONSE ===`);
+    console.log(`[${requestId}] Total products: ${searchResponse.products.length}`);
+    console.log(`[${requestId}] Mode: ${isLegacyMode ? 'LEGACY (array)' : 'MODERN (with pagination)'}`);
+    if (searchResponse.products.length > 0) {
+      console.log(`[${requestId}] First product sample:`, JSON.stringify(searchResponse.products[0], null, 2));
+    }
+    
+    // Return legacy format (array only) by default for backward compatibility
+    // Return modern format (with pagination) only if explicitly requested
+    if (isLegacyMode) {
+      console.log(`[${requestId}] ✅ Returning LEGACY format (array only) - backward compatible`);
+      
+      // Add pagination info to headers for clients that can use it
+      if (searchResponse.pagination && searchResponse.pagination.secondBatchToken) {
+        res.setHeader('X-Next-Batch-Token', searchResponse.pagination.secondBatchToken);
+        res.setHeader('X-Has-More', 'true');
+        console.log(`[${requestId}] --> Sent X-Next-Batch-Token header for subsequent calls.`);
+      } else {
+        res.setHeader('X-Has-More', 'false');
+      }
+      
+      res.json(searchResponse.products);
+    } else {
+      console.log(`[${requestId}] ✅ Returning MODERN format (with pagination, auto-load, etc.)`);
+      console.log(`[${requestId}] Response structure:`, {
+        productsCount: searchResponse.products.length,
+        pagination: searchResponse.pagination,
+        metadata: searchResponse.metadata
+      });
+      res.json(searchResponse);
+    }
     
   } catch (error) {
     console.error("Error handling search request:", error);
