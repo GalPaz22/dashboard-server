@@ -1117,7 +1117,24 @@ Analyze the query and return your classification.`;
         }
       });
 
-      const result = JSON.parse(response.text.trim());
+      let text = response.text ? response.text.trim() : null;
+      
+      // If response.text is not available, try to extract from response structure
+      if (!text && response.candidates && response.candidates[0]) {
+        const candidate = response.candidates[0];
+        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+          text = candidate.content.parts[0].text;
+        }
+      }
+      
+      if (!text) {
+        throw new Error("No text content in response");
+      }
+      
+      // Clean up the text - remove any leading/trailing characters that aren't part of JSON
+      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+      
+      const result = JSON.parse(text);
       
       return result.classification === "simple";
     } catch (error) {
@@ -1232,7 +1249,7 @@ Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - You MUST ONLY select from this list: ${categories}. be as STRICT as possible with this list, extract the exact category that is mentioned in the query (if the query says 'red vermout' and you cant find 'red' in the list, do not extract any category what so ever! ) .
+4. category - You MUST ONLY select from this list: ${categories}. You may intelligently map related terms to items in this list (e.g., synonyms, related concepts, partial matches). For example, if the query mentions "red vermouth" and the list contains "vermouth", extract "vermouth" even if "red" isn't in the list (red would be a soft category). However, NEVER make up categories not in the provided list.
 5. type - You MUST ONLY select from this list: ${types}. You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list. do not ever make up a type that is not in the list.
 6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list).
 
@@ -1313,7 +1330,23 @@ ${example}.`;
       }
     });
 
-    const content = response.text.trim();
+    let content = response.text ? response.text.trim() : null;
+    
+    // If response.text is not available, try to extract from response structure
+    if (!content && response.candidates && response.candidates[0]) {
+      const candidate = response.candidates[0];
+      if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+        content = candidate.content.parts[0].text;
+      }
+    }
+    
+    if (!content) {
+      throw new Error("No content in response");
+    }
+    
+    // Clean up the content - remove any leading/trailing characters that aren't part of JSON
+    content = content.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+    
     const filters = JSON.parse(content);
     return filters;
   } catch (error) {
@@ -1623,13 +1656,30 @@ ${JSON.stringify(productData, null, 2)}`;
       },
     });
 
-    const text = response.text.trim();
+    let text = response.text ? response.text.trim() : null;
+    
+    // If response.text is not available, try to extract from response structure
+    if (!text && response.candidates && response.candidates[0]) {
+      const candidate = response.candidates[0];
+      if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+        text = candidate.content.parts[0].text;
+      }
+    }
+    
     console.log(`[Gemini Rerank] Query: "${sanitizedQuery}"`);
     if (softFilters && softFilters.softCategory) {
       const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
       console.log(`[Gemini Rerank] Soft Categories: ${softCats.join(', ')}`);
     }
     console.log(`[Gemini Rerank] Response: ${text}`);
+    
+    if (!text) {
+      throw new Error("No text content in response");
+    }
+    
+    // Clean up the text - remove any leading/trailing characters that aren't part of JSON
+    text = text.replace(/^[^[\{]+/, '').replace(/[^\]\}]+$/, '');
+    
     const reorderedData = JSON.parse(text);
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
     
@@ -1804,7 +1854,7 @@ Focus only on visual elements that match the search intent.`;
            };
 
        const response = await genAI.models.generateContent({
-         model: "gemini-2.s-flash",
+         model: "gemini-2.5-flash",
          contents: contents,
          config: { 
            temperature: 0.1,
@@ -1816,7 +1866,16 @@ Focus only on visual elements that match the search intent.`;
          },
        });
 
-       const responseText = response.text.trim();
+       let responseText = response.text ? response.text.trim() : null;
+       
+       // If response.text is not available, try to extract from response structure
+       if (!responseText && response.candidates && response.candidates[0]) {
+         const candidate = response.candidates[0];
+         if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+           responseText = candidate.content.parts[0].text;
+         }
+       }
+       
        console.log(`[Gemini Image Rerank] Query: "${sanitizedQuery}"`);
        if (softFilters && softFilters.softCategory) {
          const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
@@ -1827,6 +1886,9 @@ Focus only on visual elements that match the search intent.`;
        if (!responseText) {
          throw new Error("No content returned from Gemini");
        }
+
+       // Clean up the text - remove any leading/trailing characters that aren't part of JSON
+       responseText = responseText.replace(/^[^[\{]+/, '').replace(/[^\]\}]+$/, '');
 
        const reorderedData = JSON.parse(responseText);
        if (!Array.isArray(reorderedData)) {
