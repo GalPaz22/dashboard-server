@@ -1251,7 +1251,7 @@ Extract the following filters from the query if they exist:
 3. maxPrice (maximum price, indicated by the word 'עד').
 4. category - You MUST ONLY select from this list: ${categories}. 
 5. type - You MUST ONLY select from this list: ${types}. You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list. do not ever make up a type that is not in the list.
-6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list).
+6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list). you can extract multiple soft categories by separating them with a comma.  
 
 INTELLIGENT MAPPING RULES:
 - You may interpret and map related terms to items in the provided lists
@@ -2006,9 +2006,9 @@ async function executeExplicitSoftCategorySearch(
        return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
      })()));
   
-  const softCategoryLimit = 12;
-  const nonSoftCategoryLimit = 12;
-  const vectorLimit = 12;
+  const softCategoryLimit = searchLimit;
+  const nonSoftCategoryLimit = searchLimit;
+  // vectorLimit already defined above
   
   console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
   
@@ -2737,13 +2737,20 @@ app.post("/search", async (req, res) => {
   const searchStartTime = Date.now();
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
   
-  const { query, example, noWord, noHebrewWord, context, useImages, modern } = req.body;
+  const { query, example, noWord, noHebrewWord, context, useImages, modern, limit: userLimit } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain } = req.store;
   
   // Default to legacy mode (array only) for backward compatibility
   // Only use modern format (with pagination) if explicitly requested
   const isModernMode = modern === true || modern === 'true';
   const isLegacyMode = !isModernMode;
+  
+  // Parse and validate user limit, default to 25 if not provided or invalid
+  const parsedLimit = userLimit ? parseInt(userLimit, 10) : 25;
+  const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 25;
+  const vectorLimit = searchLimit; // Keep them the same for balanced RRF
+  
+  console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} ${userLimit ? '(user-specified)' : '(default)'}`);
   
   const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט,ספרדי,איטלקי,צרפתי,פורטוגלי,ארגנטיני,צ'ילה,דרום אפריקה,אוסטרליה";
   const finalSoftCategories = softCategories || defaultSoftCategories;
@@ -3035,8 +3042,8 @@ app.post("/search", async (req, res) => {
              return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
            })()));
         
-        const searchLimit = 12; // Minimal: ~20 total after RRF
-        const vectorLimit = 12;
+        // Using user-specified or default limits (defined at the top of the endpoint)
+        // searchLimit and vectorLimit are already defined above
         
         console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
         console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
