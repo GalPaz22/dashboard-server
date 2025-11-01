@@ -2848,6 +2848,33 @@ app.post("/search", async (req, res) => {
       maxPrice: enhancedFilters.maxPrice
     };
     
+    // Normalize category and type to arrays and split comma-separated values
+    if (hardFilters.category) {
+      if (!Array.isArray(hardFilters.category)) {
+        hardFilters.category = [hardFilters.category];
+      }
+      // Split any comma-separated values in the array
+      hardFilters.category = hardFilters.category.flatMap(cat => {
+        if (typeof cat === 'string' && cat.includes(',')) {
+          return cat.split(',').map(c => c.trim()).filter(c => c);
+        }
+        return cat;
+      });
+    }
+    
+    if (hardFilters.type) {
+      if (!Array.isArray(hardFilters.type)) {
+        hardFilters.type = [hardFilters.type];
+      }
+      // Split any comma-separated values in the array
+      hardFilters.type = hardFilters.type.flatMap(type => {
+        if (typeof type === 'string' && type.includes(',')) {
+          return type.split(',').map(t => t.trim()).filter(t => t);
+        }
+        return type;
+      });
+    }
+    
     // Create a version of cleanedText with hard filter words removed for vector/fuzzy search
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, hardFilters, categories, types);
     console.log(`[${requestId}] Original text: "${cleanedText}" -> Search text: "${cleanedTextForSearch}"`);
@@ -2893,8 +2920,18 @@ app.post("/search", async (req, res) => {
       softCategory: enhancedFilters.softCategory
     };
 
-    if (softFilters.softCategory && !Array.isArray(softFilters.softCategory)) {
-      softFilters.softCategory = [softFilters.softCategory];
+    // Normalize softCategory to array and split comma-separated values
+    if (softFilters.softCategory) {
+      if (!Array.isArray(softFilters.softCategory)) {
+        softFilters.softCategory = [softFilters.softCategory];
+      }
+      // Split any comma-separated values in the array
+      softFilters.softCategory = softFilters.softCategory.flatMap(cat => {
+        if (typeof cat === 'string' && cat.includes(',')) {
+          return cat.split(',').map(c => c.trim()).filter(c => c);
+        }
+        return cat;
+      });
     }
 
     const hasExtractedHardFilters = hardFilters.category || hardFilters.type || hardFilters.price || hardFilters.minPrice || hardFilters.maxPrice;
