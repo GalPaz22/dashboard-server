@@ -1988,6 +1988,8 @@ async function executeExplicitSoftCategorySearch(
   hardFilters, 
   softFilters, 
   queryEmbedding,
+  searchLimit,
+  vectorLimit,
   useOrLogic = false,
   isImageModeWithSoftCategories = false,
   originalCleanedText = null
@@ -2008,7 +2010,6 @@ async function executeExplicitSoftCategorySearch(
   
   const softCategoryLimit = searchLimit;
   const nonSoftCategoryLimit = searchLimit;
-  // vectorLimit already defined above
   
   console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
   
@@ -2335,6 +2336,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         hardFilters,
         softFilters,
         queryEmbedding,
+        searchLimit,
+        vectorLimit,
         useOrLogic,
         syncMode === 'image',
         cleanedText
@@ -2342,9 +2345,8 @@ app.get("/search/auto-load-more", async (req, res) => {
       } else {
         console.log(`[${requestId}] Using standard search`);
         
-        // Increased limits: 30 fuzzy + 30 vector = ~40-50 total after RRF
-        const searchLimit = 20;
-        const vectorLimit = 20;
+        // Using user-specified or default limits (defined at the top of the endpoint)
+        // searchLimit and vectorLimit are already defined above
       
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
@@ -2431,8 +2433,8 @@ app.get("/search/auto-load-more", async (req, res) => {
     if (newResults.length === 0 && hasSoftFilters) {
       console.log(`[${requestId}] No results with soft filters - falling back to simple search without soft categories`);
       
-      const searchLimit = 30;
-      const vectorLimit = 30;
+      // Using the same user-specified or default limits (defined at the top of the endpoint)
+      // searchLimit and vectorLimit are already defined above
       
       const fallbackPromises = [
         collection.aggregate(buildStandardSearchPipeline(
@@ -3025,6 +3027,8 @@ app.post("/search", async (req, res) => {
           hardFilters,
           softFilters,
           queryEmbedding,
+          searchLimit,
+          vectorLimit,
           useOrLogic,
           isImageModeWithSoftCategories,
           cleanedText
