@@ -1249,7 +1249,7 @@ Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - You MUST ONLY select from this list: ${categories}. You may intelligently map related terms to items in this list (e.g., synonyms, related concepts, partial matches). For example, if the query mentions "red vermouth" and the list contains "vermouth", extract "vermouth" even if "red" isn't in the list (red would be a soft category). However, NEVER make up categories not in the provided list.
+4. category - You MUST ONLY select from this list: ${categories}. 
 5. type - You MUST ONLY select from this list: ${types}. You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list. do not ever make up a type that is not in the list.
 6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list).
 
