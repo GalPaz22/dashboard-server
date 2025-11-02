@@ -463,7 +463,7 @@
 
             try {
                 console.log('Making request to /search/auto-load-more');
-                const response = await fetch(`http://localhost:8000/search/auto-load-more?token=${encodeURIComponent(token)}`, {
+                const response = await fetch(`https:/search/auto-load-more?token=${encodeURIComponent(token)}`, {
                     method: 'GET'
                 });
 

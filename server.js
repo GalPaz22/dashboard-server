@@ -1530,12 +1530,13 @@ async function reorderResultsWithGPT(
   alreadyDelivered = [],
   explain = true,
   context,
-  softFilters = null
+  softFilters = null,
+  maxResults = 25
 ) {
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
     );
-    const limitedResults = filtered.slice(0, 20);
+    const limitedResults = filtered.slice(0, maxResults);
   const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
   const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
     
@@ -1705,7 +1706,8 @@ async function reorderImagesWithGPT(
   alreadyDelivered = [],
   explain = true,
   context,
-  softFilters = null
+  softFilters = null,
+  maxResults = 25
 ) {
  try {
    if (!Array.isArray(alreadyDelivered)) {
@@ -1716,12 +1718,12 @@ async function reorderImagesWithGPT(
      (product) => !alreadyDelivered.includes(product._id.toString())
    );
 
-   const limitedResults = filteredResults.slice(0, 25);
+   const limitedResults = filteredResults.slice(0, maxResults);
    const sanitizedQuery = sanitizeQueryForLLM(query);
    const productsWithImages = limitedResults.filter(product => product.image && product.image.trim() !== '');
 
    if (productsWithImages.length === 0) {
-     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters);
+     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
    }
 
    const cacheKey = generateCacheKey(
@@ -1906,12 +1908,12 @@ Focus only on visual elements that match the search intent.`;
      } catch (error) {
        console.error("Error reordering results with Gemini image analysis:", error);
        // Fallback to the non-image reordering function on error
-       return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters);
+       return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
      }
    });
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
-   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters);
+   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
  }
 }
 
@@ -2219,7 +2221,7 @@ app.get("/search/auto-load-more", async (req, res) => {
   const requestId = `auto-load-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
   
-  console.log(`[${requestId}] Auto load-more request - fetching next 40 products`);
+  console.log(`[${requestId}] Auto load-more request`);
   
   if (!token) {
     return res.status(400).json({ 
@@ -2255,8 +2257,15 @@ app.get("/search/auto-load-more", async (req, res) => {
       noHebrewWord,
       syncMode,
       explain,
+      searchLimit: tokenSearchLimit,
       timestamp 
     } = tokenData;
+    
+    // Use searchLimit from token, fallback to 40 for backward compatibility with old tokens
+    const searchLimit = tokenSearchLimit || 40;
+    const vectorLimit = searchLimit;
+    
+    console.log(`[${requestId}] Using search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (from token: ${tokenSearchLimit || 'legacy'})`);
     
     // Check if token is expired (2 minutes)
     const tokenAge = Date.now() - timestamp;
@@ -2488,9 +2497,8 @@ app.get("/search/auto-load-more", async (req, res) => {
       console.log(`[${requestId}] Fallback search found ${newResults.length} new results (without soft filters)`);
     }
     
-    // Take next 40 products
-    const BATCH_SIZE = 40;
-    const nextBatch = newResults.slice(0, BATCH_SIZE);
+    // Take next batch based on user's limit
+    const nextBatch = newResults.slice(0, searchLimit);
     
     // Format results - matching original client response format
     const formattedResults = nextBatch.map((result) => ({
@@ -2518,7 +2526,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     
     // Create token for next batch if there are more results
     const updatedDeliveredIds = [...deliveredIds, ...formattedResults.map(p => p._id)];
-    const hasMore = newResults.length > BATCH_SIZE;
+    const hasMore = newResults.length > searchLimit;
     
     const nextToken = hasMore ? Buffer.from(JSON.stringify({
       query,
@@ -2535,6 +2543,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       noHebrewWord,
       syncMode,
       explain,
+      searchLimit, // Pass along the user's limit
       timestamp: Date.now() // New timestamp for next batch
     })).toString('base64') : null;
     
@@ -3099,9 +3108,9 @@ app.post("/search", async (req, res) => {
           
           // Always send all results to LLM for maximum flexibility
           // The LLM will use soft category context to make informed decisions
-          console.log(`[${requestId}] Sending all ${combinedResults.length} products to LLM for re-ranking with soft category context.`);
+          console.log(`[${requestId}] Sending all ${combinedResults.length} products to LLM for re-ranking (limiting to ${searchLimit} results).`);
           
-          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters);
+          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, searchLimit);
           
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
@@ -3257,9 +3266,8 @@ app.post("/search", async (req, res) => {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Return exactly 20 products for first batch
-    const BATCH_SIZE = 20;
-    const limitedResults = finalResults.slice(0, BATCH_SIZE);
+    // Return products based on user's limit configuration
+    const limitedResults = finalResults.slice(0, searchLimit);
     const executionTime = Date.now() - searchStartTime;
     
     // Debug soft filter matching
@@ -3306,6 +3314,7 @@ app.post("/search", async (req, res) => {
       noHebrewWord,
       syncMode,
       explain,
+      searchLimit, // Include user's limit for subsequent batches
       timestamp: Date.now()
     })).toString('base64');
     
