@@ -297,6 +297,7 @@ async function getStoreConfigByApiKey(apiKey) {
     softCategories: userDoc.credentials?.softCategories || "",
     syncMode: userDoc.syncMode || "text",
     explain: userDoc.explain || false,
+    limit: userDoc.limit || 25, // Search limit from user config, default to 25
   };
 }
 
@@ -2739,20 +2740,20 @@ app.post("/search", async (req, res) => {
   const searchStartTime = Date.now();
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
   
-  const { query, example, noWord, noHebrewWord, context, useImages, modern, limit: userLimit } = req.body;
-  const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain } = req.store;
+  const { query, example, noWord, noHebrewWord, context, useImages, modern } = req.body;
+  const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
   // Default to legacy mode (array only) for backward compatibility
   // Only use modern format (with pagination) if explicitly requested
   const isModernMode = modern === true || modern === 'true';
   const isLegacyMode = !isModernMode;
   
-  // Parse and validate user limit, default to 25 if not provided or invalid
+  // Use limit from user config (via API key), fallback to 25 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 25;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 25;
   const vectorLimit = searchLimit; // Keep them the same for balanced RRF
   
-  console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} ${userLimit ? '(user-specified)' : '(default)'}`);
+  console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (from user config: ${userLimit || 'default'})`);
   
   const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט,ספרדי,איטלקי,צרפתי,פורטוגלי,ארגנטיני,צ'ילה,דרום אפריקה,אוסטרליה";
   const finalSoftCategories = softCategories || defaultSoftCategories;
