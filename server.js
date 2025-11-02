@@ -568,7 +568,8 @@ async function executeOptimizedFilterOnlySearch(
   collection,
   hardFilters,
   softFilters,
-  useOrLogic = false
+  useOrLogic = false,
+  deliveredIds = []
 ) {
   console.log("[FILTER-ONLY] Executing optimized filter-only search");
   
@@ -587,8 +588,15 @@ async function executeOptimizedFilterOnlySearch(
     const executionTime = Date.now() - startTime;
     console.log(`[FILTER-ONLY] Found ${results.length} products in ${executionTime}ms`);
     
+    // Filter out already-delivered products
+    const filteredResults = deliveredIds && deliveredIds.length > 0
+      ? results.filter(doc => !deliveredIds.includes(doc._id.toString()))
+      : results;
+    
+    console.log(`[FILTER-ONLY] After filtering delivered: ${filteredResults.length} products`);
+    
     // Add simple scoring for consistent ordering with multi-category boosting
-    const scoredResults = results.map((doc, index) => {
+    const scoredResults = filteredResults.map((doc, index) => {
       const softCategoryMatches = softFilters && softFilters.softCategory ? 
         calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory) : 0;
       
@@ -1995,7 +2003,8 @@ async function executeExplicitSoftCategorySearch(
   vectorLimit,
   useOrLogic = false,
   isImageModeWithSoftCategories = false,
-  originalCleanedText = null
+  originalCleanedText = null,
+  deliveredIds = []
 ) {
   console.log("Executing explicit soft category search");
   
@@ -2201,7 +2210,16 @@ async function executeExplicitSoftCategorySearch(
   
   console.log(`Total combined results: ${finalCombinedResults.length} (${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
   
-  return finalCombinedResults;
+  // Filter out already-delivered products
+  const filteredResults = deliveredIds && deliveredIds.length > 0
+    ? finalCombinedResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
+    : finalCombinedResults;
+  
+  if (deliveredIds && deliveredIds.length > 0) {
+    console.log(`Filtered out ${finalCombinedResults.length - filteredResults.length} already-delivered products`);
+  }
+  
+  return filteredResults;
 }
 
 /* =========================================================== *\
@@ -2335,7 +2353,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         collection,
         hardFilters,
         softFilters,
-        useOrLogic
+        useOrLogic,
+        deliveredIds
       );
     } else if (hasSoftFilters) {
       console.log(`[${requestId}] Using soft category search`);
@@ -2350,7 +2369,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         vectorLimit,
         useOrLogic,
         syncMode === 'image',
-        cleanedText
+        cleanedText,
+        deliveredIds
       );
       } else {
         console.log(`[${requestId}] Using standard search`);
