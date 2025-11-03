@@ -330,10 +330,7 @@
         </div>
 
         <div class="search-box">
-            <div class="form-group">
-                <label for="apiKey">API Key</label>
-                <input type="password" id="apiKey" placeholder="Enter your API key">
-            </div>
+    
 
             <div class="form-group">
                 <label for="searchQuery">Search Query</label>
@@ -386,7 +383,7 @@
         let currentBatch = 1;
 
         async function performSearch() {
-            const apiKey = document.getElementById('apiKey').value.trim();
+            const apiKey = 'fe68c9a09570036a82b98534rggggf45'
             const query = document.getElementById('searchQuery').value.trim();
 
             if (!apiKey) {
