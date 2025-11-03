@@ -1312,7 +1312,7 @@ ${example}.`;
                   items: { type: Type.STRING }
                 }
               ],
-              description: "Hard filter - Category from the provided list only"
+              description: "Category from the provided list only"
             },
             type: {
               oneOf: [
