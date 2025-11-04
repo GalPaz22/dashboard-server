@@ -569,7 +569,9 @@ async function executeOptimizedFilterOnlySearch(
   hardFilters,
   softFilters,
   useOrLogic = false,
-  deliveredIds = []
+  deliveredIds = [],
+  query = '',
+  cleanedText = ''
 ) {
   console.log("[FILTER-ONLY] Executing optimized filter-only search");
   
@@ -600,6 +602,9 @@ async function executeOptimizedFilterOnlySearch(
       const softCategoryMatches = softFilters && softFilters.softCategory ? 
         calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory) : 0;
       
+      // Calculate text match bonus if query is provided
+      const exactMatchBonus = query ? getExactMatchBonus(doc.name, query, cleanedText) : 0;
+      
              // Base score with exponential boost for multiple soft category matches
        const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(3, softCategoryMatches) * 2000 : 0;
       
@@ -608,6 +613,7 @@ async function executeOptimizedFilterOnlySearch(
         rrf_score: 10000 - index + multiCategoryBoost, // High base score with multi-category boost
         softFilterMatch: !!(softFilters && softFilters.softCategory),
         softCategoryMatches: softCategoryMatches,
+        exactMatchBonus: exactMatchBonus, // Store for sorting
         simpleSearch: true,
         filterOnly: true
       };
@@ -1258,20 +1264,32 @@ Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - You MUST ONLY select from this list: ${categories}. 
-5. type - You MUST ONLY select from this list: ${types}. You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list. do not ever make up a type that is not in the list.
-6. softCategory - You MUST ONLY select from this list: ${softCategories}. You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta", regional references to countries/origins in the list). you can extract multiple soft categories by separating them with a comma.  
+4. category - MUST extract if the query mentions ANY of these categories: ${categories}
+   - Look for exact matches or close variations of category names
+   - Categories are PRIMARY product types (e.g., wine types, spirits)
+   - If you see words like "יין אדום" (red wine), "יין לבן" (white wine), "וויסקי" (whiskey), "וודקה" (vodka) - extract them!
+   - Match partial words: "אדום" matches "יין אדום", "לבן" matches "יין לבן"
+   - ALWAYS check if any word in the query appears in the category list
+5. type - MUST ONLY select from this list: ${types}. 
+   - Types are SECONDARY characteristics (e.g., dry, sweet, sparkling)
+   - You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list
+   - Do not ever make up a type that is not in the list
+6. softCategory - MUST ONLY select from this list: ${softCategories}
+   - Extract contextual preferences (e.g., origins, food pairings, occasions)
+   - You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta")
+   - You can extract multiple soft categories by separating them with a comma
 
 INTELLIGENT MAPPING RULES:
-- You may interpret and map related terms to items in the provided lists
+- For categories: Be LIBERAL - if any word in the query matches any word in a category name, extract it
+- For types: Be SMART - map synonyms and related concepts to list items
+- For softCategories: Be CONTEXTUAL - infer from food pairings, occasions, origins
 - Geographic regions can map to countries if the country is in the list
-- Synonyms and related concepts can map to list items
 - BUT you must NEVER extract anything not represented in the provided lists
-- If no reasonable mapping exists to the provided lists, omit that filter
 
 CRITICAL DISTINCTION:
-- category/type: Deal-breaker filters (must have) - map intelligently to exact list items
-- softCategory: Preference filters (nice to have, boosts relevance) - map intelligently to exact list items
+- category: PRIMARY product type (wine color, spirit type) - ALWAYS extract if mentioned
+- type: SECONDARY characteristic (flavor profile, style) - map intelligently
+- softCategory: CONTEXTUAL preference (origin, pairing, occasion) - infer from context
 
 For softCategory, look for contextual hints and map them intelligently:
 - Geographic references (regions, cities) → countries/origins in the list
@@ -1312,7 +1330,7 @@ ${example}.`;
                   items: { type: Type.STRING }
                 }
               ],
-              description: "Category from the provided list only"
+              description: "PRIMARY product type - extract if ANY category name or partial match appears in query (e.g., 'אדום' → 'יין אדום', 'לבן' → 'יין לבן', 'whiskey' → 'whiskey')"
             },
             type: {
               oneOf: [
@@ -1357,6 +1375,17 @@ ${example}.`;
     content = content.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
     
     const filters = JSON.parse(content);
+    
+    // Log extraction results for debugging
+    console.log(`[FILTER EXTRACTION] Query: "${query}"`);
+    console.log(`[FILTER EXTRACTION] Categories available: ${categories}`);
+    console.log(`[FILTER EXTRACTION] Extracted filters:`, JSON.stringify(filters));
+    if (filters.category) {
+      console.log(`[FILTER EXTRACTION] ✅ Category extracted: ${JSON.stringify(filters.category)}`);
+    } else {
+      console.log(`[FILTER EXTRACTION] ⚠️ No category extracted - check if query contains: ${categories}`);
+    }
+    
     return filters;
   } catch (error) {
     console.error("Error extracting enhanced filters:", error);
@@ -2085,7 +2114,8 @@ async function executeExplicitSoftCategorySearch(
         ...data.doc,
         rrf_score: baseScore + 10000 + multiCategoryBoost, // Base boost + multi-category boost
         softFilterMatch: true,
-        softCategoryMatches: softCategoryMatches
+        softCategoryMatches: softCategoryMatches,
+        exactMatchBonus: exactMatchBonus // Store for sorting
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -2112,7 +2142,8 @@ async function executeExplicitSoftCategorySearch(
         ...data.doc,
         rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, 0),
         softFilterMatch: false,
-        softCategoryMatches: 0
+        softCategoryMatches: 0,
+        exactMatchBonus: exactMatchBonus // Store for sorting
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -2195,6 +2226,7 @@ async function executeExplicitSoftCategorySearch(
         rrf_score: 100 + exactMatchBonus + 10000 + multiCategoryBoost, // Base boost + multi-category boost
         softFilterMatch: true,
         softCategoryMatches: softCategoryMatches,
+        exactMatchBonus: exactMatchBonus, // Store for sorting
         sweepResult: true // Mark as sweep result for debugging
       };
     });
@@ -2354,7 +2386,9 @@ app.get("/search/auto-load-more", async (req, res) => {
         hardFilters,
         softFilters,
         useOrLogic,
-        deliveredIds
+        deliveredIds,
+        query,
+        cleanedText
       );
     } else if (hasSoftFilters) {
       console.log(`[${requestId}] Using soft category search`);
@@ -2418,7 +2452,8 @@ app.get("/search/auto-load-more", async (req, res) => {
               0
             ),
             softFilterMatch: false,
-            softCategoryMatches: 0
+            softCategoryMatches: 0,
+            exactMatchBonus: exactMatchBonus // Store for sorting
           };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -2431,6 +2466,23 @@ app.get("/search/auto-load-more", async (req, res) => {
         const bMatches = b.softCategoryMatches || 0;
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
+        
+        // For simple queries: prioritize text keyword matches first
+        const aHasTextMatch = (a.exactMatchBonus || 0) > 0;
+        const bHasTextMatch = (b.exactMatchBonus || 0) > 0;
+        
+        // Text matches get highest priority for simple queries
+        if (aHasTextMatch !== bHasTextMatch) {
+          return aHasTextMatch ? -1 : 1;
+        }
+        
+        // If both have text matches, sort by text match strength first
+        if (aHasTextMatch && bHasTextMatch) {
+          const textMatchDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+          if (textMatchDiff !== 0) {
+            return textMatchDiff;
+          }
+        }
         
         const aIsMultiCategory = aMatches >= 2;
         const bIsMultiCategory = bMatches >= 2;
@@ -2506,7 +2558,8 @@ app.get("/search/auto-load-more", async (req, res) => {
               0
             ),
             softFilterMatch: false,
-            softCategoryMatches: 0
+            softCategoryMatches: 0,
+            exactMatchBonus: exactMatchBonus // Store for sorting
           };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -3018,7 +3071,10 @@ app.post("/search", async (req, res) => {
           collection,
           hardFilters,
           softFilters,
-          useOrLogic
+          useOrLogic,
+          [],
+          query,
+          cleanedText
         );
         
         const filterExecutionTime = Date.now() - filterStartTime;
@@ -3111,7 +3167,8 @@ app.post("/search", async (req, res) => {
               ...doc, 
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
               softFilterMatch: false,
-              softCategoryMatches: 0
+              softCategoryMatches: 0,
+              exactMatchBonus: exactMatchBonus // Store for sorting
             };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -3159,9 +3216,14 @@ app.post("/search", async (req, res) => {
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
 
-    // BINARY SORTING: Soft category matches ALWAYS first, regardless of score
+    // BINARY SORTING: For simple queries, text keyword matches have highest priority
+    // For complex queries, soft category matches have priority
     if (hasSoftFilters) {
-      console.log(`[${requestId}] Applying binary soft category sorting`);
+      if (isSimpleResult) {
+        console.log(`[${requestId}] Applying text-match-first sorting for simple query`);
+      } else {
+        console.log(`[${requestId}] Applying binary soft category sorting for complex query`);
+      }
       
       combinedResults.sort((a, b) => {
         const aMatches = a.softCategoryMatches || 0;
@@ -3169,7 +3231,26 @@ app.post("/search", async (req, res) => {
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
         
-        // ABSOLUTE PRIORITY: Multi-category products (2+ matches) always first
+        // For simple queries: text keyword matches have ABSOLUTE PRIORITY
+        if (isSimpleResult) {
+          const aHasTextMatch = (a.exactMatchBonus || 0) > 0;
+          const bHasTextMatch = (b.exactMatchBonus || 0) > 0;
+          
+          // Text matches always come first for simple queries
+          if (aHasTextMatch !== bHasTextMatch) {
+            return aHasTextMatch ? -1 : 1;
+          }
+          
+          // If both have text matches, sort by text match strength
+          if (aHasTextMatch && bHasTextMatch) {
+            const textMatchDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+            if (textMatchDiff !== 0) {
+              return textMatchDiff;
+            }
+          }
+        }
+        
+        // ABSOLUTE PRIORITY: Multi-category products (2+ matches) always first (after text matches for simple queries)
         const aIsMultiCategory = aMatches >= 2;
         const bIsMultiCategory = bMatches >= 2;
         
@@ -3197,17 +3278,23 @@ app.post("/search", async (req, res) => {
       
       const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2);
       const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1);
+      const textMatchProducts = combinedResults.filter(r => (r.exactMatchBonus || 0) > 0);
       
+      if (isSimpleResult) {
+        console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - HIGHEST PRIORITY for simple queries`);
+      }
       console.log(`[${requestId}] Multi-category products (2+ matches): ${multiCategoryProducts.length} - ABSOLUTE PRIORITY`);
       console.log(`[${requestId}] Single-category products: ${singleCategoryProducts.length}`);
       
       const topResults = combinedResults.slice(0, 5);
-      console.log(`[${requestId}] Top 5 results after multi-category priority sorting:`, 
+      console.log(`[${requestId}] Top 5 results after sorting:`, 
         topResults.map(p => ({
           name: p.name,
+          textMatchBonus: p.exactMatchBonus || 0,
           softCategoryMatches: p.softCategoryMatches || 0,
           rrf_score: p.rrf_score,
-          isMultiCategory: (p.softCategoryMatches || 0) >= 2
+          isMultiCategory: (p.softCategoryMatches || 0) >= 2,
+          hasTextMatch: (p.exactMatchBonus || 0) > 0
         }))
       );
     }
