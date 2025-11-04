@@ -1481,6 +1481,7 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
 }
 
 // Function to detect exact text matches
+// Returns much higher bonuses to ensure text matches rank above soft category matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
   if (!productName || !query) return 0;
   
@@ -1488,27 +1489,32 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
   const queryLower = query.toLowerCase().trim();
   const cleanedQueryLower = cleanedQuery ? cleanedQuery.toLowerCase().trim() : '';
   
+  // Exact match - highest priority (boosted significantly)
   if (productNameLower === queryLower) {
-    return 1000;
+    return 50000; // Much higher than soft category boosts
   }
   
+  // Cleaned query exact match
   if (cleanedQueryLower && productNameLower === cleanedQueryLower) {
-    return 900;
+    return 45000;
   }
   
+  // Product name contains full query
   if (productNameLower.includes(queryLower)) {
-    return 500;
+    return 30000; // High boost for text matches
   }
   
+  // Product name contains cleaned query
   if (cleanedQueryLower && productNameLower.includes(cleanedQueryLower)) {
-    return 400;
+    return 25000;
   }
   
+  // Multi-word phrase match
   const queryWords = queryLower.split(/\s+/);
   if (queryWords.length > 1) {
     const queryPhrase = queryWords.join(' ');
     if (productNameLower.includes(queryPhrase)) {
-      return 300;
+      return 20000;
     }
   }
   
@@ -3243,10 +3249,11 @@ app.post("/search", async (req, res) => {
 
     // BINARY SORTING: For simple queries, text keyword matches have highest priority
     // For complex queries, soft category matches have priority
-    if (hasSoftFilters) {
+    // Also apply text-match prioritization for simple queries even without soft filters
+    if (hasSoftFilters || isSimpleResult) {
       if (isSimpleResult) {
         console.log(`[${requestId}] Applying text-match-first sorting for simple query`);
-      } else {
+      } else if (hasSoftFilters) {
         console.log(`[${requestId}] Applying binary soft category sorting for complex query`);
       }
       
@@ -3256,22 +3263,30 @@ app.post("/search", async (req, res) => {
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
         
-        // For simple queries: text keyword matches have ABSOLUTE PRIORITY
+        // For simple queries: text keyword matches have ABSOLUTE PRIORITY - regardless of soft categories
         if (isSimpleResult) {
           const aHasTextMatch = (a.exactMatchBonus || 0) > 0;
           const bHasTextMatch = (b.exactMatchBonus || 0) > 0;
           
-          // Text matches always come first for simple queries
+          // Text matches ALWAYS come first for simple queries, even over multi-category products
           if (aHasTextMatch !== bHasTextMatch) {
             return aHasTextMatch ? -1 : 1;
           }
           
-          // If both have text matches, sort by text match strength
+          // If both have text matches, sort by text match strength FIRST
           if (aHasTextMatch && bHasTextMatch) {
             const textMatchDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
             if (textMatchDiff !== 0) {
               return textMatchDiff;
             }
+            // Within same text match strength, still prioritize by score
+            return b.rrf_score - a.rrf_score;
+          }
+          
+          // If neither has text match, continue with soft category logic below (if applicable)
+          // For simple queries without soft filters, just sort by score
+          if (!hasSoftFilters) {
+            return b.rrf_score - a.rrf_score;
           }
         }
         
@@ -3429,17 +3444,28 @@ app.post("/search", async (req, res) => {
 
     // Create pagination metadata
     const totalAvailable = finalResults.length;
+    const hasMore = totalAvailable > limitedResults.length;
+    
+    // Create pagination token for manual load-more (not auto-load)
+    const nextToken = hasMore ? Buffer.from(JSON.stringify({
+      query,
+      filters: enhancedFilters,
+      offset: limitedResults.length,
+      timestamp: Date.now()
+    })).toString('base64') : null;
     
     // Return products array without per-product metadata (for backward compatibility)
     const response = limitedResults;
     
-    // Send response with pagination metadata (auto-load-more removed)
+    // Send response with pagination metadata (manual load-more enabled, auto-load-more disabled)
     const searchResponse = {
       products: response,
       pagination: {
         totalAvailable: totalAvailable,
         returned: response.length,
         batchNumber: 1,
+        hasMore: hasMore,
+        nextToken: nextToken, // Token for manual load-more
         autoLoadMore: false, // Auto-load-more disabled
         secondBatchToken: null // No auto-load token
       },
@@ -3457,16 +3483,28 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] First product sample:`, JSON.stringify(searchResponse.products[0], null, 2));
     }
     
+    // Cache the full results for load-more pagination
+    if (nextToken && redisClient && redisReady) {
+      try {
+        const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(enhancedFilters));
+        // Cache all results (not just limited ones) for pagination
+        await redisClient.setEx(cacheKey, 300, JSON.stringify(finalResults)); // 5 minute cache
+        console.log(`[${requestId}] Cached ${finalResults.length} results for load-more pagination`);
+      } catch (error) {
+        console.error(`[${requestId}] Error caching results for pagination:`, error.message);
+      }
+    }
+    
     // Return legacy format (array only) by default for backward compatibility
     // Return modern format (with pagination) only if explicitly requested
     if (isLegacyMode) {
       console.log(`[${requestId}] ✅ Returning LEGACY format (array only) - backward compatible`);
       
       // Add pagination info to headers for clients that can use it
-      if (searchResponse.pagination && searchResponse.pagination.secondBatchToken) {
-        res.setHeader('X-Next-Batch-Token', searchResponse.pagination.secondBatchToken);
-        res.setHeader('X-Has-More', 'true');
-        console.log(`[${requestId}] --> Sent X-Next-Batch-Token header for subsequent calls.`);
+      if (searchResponse.pagination && searchResponse.pagination.nextToken) {
+        res.setHeader('X-Next-Token', searchResponse.pagination.nextToken);
+        res.setHeader('X-Has-More', searchResponse.pagination.hasMore ? 'true' : 'false');
+        console.log(`[${requestId}] --> Sent X-Next-Token header for manual load-more.`);
       } else {
         res.setHeader('X-Has-More', 'false');
       }
