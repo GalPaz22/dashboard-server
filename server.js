@@ -1301,7 +1301,7 @@ Return the extracted filters in JSON format. Only extract if you can map to the 
 ${example}.`;
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-2.5-flash-lite",
       contents: [{ text: query }],
       config: {
         systemInstruction,
