@@ -321,7 +321,6 @@ app.use((req, res, next) => {
   if (req.path.startsWith('/test-') || 
       req.path === '/health' || 
       req.path.startsWith('/cache/') ||
-      req.path === '/search/auto-load-more' ||
       req.path === '/search/load-more') {
     return next();
   }
@@ -2263,9 +2262,11 @@ async function executeExplicitSoftCategorySearch(
 \* =========================================================== */
 
 /* =========================================================== *\
-   AUTO LOAD MORE ENDPOINT (Second Batch)
+   AUTO LOAD MORE ENDPOINT (Second Batch) - DISABLED
 \* =========================================================== */
 
+// Auto-load-more functionality removed - endpoint disabled
+/*
 app.get("/search/auto-load-more", async (req, res) => {
   const { token } = req.query;
   const requestId = `auto-load-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
@@ -2660,6 +2661,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     });
   }
 });
+*/
 
 app.get("/search/load-more", async (req, res) => {
   const { token, limit = 20 } = req.query;
@@ -2917,14 +2919,26 @@ app.post("/search", async (req, res) => {
 
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     
-    // First extract filters to know what hard filter words to remove
+    // First extract filters using BOTH original and translated query for better matching
+    // Use translated query primarily since categories are likely in Hebrew
+    const queryForExtraction = translatedQuery || query;
     const enhancedFilters = categories
-      ? await extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context)
+      ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context)
       : {};
 
+    // Store original extracted values before clearing (for debugging/logging)
+    let originalCategory = null;
+    if (enhancedFilters && enhancedFilters.category) {
+      originalCategory = enhancedFilters.category;
+    }
+
     // For simple queries: only allow type and softCategory; drop category and price filters
+    // BUT keep the filters for logging purposes to see what was extracted
     if (isSimpleResult) {
       if (enhancedFilters) {
+        if (originalCategory) {
+          console.log(`[${requestId}] Simple query: Category "${originalCategory}" extracted but will be ignored for filtering`);
+        }
         enhancedFilters.category = undefined;
         enhancedFilters.price = undefined;
         enhancedFilters.minPrice = undefined;
@@ -2976,8 +2990,19 @@ app.post("/search", async (req, res) => {
         return res.status(500).json({ error: "Error generating query embedding" });
     }
 
-    if (Object.keys(enhancedFilters).length > 0) {
-      console.log(`[${requestId}] Extracted filters:`, JSON.stringify(enhancedFilters));
+    // Log extracted filters BEFORE they might be cleared for simple queries
+    // Create a copy for logging that shows what was actually extracted
+    const filtersBeforeClearing = { ...enhancedFilters };
+    if (isSimpleResult && enhancedFilters) {
+      // Restore cleared values for logging
+      if (enhancedFilters.category === undefined && originalCategory) {
+        filtersBeforeClearing.category = originalCategory;
+      }
+    }
+    
+    if (Object.keys(filtersBeforeClearing).length > 0) {
+      console.log(`[${requestId}] Extracted filters (before simple query clearing):`, JSON.stringify(filtersBeforeClearing));
+      console.log(`[${requestId}] Final filters (after simple query processing):`, JSON.stringify(enhancedFilters));
       
       // Log hard categories (category + type)
       const hardCategories = [];
@@ -3405,40 +3430,18 @@ app.post("/search", async (req, res) => {
     // Create pagination metadata
     const totalAvailable = finalResults.length;
     
-    // ALWAYS create token for auto-load-more (second batch) - we'll do a fresh search
-    const secondBatchToken = Buffer.from(JSON.stringify({
-      query,
-      filters: enhancedFilters,
-      deliveredIds: limitedResults.map(p => p._id), // Track delivered IDs to exclude them
-      batchNumber: 2,
-      dbName,
-      collectionName,
-      context,
-      categories,
-      types,
-      softCategories: finalSoftCategories,
-      noWord,
-      noHebrewWord,
-      syncMode,
-      explain,
-      searchLimit, // Include user's limit for subsequent batches
-      timestamp: Date.now()
-    })).toString('base64');
-    
-    console.log(`[${requestId}] Auto-load ALWAYS enabled (will perform fresh search for batch 2)`);
-    
     // Return products array without per-product metadata (for backward compatibility)
     const response = limitedResults;
     
-    // Send response with pagination metadata and auto-load-more info
+    // Send response with pagination metadata (auto-load-more removed)
     const searchResponse = {
       products: response,
       pagination: {
         totalAvailable: totalAvailable,
         returned: response.length,
         batchNumber: 1,
-        autoLoadMore: true, // ALWAYS enable auto-load (batch 2 will do fresh search)
-        secondBatchToken: secondBatchToken // Token for automatic second batch
+        autoLoadMore: false, // Auto-load-more disabled
+        secondBatchToken: null // No auto-load token
       },
       metadata: {
         query: query,
