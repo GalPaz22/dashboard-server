@@ -1377,9 +1377,16 @@ ${example}.`;
     const filters = JSON.parse(content);
     
     // Validate that all extracted values exist in the provided lists
-    const categoriesList = categories ? categories.split(',').map(c => c.trim()) : [];
-    const typesList = types ? types.split(',').map(t => t.trim()) : [];
-    const softCategoriesList = softCategories ? softCategories.split(',').map(sc => sc.trim()) : [];
+    // Handle both string (comma-separated) and array formats
+    const categoriesList = categories 
+      ? (Array.isArray(categories) ? categories : categories.split(',').map(c => c.trim()))
+      : [];
+    const typesList = types 
+      ? (Array.isArray(types) ? types : types.split(',').map(t => t.trim()))
+      : [];
+    const softCategoriesList = softCategories 
+      ? (Array.isArray(softCategories) ? softCategories : softCategories.split(',').map(sc => sc.trim()))
+      : [];
     
     // Validate category - STRICT: must exist exactly in list
     if (filters.category) {
