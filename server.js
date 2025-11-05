@@ -1257,46 +1257,47 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
   try {
     const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
 
-CRITICAL: You can ONLY extract filters that match the provided lists, but you may use intelligent interpretation to map related terms.
+CRITICAL RULE: ALL extracted values MUST exist in the provided lists. NEVER extract values that are not in the lists.
 
 Extract the following filters from the query if they exist:
 1. price (exact price, indicated by the words 'ב' or 'באיזור ה-').
 2. minPrice (minimum price, indicated by 'החל מ' or 'מ').
 3. maxPrice (maximum price, indicated by the word 'עד').
-4. category - MUST extract if the query mentions ANY of these categories: ${categories}
-   - Look for exact matches or close variations of category names
-   - Categories are PRIMARY product types (e.g., wine types, spirits)
-   - If you see words like "יין אדום" (red wine), "יין לבן" (white wine), "וויסקי" (whiskey), "וודקה" (vodka) - extract them!
-   - Match partial words: "אדום" matches "יין אדום", "לבן" matches "יין לבן"
-   - ALWAYS check if any word in the query appears in the category list
-5. type - MUST ONLY select from this list: ${types}. 
+4. category - STRICT MATCHING REQUIRED. Available categories: ${categories}
+   - You MUST find a SOLID MATCH between the query and an existing category
+
+   - Look for exact or near-exact matches: "יין אדום" matches "יין אדום", "red wine" matches "יין אדום" if translated
+   - Partial word matching is allowed ONLY if it clearly identifies a unique category: "אדום" can match "יין אדום" if unambiguous
+   - DO NOT extract if the match is weak or ambiguous
+   - The extracted category MUST be EXACTLY as it appears in the list: ${categories}
+   - If no solid match exists, do NOT extract a category
+5. type - MUST ONLY select from this exact list: ${types}
    - Types are SECONDARY characteristics (e.g., dry, sweet, sparkling)
-   - You may intelligently map related terms (e.g., synonyms, related concepts) to items in this exact list
+   - The extracted type MUST exist EXACTLY in the provided list
+   - You may map synonyms intelligently (e.g., "dry" → "dry" if in list), but the final value MUST be in the list
    - Do not ever make up a type that is not in the list
-6. softCategory - MUST ONLY select from this list: ${softCategories}
+6. softCategory - FLEXIBLE MATCHING ALLOWED. Available soft categories: ${softCategories}
    - Extract contextual preferences (e.g., origins, food pairings, occasions)
-   - You may intelligently map related terms (e.g., "Toscany" → "Italy", "pasta dish" → "pasta")
+   - You have MORE FLEXIBILITY here - you can intelligently map related terms
+   - Examples: "Toscany" → "Italy" (if Italy is in list), "pasta dish" → "pasta" (if pasta is in list)
+   - Geographic regions can map to countries if the country is in the list
+   - Food pairing mentions can map to items in the list
+   - Occasion mentions can map to items in the list
+   - BUT: The final extracted value MUST exist in the provided list: ${softCategories}
    - You can extract multiple soft categories by separating them with a comma
 
-INTELLIGENT MAPPING RULES:
-- For categories: Be LIBERAL - if any word in the query matches any word in a category name, extract it
-- For types: Be SMART - map synonyms and related concepts to list items
-- For softCategories: Be CONTEXTUAL - infer from food pairings, occasions, origins
-- Geographic regions can map to countries if the country is in the list
-- BUT you must NEVER extract anything not represented in the provided lists
+MATCHING STRICTNESS LEVELS:
+- category: STRICT - Requires solid, clear match. Must be exact or near-exact match with existing categories.
+- type: STRICT - Must exist exactly in the list, but synonyms can be mapped intelligently.
+- softCategory: FLEXIBLE - More play allowed, but final value must exist in the list.
 
-CRITICAL DISTINCTION:
-- category: PRIMARY product type (wine color, spirit type) - ALWAYS extract if mentioned
-- type: SECONDARY characteristic (flavor profile, style) - map intelligently
-- softCategory: CONTEXTUAL preference (origin, pairing, occasion) - infer from context
+CRITICAL VALIDATION:
+- Before extracting ANY value, verify it exists in the provided list
+- For category: Only extract if there's a solid, unambiguous match
+- For softCategory: You can be more creative with mapping, but the result must be in the list
+- If you cannot find a match in the lists, do NOT extract that filter
 
-For softCategory, look for contextual hints and map them intelligently:
-- Geographic references (regions, cities) → countries/origins in the list
-- Food pairing mentions → items in the list
-- Occasion mentions → items in the list
-- Related concepts → items in the list
-
-Return the extracted filters in JSON format. Only extract if you can map to the provided lists.
+Return the extracted filters in JSON format. Only extract values that exist in the provided lists.
 ${example}.`;
 
     const response = await genAI.models.generateContent({
@@ -1329,7 +1330,7 @@ ${example}.`;
                   items: { type: Type.STRING }
                 }
               ],
-              description: "PRIMARY product type - extract if ANY category name or partial match appears in query (e.g., 'אדום' → 'יין אדום', 'לבן' → 'יין לבן', 'whiskey' → 'whiskey')"
+              description: `PRIMARY product type - STRICT MATCHING REQUIRED. Must be a solid match with an existing category from: ${categories}. Only extract if there's a clear, unambiguous match. The value MUST exist exactly in the provided list.`
             },
             type: {
               oneOf: [
@@ -1339,7 +1340,7 @@ ${example}.`;
                   items: { type: Type.STRING }
                 }
               ],
-              description: "Hard filter - Type from the provided list only"
+              description: `Hard filter - Type MUST exist exactly in the provided list: ${types}. You may map synonyms intelligently, but the final value must be in the list.`
             },
             softCategory: {
               oneOf: [
@@ -1349,7 +1350,7 @@ ${example}.`;
                   items: { type: Type.STRING }
                 }
               ],
-              description: "Soft filter - Categories that boost relevance but don't exclude others"
+              description: `Soft filter - FLEXIBLE MATCHING ALLOWED. Available soft categories: ${softCategories}. You can intelligently map related terms (e.g., regions to countries, food mentions to pairings), but the final extracted value MUST exist in the provided list. Multiple values allowed, separated by comma.`
             }
           }
         }
@@ -1375,10 +1376,63 @@ ${example}.`;
     
     const filters = JSON.parse(content);
     
+    // Validate that all extracted values exist in the provided lists
+    const categoriesList = categories ? categories.split(',').map(c => c.trim()) : [];
+    const typesList = types ? types.split(',').map(t => t.trim()) : [];
+    const softCategoriesList = softCategories ? softCategories.split(',').map(sc => sc.trim()) : [];
+    
+    // Validate category - STRICT: must exist exactly in list
+    if (filters.category) {
+      const categoryArray = Array.isArray(filters.category) ? filters.category : [filters.category];
+      const validCategories = categoryArray.filter(cat => {
+        const trimmed = cat.trim();
+        return categoriesList.some(listCat => listCat.toLowerCase() === trimmed.toLowerCase());
+      });
+      
+      if (validCategories.length === 0) {
+        console.log(`[FILTER EXTRACTION] ⚠️ Invalid category extracted: ${JSON.stringify(filters.category)} - not in list: ${categories}`);
+        filters.category = undefined;
+      } else {
+        filters.category = validCategories.length === 1 ? validCategories[0] : validCategories;
+      }
+    }
+    
+    // Validate type - STRICT: must exist exactly in list
+    if (filters.type) {
+      const typeArray = Array.isArray(filters.type) ? filters.type : [filters.type];
+      const validTypes = typeArray.filter(typ => {
+        const trimmed = typ.trim();
+        return typesList.some(listType => listType.toLowerCase() === trimmed.toLowerCase());
+      });
+      
+      if (validTypes.length === 0) {
+        console.log(`[FILTER EXTRACTION] ⚠️ Invalid type extracted: ${JSON.stringify(filters.type)} - not in list: ${types}`);
+        filters.type = undefined;
+      } else {
+        filters.type = validTypes.length === 1 ? validTypes[0] : validTypes;
+      }
+    }
+    
+    // Validate softCategory - FLEXIBLE: must exist in list (but mapping is allowed)
+    if (filters.softCategory) {
+      const softCategoryArray = Array.isArray(filters.softCategory) ? filters.softCategory : [filters.softCategory];
+      const validSoftCategories = softCategoryArray.filter(sc => {
+        const trimmed = sc.trim();
+        return softCategoriesList.some(listSC => listSC.toLowerCase() === trimmed.toLowerCase());
+      });
+      
+      if (validSoftCategories.length === 0) {
+        console.log(`[FILTER EXTRACTION] ⚠️ Invalid softCategory extracted: ${JSON.stringify(filters.softCategory)} - not in list: ${softCategories}`);
+        filters.softCategory = undefined;
+      } else {
+        filters.softCategory = validSoftCategories.length === 1 ? validSoftCategories[0] : validSoftCategories;
+      }
+    }
+    
     // Log extraction results for debugging
     console.log(`[FILTER EXTRACTION] Query: "${query}"`);
     console.log(`[FILTER EXTRACTION] Categories available: ${categories}`);
-    console.log(`[FILTER EXTRACTION] Extracted filters:`, JSON.stringify(filters));
+    console.log(`[FILTER EXTRACTION] Extracted filters (after validation):`, JSON.stringify(filters));
     if (filters.category) {
       console.log(`[FILTER EXTRACTION] ✅ Category extracted: ${JSON.stringify(filters.category)}`);
     } else {
