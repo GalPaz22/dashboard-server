@@ -1376,65 +1376,41 @@ ${example}.`;
     
     const filters = JSON.parse(content);
     
-    // Validate that all extracted values exist in the provided lists
-    // Handle both string (comma-separated) and array formats
-    const categoriesList = categories 
-      ? (Array.isArray(categories) ? categories : categories.split(',').map(c => c.trim()))
-      : [];
-    const typesList = types 
-      ? (Array.isArray(types) ? types : types.split(',').map(t => t.trim()))
-      : [];
-    const softCategoriesList = softCategories 
-      ? (Array.isArray(softCategories) ? softCategories : softCategories.split(',').map(sc => sc.trim()))
-      : [];
-    
-    // Validate category - STRICT: must exist exactly in list
-    if (filters.category) {
-      const categoryArray = Array.isArray(filters.category) ? filters.category : [filters.category];
-      const validCategories = categoryArray.filter(cat => {
-        const trimmed = cat.trim();
-        return categoriesList.some(listCat => listCat.toLowerCase() === trimmed.toLowerCase());
-      });
+    // Helper to normalize string or array lists into a clean array
+    const normalizeList = (list) => {
+      if (!list) return [];
+      const arr = Array.isArray(list) ? list : String(list).split(',');
+      return arr.map(item => String(item).trim());
+    };
+
+    const categoriesList = normalizeList(categories);
+    const typesList = normalizeList(types);
+    const softCategoriesList = normalizeList(softCategories);
+
+    // Helper to validate extracted values against a list
+    const validateFilter = (values, list, name) => {
+      if (!values) return undefined;
+      const valueArr = Array.isArray(values) ? values : [values];
       
-      if (validCategories.length === 0) {
-        console.log(`[FILTER EXTRACTION] ⚠️ Invalid category extracted: ${JSON.stringify(filters.category)} - not in list: ${categories}`);
-        filters.category = undefined;
+      const validValues = valueArr
+        .map(v => String(v).trim())
+        .filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
+
+      if (validValues.length > 0) {
+        // Return original casing from the list for consistency
+        const matchedValues = validValues.map(v => {
+          return list.find(l => l.toLowerCase() === v.toLowerCase());
+        });
+        return matchedValues.length === 1 ? matchedValues[0] : matchedValues;
       } else {
-        filters.category = validCategories.length === 1 ? validCategories[0] : validCategories;
+        console.log(`[FILTER VALIDATION] ⚠️ Invalid ${name} extracted: ${JSON.stringify(values)} - not in list.`);
+        return undefined;
       }
-    }
-    
-    // Validate type - STRICT: must exist exactly in list
-    if (filters.type) {
-      const typeArray = Array.isArray(filters.type) ? filters.type : [filters.type];
-      const validTypes = typeArray.filter(typ => {
-        const trimmed = typ.trim();
-        return typesList.some(listType => listType.toLowerCase() === trimmed.toLowerCase());
-      });
-      
-      if (validTypes.length === 0) {
-        console.log(`[FILTER EXTRACTION] ⚠️ Invalid type extracted: ${JSON.stringify(filters.type)} - not in list: ${types}`);
-        filters.type = undefined;
-      } else {
-        filters.type = validTypes.length === 1 ? validTypes[0] : validTypes;
-      }
-    }
-    
-    // Validate softCategory - FLEXIBLE: must exist in list (but mapping is allowed)
-    if (filters.softCategory) {
-      const softCategoryArray = Array.isArray(filters.softCategory) ? filters.softCategory : [filters.softCategory];
-      const validSoftCategories = softCategoryArray.filter(sc => {
-        const trimmed = sc.trim();
-        return softCategoriesList.some(listSC => listSC.toLowerCase() === trimmed.toLowerCase());
-      });
-      
-      if (validSoftCategories.length === 0) {
-        console.log(`[FILTER EXTRACTION] ⚠️ Invalid softCategory extracted: ${JSON.stringify(filters.softCategory)} - not in list: ${softCategories}`);
-        filters.softCategory = undefined;
-      } else {
-        filters.softCategory = validSoftCategories.length === 1 ? validSoftCategories[0] : validSoftCategories;
-      }
-    }
+    };
+
+    filters.category = validateFilter(filters.category, categoriesList, 'category');
+    filters.type = validateFilter(filters.type, typesList, 'type');
+    filters.softCategory = validateFilter(filters.softCategory, softCategoriesList, 'softCategory');
     
     // Log extraction results for debugging
     console.log(`[FILTER EXTRACTION] Query: "${query}"`);
