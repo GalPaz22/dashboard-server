@@ -72,6 +72,123 @@ async function initializeRedis() {
 // Initialize Redis connection
 initializeRedis();
 
+/* =========================================================== *\
+   AI CIRCUIT BREAKER & FALLBACK SYSTEM
+\* =========================================================== */
+
+// Circuit breaker state for AI models
+const aiCircuitBreaker = {
+  failures: 0,
+  maxFailures: 3,
+  resetTimeout: 60000, // 1 minute
+  lastFailureTime: null,
+  isOpen: false,
+  
+  recordFailure() {
+    this.failures++;
+    this.lastFailureTime = Date.now();
+    
+    if (this.failures >= this.maxFailures) {
+      this.isOpen = true;
+      console.error(`[AI CIRCUIT BREAKER] ⚠️ Circuit opened after ${this.failures} failures. AI models disabled for ${this.resetTimeout / 1000}s`);
+      
+      // Auto-reset after timeout
+      setTimeout(() => {
+        this.reset();
+      }, this.resetTimeout);
+    }
+  },
+  
+  recordSuccess() {
+    if (this.failures > 0) {
+      console.log(`[AI CIRCUIT BREAKER] ✅ AI call successful, resetting failure count from ${this.failures}`);
+    }
+    this.failures = 0;
+    this.isOpen = false;
+  },
+  
+  reset() {
+    console.log(`[AI CIRCUIT BREAKER] 🔄 Circuit reset, AI models re-enabled`);
+    this.failures = 0;
+    this.isOpen = false;
+    this.lastFailureTime = null;
+  },
+  
+  shouldBypassAI() {
+    return this.isOpen;
+  }
+};
+
+// Fallback: Rule-based query classification (simple vs complex)
+function classifyQueryFallback(query) {
+  const queryLower = query.toLowerCase().trim();
+  const words = queryLower.split(/\s+/);
+  
+  // Complex indicators
+  const complexIndicators = [
+    'מתאים ל', 'מומלץ ל', 'טוב ל', 'עבור', 'לארוחת', 'מ', 'עד', // Hebrew: "suitable for", "recommended for", "good for", "for", "for meal", "from", "up to"
+    'suitable for', 'recommended for', 'good for', 'for dinner', 'for meal', 'pairing',
+    'באיזור', 'בסביבות', 'החל מ', // Hebrew: "around", "starting from"
+    'around', 'about', 'approximately', 'between', 'under', 'over'
+  ];
+  
+  // Check for complex indicators
+  const hasComplexIndicator = complexIndicators.some(indicator => queryLower.includes(indicator));
+  
+  // Check for price ranges (numbers with range indicators)
+  const hasPriceRange = /\d+.*(?:עד|to|-).*\d+/.test(queryLower);
+  
+  // Simple query heuristics:
+  // - 1-3 words
+  // - No complex indicators
+  // - No price ranges
+  const isSimple = words.length <= 3 && !hasComplexIndicator && !hasPriceRange;
+  
+  console.log(`[FALLBACK CLASSIFICATION] Query: "${query}" -> ${isSimple ? 'SIMPLE' : 'COMPLEX'} (${words.length} words)`);
+  return isSimple;
+}
+
+// Fallback: Rule-based filter extraction
+function extractFiltersFallback(query) {
+  const queryLower = query.toLowerCase().trim();
+  const filters = {};
+  
+  // Extract price information using regex
+  // Pattern: ב-100 or באיזור ה-100 (Hebrew "at" or "around")
+  const exactPriceMatch = queryLower.match(/(?:ב-?|באיזור ה-?)(\d+)/);
+  if (exactPriceMatch) {
+    filters.price = parseInt(exactPriceMatch[1]);
+  }
+  
+  // Pattern: מ-50 or החל מ-50 (Hebrew "from")
+  const minPriceMatch = queryLower.match(/(?:מ-?|החל מ-?)(\d+)/);
+  if (minPriceMatch && !exactPriceMatch) {
+    filters.minPrice = parseInt(minPriceMatch[1]);
+  }
+  
+  // Pattern: עד 200 (Hebrew "up to")
+  const maxPriceMatch = queryLower.match(/עד\s*(\d+)/);
+  if (maxPriceMatch && !exactPriceMatch) {
+    filters.maxPrice = parseInt(maxPriceMatch[1]);
+  }
+  
+  // Pattern: 50-200 or 50 to 200 (range)
+  const rangeMatch = queryLower.match(/(\d+)\s*(?:-|to|עד)\s*(\d+)/);
+  if (rangeMatch && !exactPriceMatch) {
+    filters.minPrice = parseInt(rangeMatch[1]);
+    filters.maxPrice = parseInt(rangeMatch[2]);
+  }
+  
+  console.log(`[FALLBACK FILTER EXTRACTION] Extracted filters:`, filters);
+  return filters;
+}
+
+// Fallback: Detect if text is Hebrew (no translation)
+function detectHebrew(text) {
+  const hebrewRegex = /[\u0590-\u05FF]/;
+  return hebrewRegex.test(text);
+}
+
 // Cache key generators
 function generateCacheKey(prefix, ...args) {
   const data = args.join('|');
@@ -1090,6 +1207,12 @@ async function classifyQueryComplexity(query, context, dbName = null) {
         }
       }
       
+      // Check circuit breaker - use fallback if AI is unavailable
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        console.log(`[AI BYPASS] Circuit breaker open, using fallback classification for: "${query}"`);
+        return classifyQueryFallback(query);
+      }
+      
       const systemInstruction = `You are an expert at analyzing e-commerce search queries to determine if they are simple product name searches or complex descriptive searches.
 
 Context: ${context || "e-commerce product search"}
@@ -1150,10 +1273,19 @@ Analyze the query and return your classification.`;
       
       const result = JSON.parse(text);
       
+      // Record success
+      aiCircuitBreaker.recordSuccess();
+      
       return result.classification === "simple";
     } catch (error) {
       console.error("Error classifying query complexity with Gemini:", error);
-      return false;
+      
+      // Record failure and trigger circuit breaker if needed
+      aiCircuitBreaker.recordFailure();
+      
+      // Use fallback classification
+      console.log(`[AI FALLBACK] Using rule-based classification for: "${query}"`);
+      return classifyQueryFallback(query);
     }
   }, 7200);
 }
@@ -1255,6 +1387,12 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
   
   return withCache(cacheKey, async () => {
   try {
+    // Check circuit breaker - use fallback if AI is unavailable
+    if (aiCircuitBreaker.shouldBypassAI()) {
+      console.log(`[AI BYPASS] Circuit breaker open, using fallback filter extraction for: "${query}"`);
+      return extractFiltersFallback(query);
+    }
+    
     const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
 
 CRITICAL RULE: ALL extracted values MUST exist in the provided lists. NEVER extract values that are not in the lists.
@@ -1412,6 +1550,9 @@ ${example}.`;
     filters.type = validateFilter(filters.type, typesList, 'type');
     filters.softCategory = validateFilter(filters.softCategory, softCategoriesList, 'softCategory');
     
+    // Record success
+    aiCircuitBreaker.recordSuccess();
+    
     // Log extraction results for debugging
     console.log(`[FILTER EXTRACTION] Query: "${query}"`);
     console.log(`[FILTER EXTRACTION] Categories available: ${categories}`);
@@ -1425,7 +1566,13 @@ ${example}.`;
     return filters;
   } catch (error) {
     console.error("Error extracting enhanced filters:", error);
-    throw error;
+    
+    // Record failure and trigger circuit breaker if needed
+    aiCircuitBreaker.recordFailure();
+    
+    // Use fallback filter extraction
+    console.log(`[AI FALLBACK] Using rule-based filter extraction for: "${query}"`);
+    return extractFiltersFallback(query);
   }
   }, 604800);
 }
@@ -3243,7 +3390,8 @@ app.post("/search", async (req, res) => {
     }
 
       // LLM reordering only for complex queries (not just any query with soft filters)
-      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly;
+      // Skip LLM reordering if circuit breaker is open
+      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI();
     
       if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
@@ -3257,11 +3405,18 @@ app.post("/search", async (req, res) => {
           
           reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, searchLimit);
           
+          // Record success
+          aiCircuitBreaker.recordSuccess();
+          
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
           
         } catch (error) {
           console.error("Error reordering results with Gemini:", error);
+          
+          // Record failure and trigger circuit breaker if needed
+          aiCircuitBreaker.recordFailure();
+          
           reorderedData = combinedResults.map((result) => ({ _id: result._id.toString(), explanation: null }));
           llmReorderingSuccessful = false;
         }
@@ -3271,6 +3426,8 @@ app.post("/search", async (req, res) => {
           skipReason = "filter-only query";
         } else if (!isComplexQueryResult) {
           skipReason = hasSoftFilters ? "simple query with soft filters" : "simple query";
+        } else if (aiCircuitBreaker.shouldBypassAI()) {
+          skipReason = "AI circuit breaker open";
         }
         
         console.log(`[${requestId}] Skipping LLM reordering (${skipReason})`);
@@ -4252,6 +4409,12 @@ app.get("/health", async (req, res) => {
       },
       mongodb: {
         connected: !!client
+      },
+      aiModels: {
+        circuitBreakerOpen: aiCircuitBreaker.isOpen,
+        failures: aiCircuitBreaker.failures,
+        lastFailureTime: aiCircuitBreaker.lastFailureTime ? new Date(aiCircuitBreaker.lastFailureTime).toISOString() : null,
+        status: aiCircuitBreaker.isOpen ? 'circuit-open' : 'operational'
       }
     }
   };
@@ -4287,8 +4450,59 @@ app.get("/health", async (req, res) => {
     health.status = 'degraded';
   }
 
+  // AI circuit breaker impacts status but doesn't make it unhealthy
+  if (aiCircuitBreaker.isOpen) {
+    health.status = health.status === 'healthy' ? 'degraded' : health.status;
+  }
+
   const statusCode = health.status === 'healthy' ? 200 : 503;
   res.status(statusCode).json(health);
+});
+
+/* =========================================================== *\
+   AI CIRCUIT BREAKER CONTROL ENDPOINT
+\* =========================================================== */
+
+app.post("/ai-circuit-breaker/reset", authenticate, async (req, res) => {
+  try {
+    const wasOpen = aiCircuitBreaker.isOpen;
+    aiCircuitBreaker.reset();
+    
+    res.json({
+      success: true,
+      message: wasOpen ? "AI circuit breaker reset. AI models re-enabled." : "AI circuit breaker was already closed.",
+      previousState: {
+        isOpen: wasOpen,
+        failures: aiCircuitBreaker.failures
+      },
+      currentState: {
+        isOpen: aiCircuitBreaker.isOpen,
+        failures: aiCircuitBreaker.failures
+      }
+    });
+  } catch (error) {
+    console.error("Error resetting circuit breaker:", error);
+    res.status(500).json({ error: "Failed to reset circuit breaker", details: error.message });
+  }
+});
+
+app.get("/ai-circuit-breaker/status", authenticate, async (req, res) => {
+  try {
+    res.json({
+      isOpen: aiCircuitBreaker.isOpen,
+      failures: aiCircuitBreaker.failures,
+      maxFailures: aiCircuitBreaker.maxFailures,
+      resetTimeout: aiCircuitBreaker.resetTimeout,
+      lastFailureTime: aiCircuitBreaker.lastFailureTime ? new Date(aiCircuitBreaker.lastFailureTime).toISOString() : null,
+      timeUntilReset: aiCircuitBreaker.isOpen && aiCircuitBreaker.lastFailureTime 
+        ? Math.max(0, aiCircuitBreaker.resetTimeout - (Date.now() - aiCircuitBreaker.lastFailureTime))
+        : null,
+      status: aiCircuitBreaker.isOpen ? 'OPEN - Using fallback mechanisms' : 'CLOSED - AI models operational'
+    });
+  } catch (error) {
+    console.error("Error getting circuit breaker status:", error);
+    res.status(500).json({ error: "Failed to get circuit breaker status", details: error.message });
+  }
 });
 
 /* =========================================================== *\
