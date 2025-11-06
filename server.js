@@ -1526,9 +1526,19 @@ ${example}.`;
     const softCategoriesList = normalizeList(softCategories);
 
     // Helper to validate extracted values against a list
-    const validateFilter = (values, list, name) => {
+    const validateFilter = (values, list, name, allowCommaSeparated = false) => {
       if (!values) return undefined;
-      const valueArr = Array.isArray(values) ? values : [values];
+      
+      // Handle comma-separated strings (especially for soft categories)
+      let valueArr;
+      if (Array.isArray(values)) {
+        valueArr = values;
+      } else if (typeof values === 'string' && allowCommaSeparated && values.includes(',')) {
+        // Split comma-separated string into array
+        valueArr = values.split(',').map(v => v.trim()).filter(v => v.length > 0);
+      } else {
+        valueArr = [values];
+      }
       
       const validValues = valueArr
         .map(v => String(v).trim())
@@ -1546,9 +1556,9 @@ ${example}.`;
       }
     };
 
-    filters.category = validateFilter(filters.category, categoriesList, 'category');
-    filters.type = validateFilter(filters.type, typesList, 'type');
-    filters.softCategory = validateFilter(filters.softCategory, softCategoriesList, 'softCategory');
+    filters.category = validateFilter(filters.category, categoriesList, 'category', false);
+    filters.type = validateFilter(filters.type, typesList, 'type', false);
+    filters.softCategory = validateFilter(filters.softCategory, softCategoriesList, 'softCategory', true);
     
     // Record success
     aiCircuitBreaker.recordSuccess();
