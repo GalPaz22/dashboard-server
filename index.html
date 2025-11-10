@@ -306,17 +306,6 @@
             margin-bottom: 20px;
         }
 
-        .auto-load-notice {
-            background: #e3f2fd;
-            border: 2px solid #2196f3;
-            color: #1565c0;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 20px;
-            text-align: center;
-            font-size: 14px;
-        }
-
         .hidden {
             display: none;
         }
@@ -348,12 +337,6 @@
             <div class="loading">
                 <div class="spinner"></div>
                 <p>Searching...</p>
-            </div>
-        </div>
-
-        <div id="autoLoadNotice" class="hidden">
-            <div class="auto-load-notice">
-                ✨ Auto-loading second batch of results...
             </div>
         </div>
 
@@ -431,80 +414,9 @@
                 hideLoading();
                 displayResults(data);
 
-                // Auto-load second batch if available
-                console.log('Pagination data:', data.pagination);
-                console.log('Auto-load check:', {
-                    autoLoadMore: data.pagination?.autoLoadMore,
-                    hasToken: !!data.pagination?.secondBatchToken
-                });
-                
-                if (data.pagination?.autoLoadMore && data.pagination?.secondBatchToken) {
-                    console.log('✅ Auto-load enabled! Triggering in 500ms...');
-                    setTimeout(() => autoLoadSecondBatch(data.pagination.secondBatchToken), 500);
-                } else {
-                    console.log('❌ Auto-load NOT triggered:', {
-                        autoLoadMore: data.pagination?.autoLoadMore,
-                        hasToken: !!data.pagination?.secondBatchToken
-                    });
-                }
-
             } catch (error) {
                 hideLoading();
                 showError(error.message);
-            }
-        }
-
-        async function autoLoadSecondBatch(token) {
-            console.log('🔄 Auto-loading second batch...');
-            document.getElementById('autoLoadNotice').classList.remove('hidden');
-
-            try {
-                console.log('Making request to api.semantix-ai.com/search/auto-load-more');
-                const response = await fetch(`https://api.semantix-ai.com/search/auto-load-more?token=${encodeURIComponent(token)}`, {
-                    method: 'GET'
-                });
-
-                console.log('Response status:', response.status);
-
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    console.error('❌ Auto-load failed:', errorData.error);
-                    return;
-                }
-
-                const data = await response.json();
-                console.log('✅ Auto-load response received:', {
-                    products: data.products?.length,
-                    batchNumber: data.pagination?.batchNumber,
-                    hasMore: data.pagination?.hasMore
-                });
-                
-                if (data.products && data.products.length > 0) {
-                    currentBatch = data.pagination?.batchNumber || 2;
-                    allProducts = [...allProducts, ...data.products];
-                    
-                    // Update UI
-                    document.getElementById('batchIndicator').textContent = `Batch 1-${currentBatch} (${allProducts.length} total)`;
-                    appendProducts(data.products);
-                    
-                    // Update currentSearchData for further pagination
-                    if (data.pagination?.nextToken) {
-                        currentSearchData.pagination.nextToken = data.pagination.nextToken;
-                        currentSearchData.pagination.hasMore = data.pagination.hasMore;
-                        document.getElementById('loadMoreSection').classList.remove('hidden');
-                    } else {
-                        document.getElementById('loadMoreSection').classList.add('hidden');
-                    }
-                    
-                    console.log(`✅ Auto-loaded batch ${currentBatch}: ${data.products.length} products (${data.metadata?.executionTime}ms)`);
-                } else {
-                    console.log('⚠️ No products in second batch');
-                }
-
-            } catch (error) {
-                console.error('❌ Auto-load error:', error);
-            } finally {
-                document.getElementById('autoLoadNotice').classList.add('hidden');
             }
         }
 
@@ -515,7 +427,7 @@
             showLoading();
 
             try {
-                const response = await fetch(`https://api.semantix-ai.com/search/auto-load-more?token=${encodeURIComponent(token)}`, {
+                const response = await fetch(`https://api.semantix-ai.com/search/load-more?token=${encodeURIComponent(token)}`, {
                     method: 'GET'
                 });
 
@@ -587,10 +499,9 @@
             metadata.innerHTML = `
                 <div class="metadata-item"><strong>Query:</strong> ${data.metadata?.query || 'N/A'}</div>
                 <div class="metadata-item"><strong>Request ID:</strong> ${data.metadata?.requestId || 'N/A'}</div>
-                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms (Batch 1)</div>
+                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms</div>
                 <div class="metadata-item"><strong>Total Available:</strong> ${data.pagination?.totalAvailable || 'N/A'}</div>
-                <div class="metadata-item"><strong>Auto-Load More:</strong> ${data.pagination?.autoLoadMore ? '✅ Enabled' : '❌ Disabled'}</div>
-                <div class="metadata-item"><strong>Mechanism:</strong> Independent fresh search for each batch.</div>
+                <div class="metadata-item"><strong>Has More:</strong> ${data.pagination?.hasMore ? '✅ Yes (click Load More)' : '❌ No'}</div>
             `;
 
             resultsContainer.classList.remove('hidden');
@@ -716,12 +627,6 @@ Version: ${data.redis.version || 'N/A'}
         document.getElementById('searchQuery').addEventListener('keypress', function(e) {
             if (e.key === 'Enter') {
                 performSearch();
-            }
-        });
-
-        document.getElementById('apiKey').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                document.getElementById('searchQuery').focus();
             }
         });
     </script>
