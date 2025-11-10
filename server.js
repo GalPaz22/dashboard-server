@@ -2314,7 +2314,9 @@ async function executeExplicitSoftCategorySearch(
         rrf_score: baseScore + 10000 + multiCategoryBoost, // Base boost + multi-category boost
         softFilterMatch: true,
         softCategoryMatches: softCategoryMatches,
-        exactMatchBonus: exactMatchBonus // Store for sorting
+        exactMatchBonus: exactMatchBonus, // Store for sorting
+        fuzzyRank: data.fuzzyRank, // Store for tier detection
+        vectorRank: data.vectorRank // Store for tier detection
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -2342,7 +2344,9 @@ async function executeExplicitSoftCategorySearch(
         rrf_score: calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, 0),
         softFilterMatch: false,
         softCategoryMatches: 0,
-        exactMatchBonus: exactMatchBonus // Store for sorting
+        exactMatchBonus: exactMatchBonus, // Store for sorting
+        fuzzyRank: data.fuzzyRank, // Store for tier detection
+        vectorRank: data.vectorRank // Store for tier detection
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -3429,7 +3433,9 @@ app.post("/search", async (req, res) => {
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
               softFilterMatch: false,
               softCategoryMatches: 0,
-              exactMatchBonus: exactMatchBonus // Store for sorting
+              exactMatchBonus: exactMatchBonus, // Store for sorting
+              fuzzyRank: ranks.fuzzyRank, // Store for tier detection
+              vectorRank: ranks.vectorRank // Store for tier detection
             };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -3604,6 +3610,19 @@ app.post("/search", async (req, res) => {
           isHighlighted = !!(resultData?.softFilterMatch);
         }
         
+        // For simple queries: flag products with strong text matches OR strong vector matches (cross-language)
+        const exactMatchBonus = resultData?.exactMatchBonus || 0;
+        const vectorRank = resultData?.vectorRank !== undefined ? resultData.vectorRank : Infinity;
+        const fuzzyRank = resultData?.fuzzyRank !== undefined ? resultData.fuzzyRank : Infinity;
+        
+        // Tier 1 includes:
+        // 1. High text match (exactMatchBonus >= 20000), OR
+        // 2. Strong vector match with weak/no text match (vectorRank <= 5 AND fuzzyRank > 10)
+        //    This catches cross-language matches like "fever tree" → "פיבר טרי"
+        const hasStrongTextMatch = exactMatchBonus >= 20000;
+        const hasStrongVectorMatch = vectorRank <= 5 && fuzzyRank > 10;
+        const isHighTextMatch = isSimpleResult && (hasStrongTextMatch || hasStrongVectorMatch);
+        
         return {
           _id: product._id.toString(),
           id: product.id,
@@ -3621,29 +3640,46 @@ app.post("/search", async (req, res) => {
           softFilterMatch: !!(resultData?.softFilterMatch),
           softCategoryMatches: resultData?.softCategoryMatches || 0,
           simpleSearch: false,
-          filterOnly: !!(resultData?.filterOnly)
+          filterOnly: !!(resultData?.filterOnly),
+          highTextMatch: isHighTextMatch // Flag for tier separation
         };
       }),
-      ...remainingResults.map((r) => ({
-        _id: r._id.toString(),
-        id: r.id,
-        name: r.name,
-        description: r.description,
-        price: r.price,
-        image: r.image,
-        url: r.url,
-        // For remaining results, only highlight soft filter matches if no LLM reranking occurred
-        highlight: !llmReorderingSuccessful && hasSoftFilters ? !!r.softFilterMatch : false,
-        type: r.type,
-        specialSales: r.specialSales,
-        onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
-        ItemID: r.ItemID,
-        explanation: null,
-        softFilterMatch: !!r.softFilterMatch,
-        softCategoryMatches: r.softCategoryMatches || 0,
-        simpleSearch: false,
-        filterOnly: !!r.filterOnly
-      })),
+      ...remainingResults.map((r) => {
+        // For simple queries: flag products with strong text matches OR strong vector matches (cross-language)
+        const exactMatchBonus = r.exactMatchBonus || 0;
+        const vectorRank = r.vectorRank !== undefined ? r.vectorRank : Infinity;
+        const fuzzyRank = r.fuzzyRank !== undefined ? r.fuzzyRank : Infinity;
+        
+        // Tier 1 includes:
+        // 1. High text match (exactMatchBonus >= 20000), OR
+        // 2. Strong vector match with weak/no text match (vectorRank <= 5 AND fuzzyRank > 10)
+        //    This catches cross-language matches like "fever tree" → "פיבר טרי"
+        const hasStrongTextMatch = exactMatchBonus >= 20000;
+        const hasStrongVectorMatch = vectorRank <= 5 && fuzzyRank > 10;
+        const isHighTextMatch = isSimpleResult && (hasStrongTextMatch || hasStrongVectorMatch);
+        
+        return {
+          _id: r._id.toString(),
+          id: r.id,
+          name: r.name,
+          description: r.description,
+          price: r.price,
+          image: r.image,
+          url: r.url,
+          // For remaining results, only highlight soft filter matches if no LLM reranking occurred
+          highlight: !llmReorderingSuccessful && hasSoftFilters ? !!r.softFilterMatch : false,
+          type: r.type,
+          specialSales: r.specialSales,
+          onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
+          ItemID: r.ItemID,
+          explanation: null,
+          softFilterMatch: !!r.softFilterMatch,
+          softCategoryMatches: r.softCategoryMatches || 0,
+          simpleSearch: false,
+          filterOnly: !!r.filterOnly,
+          highTextMatch: isHighTextMatch // Flag for tier separation
+        };
+      }),
     ];
 
     // Log query
@@ -3697,6 +3733,24 @@ app.post("/search", async (req, res) => {
     // Return products array without per-product metadata (for backward compatibility)
     const response = limitedResults;
     
+    // Calculate tier statistics for simple queries
+    let tierInfo = null;
+    if (isSimpleResult) {
+      const highTextMatchCount = response.filter(p => p.highTextMatch).length;
+      const otherResultsCount = response.length - highTextMatchCount;
+      
+      tierInfo = {
+        hasTextMatchTier: highTextMatchCount > 0,
+        highTextMatches: highTextMatchCount,
+        otherResults: otherResultsCount,
+        description: highTextMatchCount > 0 
+          ? `${highTextMatchCount} high text match${highTextMatchCount > 1 ? 'es' : ''}, ${otherResultsCount} related result${otherResultsCount !== 1 ? 's' : ''}`
+          : 'No high text matches found'
+      };
+      
+      console.log(`[${requestId}] Simple query tiers: ${highTextMatchCount} high text matches, ${otherResultsCount} other results`);
+    }
+    
     // Send response with pagination metadata (manual load-more enabled, auto-load-more disabled)
     const searchResponse = {
       products: response,
@@ -3712,7 +3766,8 @@ app.post("/search", async (req, res) => {
       metadata: {
         query: query,
         requestId: requestId,
-        executionTime: executionTime
+        executionTime: executionTime,
+        ...(tierInfo && { tiers: tierInfo }) // Include tier info for simple queries
       }
     };
     
