@@ -3610,18 +3610,9 @@ app.post("/search", async (req, res) => {
           isHighlighted = !!(resultData?.softFilterMatch);
         }
         
-        // For simple queries: flag products with strong text matches OR strong vector matches (cross-language)
+        // For simple queries: flag products with strong text matches (threshold: 20000+)
         const exactMatchBonus = resultData?.exactMatchBonus || 0;
-        const vectorRank = resultData?.vectorRank !== undefined ? resultData.vectorRank : Infinity;
-        const fuzzyRank = resultData?.fuzzyRank !== undefined ? resultData.fuzzyRank : Infinity;
-        
-        // Tier 1 includes:
-        // 1. High text match (exactMatchBonus >= 20000), OR
-        // 2. Strong vector match with weak/no text match (vectorRank <= 5 AND fuzzyRank > 10)
-        //    This catches cross-language matches like "fever tree" → "פיבר טרי"
-        const hasStrongTextMatch = exactMatchBonus >= 20000;
-        const hasStrongVectorMatch = vectorRank <= 5 && fuzzyRank > 10;
-        const isHighTextMatch = isSimpleResult && (hasStrongTextMatch || hasStrongVectorMatch);
+        const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
         
         return {
           _id: product._id.toString(),
@@ -3645,18 +3636,9 @@ app.post("/search", async (req, res) => {
         };
       }),
       ...remainingResults.map((r) => {
-        // For simple queries: flag products with strong text matches OR strong vector matches (cross-language)
+        // For simple queries: flag products with strong text matches (threshold: 20000+)
         const exactMatchBonus = r.exactMatchBonus || 0;
-        const vectorRank = r.vectorRank !== undefined ? r.vectorRank : Infinity;
-        const fuzzyRank = r.fuzzyRank !== undefined ? r.fuzzyRank : Infinity;
-        
-        // Tier 1 includes:
-        // 1. High text match (exactMatchBonus >= 20000), OR
-        // 2. Strong vector match with weak/no text match (vectorRank <= 5 AND fuzzyRank > 10)
-        //    This catches cross-language matches like "fever tree" → "פיבר טרי"
-        const hasStrongTextMatch = exactMatchBonus >= 20000;
-        const hasStrongVectorMatch = vectorRank <= 5 && fuzzyRank > 10;
-        const isHighTextMatch = isSimpleResult && (hasStrongTextMatch || hasStrongVectorMatch);
+        const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
         
         return {
           _id: r._id.toString(),

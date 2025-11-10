@@ -9,35 +9,23 @@ For simple queries (like "פיבר טרי"), search results are now tiered to cl
 ### Tier Classification
 
 **High Text Match (Tier 1):**
-
-Products qualify for Tier 1 if **EITHER**:
-
-1. **High Text Match**: `exactMatchBonus >= 20,000`
-   - Product name contains the search query
-   - Examples:
-     - Query: "פיבר טרי" → Product: "פיבר טרי מרלו" ✅
-     - Query: "Barkan" → Product: "Barkan Reserve" ✅
-
-2. **Strong Cross-Language Vector Match**: `vectorRank <= 5 AND fuzzyRank > 10`
-   - Vector search found it in top 5 results
-   - Text search missed it (rank > 10)
-   - **Catches multilingual matches!**
-   - Examples:
-     - Query: "fever tree" → Product: "פיבר טרי" ✅ (English → Hebrew)
-     - Query: "barkan" → Product: "ברקן" ✅ (English → Hebrew)
-     - Query: "chablis" → Product: "שכלי" ✅ (transliteration match)
+- Products with `exactMatchBonus >= 20,000`
+- These are products where the name contains the search query
+- Examples:
+  - Query: "פיבר טרי" → Product: "פיבר טרי מרלו" ✅
+  - Query: "Barkan" → Product: "Barkan Reserve" ✅
+  - Query: "Carmel" → Product: "Carmel Selected" ✅
 
 **Related Results (Tier 2):**
-- Products with `exactMatchBonus < 20,000` AND `vectorRank > 5`
-- Semantic/contextual matches only
+- Products with `exactMatchBonus < 20,000`
+- Vector/semantic matches
 - Soft category matches
+- May not contain the actual search term
 - Examples:
   - Query: "פיבר טרי" → Product: "יקב אחר עם סגנון דומה" (different winery, similar style)
-  - Query: "Barkan" → Product: "Golan Heights" (different brand, contextually related)
+  - Query: "Barkan" → Product: "Golan Heights" (different brand, vectorally related)
 
 ### Threshold Explanation
-
-#### Text Match Thresholds
 
 The `exactMatchBonus` values from `getExactMatchBonus()`:
 
@@ -47,26 +35,10 @@ Cleaned exact match:      45,000  ✅ Tier 1
 Contains full query:      30,000  ✅ Tier 1
 Contains cleaned query:   25,000  ✅ Tier 1
 Multi-word phrase match:  20,000  ✅ Tier 1 (threshold)
-No match:                      0  ❌ (check vector rank)
+No match:                      0  ❌ Tier 2
 ```
 
-**Text Threshold = 20,000** means products with phrase matches or better qualify for Tier 1.
-
-#### Vector Match Thresholds
-
-The `vectorRank` indicates the position in vector search results (0 = best match):
-
-```javascript
-vectorRank: 0-5    ✅ Tier 1 (if fuzzyRank > 10)
-vectorRank: 6+     ❌ Tier 2
-```
-
-**Why this works for cross-language:**
-- Query: "fever tree" (English)
-- Vector embedding matches "פיבר טרי" (Hebrew) phonetically/semantically
-- Vector search: rank 0-2 (top results)
-- Fuzzy text search: rank Infinity (no text match)
-- Result: **Tier 1** ✅ (strong vector + weak text = cross-language match)
+**Threshold = 20,000** means products with phrase matches or better are considered "high text matches".
 
 ## Response Format
 
@@ -247,44 +219,13 @@ Response:
   }
 ```
 
-### Scenario 4: Cross-Language Vector Match ⭐ NEW!
-```
-Query: "fever tree"
-Classification: Simple
-
-Tier 1 (highTextMatch = true):
-  - פיבר טרי מרלו (vectorRank: 0, fuzzyRank: Infinity) ✅ Cross-language!
-  - פיבר טרי קברנה סוביניון (vectorRank: 1, fuzzyRank: Infinity) ✅
-  - פיבר טרי שרדונה (vectorRank: 2, fuzzyRank: Infinity) ✅
-  - פיבר טרי רזרב (vectorRank: 3, fuzzyRank: Infinity) ✅
-
-Tier 2 (highTextMatch = false):
-  - Other wineries with similar profile (vectorRank: 10+)
-  ... 21 products
-
-Response:
-  tiers: {
-    highTextMatches: 4,
-    otherResults: 21,
-    description: "4 high text matches, 21 related results"
-  }
-
-Analysis:
-  - "fever tree" has NO text match with "פיבר טרי"
-  - BUT vector search finds them immediately (rank 0-3)
-  - Tier logic: vectorRank <= 5 AND fuzzyRank > 10 → Tier 1 ✅
-  - User gets exactly what they want despite language difference!
-```
-
 ## Benefits
 
 1. **Clear Distinction**: Users immediately see which products match their query exactly
 2. **Better UX**: Reduces confusion from "unrelated" vector matches
-3. **Cross-Language Support**: Works seamlessly for multilingual searches (English ↔ Hebrew)
-4. **Flexible Display**: Frontend can choose how to present the separation
-5. **Backward Compatible**: Flag is only added for simple queries, doesn't break existing clients
-6. **Metadata Rich**: Tier statistics help frontend make UI decisions
-7. **Smart Detection**: Combines text matching + vector matching for best results
+3. **Flexible Display**: Frontend can choose how to present the separation
+4. **Backward Compatible**: Flag is only added for simple queries, doesn't break existing clients
+5. **Metadata Rich**: Tier statistics help frontend make UI decisions
 
 ## Technical Details
 
@@ -315,12 +256,10 @@ The `highTextMatch` flag simply **labels** what the sorting already prioritizes!
 
 ## Summary
 
-**For simple queries like "פיבר טרי" or "fever tree":**
+**For simple queries like "פיבר טרי":**
 
 **Tier 1 (High Text Match):**
-- Products with strong text matches (`exactMatchBonus >= 20,000`), OR
-- Products with strong vector matches (`vectorRank <= 5` + weak text)
-- **Includes cross-language matches!** ("fever tree" → "פיבר טרי")
+- Products with strong text matches (`exactMatchBonus >= 20,000`)
 - Marked with `highTextMatch: true`
 
 **Tier 2 (Related Results):**
@@ -331,7 +270,6 @@ The `highTextMatch` flag simply **labels** what the sorting already prioritizes!
 **Response:**
 - Tier statistics in `metadata.tiers`
 - Frontend can display separated tiers for better UX
-- Works for multilingual searches seamlessly
 
-**Result:** Clear separation between "exact matches" (including cross-language) and "related products"! 🎯🌍
+**Result:** Clear separation between "exact matches" and "related products"! 🎯
 
