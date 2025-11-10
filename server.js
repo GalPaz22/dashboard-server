@@ -3136,20 +3136,26 @@ app.post("/search", async (req, res) => {
       originalCategory = enhancedFilters.category;
     }
 
-    // For text-based queries: Clear category filters to avoid mis-classification issues
-    // This prevents AI from extracting wrong categories (e.g., "קמפרי" → "ג׳ין")
-    if (enhancedFilters) {
-      // Always clear category for text-based searches - rely on text matching
-      if (originalCategory) {
-        console.log(`[${requestId}] Category "${originalCategory}" extracted but cleared - text queries use text matching only`);
-        enhancedFilters.category = undefined;
-      }
-      
-      // For simple queries: Also clear price filters (prices need explicit intent)
-      if (isSimpleResult) {
+    // For simple queries: Clear hard filters to rely on text matching
+    // For complex queries: Keep category filters (they're intentional)
+    if (isSimpleResult) {
+      if (enhancedFilters) {
+        // Clear category for simple text-based searches - rely on text matching
+        // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
+        if (originalCategory) {
+          console.log(`[${requestId}] Simple query: Category "${originalCategory}" extracted but cleared - simple queries use text matching only`);
+          enhancedFilters.category = undefined;
+        }
+        
+        // Always clear price filters for simple queries (prices need explicit intent)
         enhancedFilters.price = undefined;
         enhancedFilters.minPrice = undefined;
         enhancedFilters.maxPrice = undefined;
+      }
+    } else {
+      // Complex queries: Keep category filters (they're part of the intent)
+      if (originalCategory) {
+        console.log(`[${requestId}] Complex query: Category "${originalCategory}" will be used for filtering`);
       }
     }
     
