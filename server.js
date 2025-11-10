@@ -3136,50 +3136,17 @@ app.post("/search", async (req, res) => {
       originalCategory = enhancedFilters.category;
     }
 
-    // For simple queries: Smart filter clearing based on query-category matching
-    if (isSimpleResult) {
-      if (enhancedFilters) {
-        // Smart category handling: only clear if query doesn't match category
-        if (originalCategory) {
-          const queryLower = query.toLowerCase().trim();
-          const translatedQueryLower = (translatedQuery || '').toLowerCase().trim();
-          const categoryLower = (Array.isArray(originalCategory) 
-            ? originalCategory[0] 
-            : originalCategory).toLowerCase().trim();
-          
-          // Check if query matches category name (bidirectional matching)
-          // Also check word-level matches for cross-language matching (e.g., "fiber tree" → "פיבר טרי")
-          const queryWords = queryLower.split(/\s+/);
-          const categoryWords = categoryLower.split(/\s+/);
-          
-          const hasDirectMatch = 
-            categoryLower.includes(queryLower) || 
-            queryLower.includes(categoryLower) ||
-            (translatedQueryLower && categoryLower.includes(translatedQueryLower)) ||
-            (translatedQueryLower && translatedQueryLower.includes(categoryLower));
-          
-          // For brand names and specific categories, if AI extracted a category from this query,
-          // it's likely the query IS asking for this category - trust the AI
-          // Exception: Generic categories like "יין", "wine", "spirits" should still be cleared
-          const genericCategories = ['wine', 'יין', 'red wine', 'white wine', 'יין אדום', 'יין לבן', 'rosé', 'רוזה', 'spirits', 'beer', 'champagne'];
-          const isGenericCategory = genericCategories.some(generic => 
-            categoryLower === generic.toLowerCase() || categoryLower.includes(generic.toLowerCase())
-          );
-          
-          const shouldKeepCategory = hasDirectMatch || (!isGenericCategory && queryWords.length <= 3);
-          
-          if (shouldKeepCategory) {
-            // Query is specifically asking for this category/brand - keep it!
-            console.log(`[${requestId}] Simple query: Category "${originalCategory}" matches query or is specific brand - KEEPING for filtering`);
-            // Don't clear category - user wants this specific category/brand
-          } else {
-            // Query doesn't match category - probably too broad or incorrectly extracted
-            console.log(`[${requestId}] Simple query: Category "${originalCategory}" is generic or doesn't match - clearing for text matching`);
-            enhancedFilters.category = undefined;
-          }
-        }
-        
-        // Always clear price filters for simple queries (prices need explicit intent)
+    // For text-based queries: Clear category filters to avoid mis-classification issues
+    // This prevents AI from extracting wrong categories (e.g., "קמפרי" → "ג׳ין")
+    if (enhancedFilters) {
+      // Always clear category for text-based searches - rely on text matching
+      if (originalCategory) {
+        console.log(`[${requestId}] Category "${originalCategory}" extracted but cleared - text queries use text matching only`);
+        enhancedFilters.category = undefined;
+      }
+      
+      // For simple queries: Also clear price filters (prices need explicit intent)
+      if (isSimpleResult) {
         enhancedFilters.price = undefined;
         enhancedFilters.minPrice = undefined;
         enhancedFilters.maxPrice = undefined;
