@@ -3138,12 +3138,14 @@ app.post("/search", async (req, res) => {
 
     // For simple queries: Clear hard filters to rely on text matching
     // For complex queries: Keep category filters (they're intentional)
+    console.log(`[${requestId}] DEBUG: isSimpleResult=${isSimpleResult}, isComplexQueryResult=${isComplexQueryResult}, originalCategory=${originalCategory}`);
+    
     if (isSimpleResult) {
       if (enhancedFilters) {
         // Clear category for simple text-based searches - rely on text matching
         // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
         if (originalCategory) {
-          console.log(`[${requestId}] Simple query: Category "${originalCategory}" extracted but cleared - simple queries use text matching only`);
+          console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - simple queries use text matching only`);
           enhancedFilters.category = undefined;
         }
         
@@ -3155,7 +3157,7 @@ app.post("/search", async (req, res) => {
     } else {
       // Complex queries: Keep category filters (they're part of the intent)
       if (originalCategory) {
-        console.log(`[${requestId}] Complex query: Category "${originalCategory}" will be used for filtering`);
+        console.log(`[${requestId}] ✅ COMPLEX QUERY: Category "${originalCategory}" will be KEPT for filtering`);
       }
     }
     
