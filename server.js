@@ -2581,6 +2581,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     
     // Perform search - increased limits to ensure we have enough after filtering
     let combinedResults = [];
+    let extractedCategoriesMetadata = null; // Store extracted categories for progressive loading
     
     const shouldUseFilterOnly = shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, false);
     
@@ -2893,7 +2894,7 @@ app.get("/search/load-more", async (req, res) => {
       });
     }
     
-    const { query, filters, offset, timestamp } = paginationData;
+    const { query, filters, offset, timestamp, type, extractedCategories } = paginationData;
     
     // Check if token is expired (5 minutes)
     const tokenAge = Date.now() - timestamp;
@@ -2904,33 +2905,133 @@ app.get("/search/load-more", async (req, res) => {
       });
     }
     
-    console.log(`[${requestId}] Loading more for query: "${query}", offset: ${offset}`);
+    // Check if this is a category-filtered request
+    const isCategoryFiltered = type === 'category-filtered';
     
-    // Try to get cached results from Redis
-    const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(filters));
+    if (isCategoryFiltered) {
+      console.log(`[${requestId}] Category-filtered load request for query: "${query}"`);
+    } else {
+      console.log(`[${requestId}] Loading more for query: "${query}", offset: ${offset}`);
+    }
+    
     let cachedResults = null;
     
-    if (redisClient && redisReady) {
+    // HANDLE CATEGORY-FILTERED REQUEST (Tier 2)
+    if (isCategoryFiltered && extractedCategories) {
+      console.log(`[${requestId}] Running category-filtered search with:`);
+      console.log(`[${requestId}] - Hard categories: ${JSON.stringify(extractedCategories.hardCategories)}`);
+      console.log(`[${requestId}] - Soft categories: ${JSON.stringify(extractedCategories.softCategories)}`);
+      
       try {
-        const cached = await redisClient.get(cacheKey);
-        if (cached) {
-          cachedResults = JSON.parse(cached);
-          console.log(`[${requestId}] Found cached results: ${cachedResults.length} products`);
+        const { dbName } = req.store;
+        const client = await connectToMongoDB(mongodbUri);
+        const db = client.db(dbName);
+        const collection = db.collection("products");
+        
+        // Create hard filters with extracted categories
+        const categoryFilteredHardFilters = { ...filters };
+        if (extractedCategories.hardCategories && extractedCategories.hardCategories.length > 0) {
+          categoryFilteredHardFilters.category = extractedCategories.hardCategories;
         }
+        
+        // Prepare search parameters
+        const cleanedText = cleanHebrewText(query);
+        const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
+        const searchLimit = parseInt(limit) * 3;
+        const vectorLimit = parseInt(limit) * 2;
+        
+        // Run category-filtered search
+        let categoryFilteredResults;
+        
+        if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
+          // Use soft category search
+          categoryFilteredResults = await executeExplicitSoftCategorySearch(
+            collection,
+            cleanedText,
+            query,
+            categoryFilteredHardFilters,
+            extractedCategories.softCategories,
+            queryEmbedding,
+            searchLimit,
+            vectorLimit,
+            true, // useOrLogic
+            false,
+            cleanedText,
+            []
+          );
+        } else {
+          // Just category filter without soft categories
+          const [fuzzyRes, vectorRes] = await Promise.all([
+            collection.aggregate(buildStandardSearchPipeline(
+              cleanedText, query, categoryFilteredHardFilters, searchLimit, true
+            )).toArray(),
+            collection.aggregate(buildStandardVectorSearchPipeline(
+              queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+            )).toArray()
+          ]);
+          
+          const docRanks = new Map();
+          fuzzyRes.forEach((doc, index) => {
+            docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+          });
+          vectorRes.forEach((doc, index) => {
+            const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+            docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
+          });
+          
+          categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
+            const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+            const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+            return {
+              ...doc,
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
+              softFilterMatch: false,
+              softCategoryMatches: 0,
+              exactMatchBonus: exactMatchBonus,
+              softCategoryExpansion: true // All results are Tier 2
+            };
+          }).sort((a, b) => b.rrf_score - a.rrf_score);
+        }
+        
+        cachedResults = categoryFilteredResults;
+        console.log(`[${requestId}] Category-filtered search returned ${cachedResults.length} products`);
+        
       } catch (error) {
-        console.error(`[${requestId}] Error retrieving cached results:`, error.message);
+        console.error(`[${requestId}] Error in category-filtered search:`, error);
+        return res.status(500).json({ 
+          error: "Category-filtered search failed",
+          message: error.message,
+          requestId: requestId
+        });
+      }
+      
+    } else {
+      // NORMAL PAGINATION: Try to get cached results from Redis
+      const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(filters));
+      
+      if (redisClient && redisReady) {
+        try {
+          const cached = await redisClient.get(cacheKey);
+          if (cached) {
+            cachedResults = JSON.parse(cached);
+            console.log(`[${requestId}] Found cached results: ${cachedResults.length} products`);
+          }
+        } catch (error) {
+          console.error(`[${requestId}] Error retrieving cached results:`, error.message);
+        }
+      }
+      
+      if (!cachedResults) {
+        return res.status(404).json({ 
+          error: "Cached results not found. Please perform a new search.",
+          requestId: requestId
+        });
       }
     }
     
-    if (!cachedResults) {
-      return res.status(404).json({ 
-        error: "Cached results not found. Please perform a new search.",
-        requestId: requestId
-      });
-    }
-    
     // Calculate pagination
-    const startIndex = offset;
+    // For category-filtered requests, offset starts at 0 (it's a new search)
+    const startIndex = isCategoryFiltered ? 0 : (offset || 0);
     const endIndex = Math.min(startIndex + parseInt(limit), cachedResults.length);
     const nextOffset = endIndex;
     const hasMore = endIndex < cachedResults.length;
@@ -2956,12 +3057,16 @@ app.get("/search/load-more", async (req, res) => {
         totalAvailable: cachedResults.length,
         returned: paginatedResults.length,
         offset: startIndex,
-        nextToken: nextToken
+        nextToken: nextToken,
+        categoryFiltered: isCategoryFiltered // Flag indicating these are category-filtered results (Tier 2)
       },
       metadata: {
         query: query,
         requestId: requestId,
-        cached: true
+        cached: !isCategoryFiltered, // Category-filtered results are fresh, not cached
+        ...(isCategoryFiltered && extractedCategories && {
+          extractedCategories: extractedCategories
+        })
       }
     });
     
@@ -3023,12 +3128,359 @@ app.get("/autocomplete", async (req, res) => {
    MAIN SEARCH ENDPOINT WITH OPTIMIZED FILTER-ONLY HANDLING
 \* =========================================================== */
 
+// Handle Phase 1: Text matches only for progressive loading
+async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, softCategories, dbName, collectionName, searchLimit) {
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    const translatedQuery = await translateQuery(query, context);
+    const cleanedText = removeWineFromQuery(translatedQuery, noWord);
+    const cleanedTextForSearch = removeHardFilterWords(cleanedText, {}, categories, types);
+
+    // Do pure text search
+    const textSearchLimit = Math.max(searchLimit, 50);
+    const textSearchPipeline = buildStandardSearchPipeline(
+      cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
+    );
+
+    // Add project to ensure we get categories
+    textSearchPipeline.push({
+      $project: {
+        id: 1,
+        name: 1,
+        description: 1,
+        price: 1,
+        image: 1,
+        url: 1,
+        type: 1,
+        specialSales: 1,
+        ItemID: 1,
+        category: 1,
+        softCategory: 1,
+        stockStatus: 1
+      }
+    });
+
+    const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
+
+    // Calculate text match bonuses and filter for high-quality matches
+    const textResultsWithBonuses = textSearchResults.map(doc => ({
+      ...doc,
+      exactMatchBonus: getExactMatchBonus(doc.name, query, cleanedText),
+      rrf_score: 0,
+      softFilterMatch: false,
+      softCategoryMatches: 0
+    }));
+
+    const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 10000);
+
+    // Sort by text match strength
+    highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
+
+    console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches`);
+
+    if (highQualityTextMatches.length === 0) {
+      console.log(`[${requestId}] Phase 1: No text matches found - falling back to vector search`);
+
+      try {
+        const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
+        if (!queryEmbedding) {
+          return res.status(500).json({ error: "Error generating query embedding for vector fallback" });
+        }
+
+        const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, {}, searchLimit, false);
+        const vectorResults = await collection.aggregate(vectorPipeline).toArray();
+
+        const response = vectorResults.slice(0, searchLimit).map((product, index) => ({
+          _id: product._id.toString(),
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          price: product.price,
+          image: product.image,
+          url: product.url,
+          type: product.type,
+          specialSales: product.specialSales,
+          onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+          ItemID: product.ItemID,
+          highlight: index === 0, // highlight top vector result
+          softFilterMatch: false,
+          softCategoryMatches: 0,
+          simpleSearch: false,
+          filterOnly: false,
+          highTextMatch: false,
+          vectorMatch: true,
+          explanation: null
+        }));
+
+        res.json({
+          products: response,
+          pagination: {
+            totalAvailable: response.length,
+            returned: response.length,
+            batchNumber: 1,
+            hasMore: false,
+            nextToken: null,
+            autoLoadMore: false,
+            secondBatchToken: null,
+            hasCategoryFiltering: false,
+            categoryFilterToken: null
+          },
+          metadata: {
+            query: query,
+            requestId: requestId,
+            executionTime: Date.now() - req.startTime || 0,
+            phase: 'vector-fallback',
+            extractedCategories: {
+              hardCategories: [],
+              softCategories: [],
+              textMatchCount: 0
+            },
+            tiers: {
+              hasTextMatchTier: false,
+              vectorFallback: true,
+              description: `Vector fallback: ${response.length} results returned`
+            }
+          }
+        });
+      } catch (vectorError) {
+        console.error(`[${requestId}] Error during vector fallback:`, vectorError);
+        res.status(500).json({ error: "Vector fallback search failed" });
+      }
+      return;
+    }
+
+    // Extract categories from these matches
+    const extractedHardCategories = new Set();
+    const extractedSoftCategories = new Set();
+
+    highQualityTextMatches.forEach(product => {
+      if (product.category) {
+        if (Array.isArray(product.category)) {
+          product.category.forEach(cat => {
+            if (cat && cat.trim()) extractedHardCategories.add(cat.trim());
+          });
+        } else if (typeof product.category === 'string' && product.category.trim()) {
+          extractedHardCategories.add(product.category.trim());
+        }
+      }
+
+      if (product.softCategory && Array.isArray(product.softCategory)) {
+        product.softCategory.forEach(cat => {
+          if (cat && cat.trim()) extractedSoftCategories.add(cat.trim());
+        });
+      }
+    });
+
+    const hardCategoriesArray = Array.from(extractedHardCategories);
+    const softCategoriesArray = Array.from(extractedSoftCategories);
+
+    console.log(`[${requestId}] Phase 1: Extracted ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
+
+    // Return text matches immediately
+    const response = highQualityTextMatches.slice(0, searchLimit).map(product => ({
+      _id: product._id.toString(),
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      type: product.type,
+      specialSales: product.specialSales,
+      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+      ItemID: product.ItemID,
+      highlight: true, // Text matches are highlighted
+      softFilterMatch: false,
+      softCategoryMatches: 0,
+      simpleSearch: false,
+      filterOnly: false,
+      highTextMatch: true, // Mark as text match
+      explanation: null
+    }));
+
+    res.json({
+      products: response,
+      pagination: {
+        totalAvailable: response.length,
+        returned: response.length,
+        batchNumber: 1,
+        hasMore: false,
+        nextToken: null,
+        autoLoadMore: false,
+        secondBatchToken: null,
+        hasCategoryFiltering: (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0),
+        categoryFilterToken: null
+      },
+      metadata: {
+        query: query,
+        requestId: requestId,
+        executionTime: Date.now() - req.startTime || 0,
+        phase: 'text-matches-only',
+        extractedCategories: {
+          hardCategories: hardCategoriesArray,
+          softCategories: softCategoriesArray,
+          textMatchCount: highQualityTextMatches.length
+        },
+        tiers: {
+          hasTextMatchTier: true,
+          highTextMatches: response.length,
+          description: `Phase 1: ${response.length} text matches found`
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] Error in text matches only phase:`, error);
+    res.status(500).json({ error: "Text matches search failed" });
+  }
+}
+
+// Handle Phase 2: Category-filtered results for progressive loading
+async function handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit) {
+  const { excludeIds = [] } = req.body;
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    const translatedQuery = await translateQuery(query, context);
+    const cleanedText = removeWineFromQuery(translatedQuery, noWord);
+
+    const hardCategoriesArray = extractedCategories.hardCategories || [];
+    const softCategoriesArray = extractedCategories.softCategories || [];
+
+    console.log(`[${requestId}] Phase 2: Filtering by ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
+    console.log(`[${requestId}] Excluding ${excludeIds.length} products already shown in Phase 1`);
+
+    // Create category filters
+    const categoryFilteredHardFilters = {};
+    if (hardCategoriesArray.length > 0) {
+      categoryFilteredHardFilters.category = hardCategoriesArray;
+    }
+
+    // Get category-filtered results
+    let categoryFilteredResults;
+
+    if (softCategoriesArray.length > 0) {
+      // Use soft category search
+      const queryEmbedding = await getQueryEmbedding(cleanedText);
+      categoryFilteredResults = await executeExplicitSoftCategorySearch(
+        collection,
+        cleanedText,
+        query,
+        categoryFilteredHardFilters,
+        softCategoriesArray,
+        queryEmbedding,
+        searchLimit * 2,
+        searchLimit,
+        true, // useOrLogic
+        false,
+        cleanedText,
+        excludeIds // Exclude products already shown in Phase 1
+      );
+    } else {
+      // Category filter only
+      const searchPromises = [
+        collection.aggregate(buildStandardSearchPipeline(
+          cleanedText, query, categoryFilteredHardFilters, searchLimit, true, false, excludeIds
+        )).toArray(),
+        collection.aggregate(buildStandardVectorSearchPipeline(
+          await getQueryEmbedding(cleanedText), categoryFilteredHardFilters, searchLimit, true, excludeIds
+        )).toArray()
+      ];
+
+      const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
+
+      const docRanks = new Map();
+      fuzzyRes.forEach((doc, index) => {
+        docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+      });
+      vectorRes.forEach((doc, index) => {
+        const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+        docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
+      });
+
+      categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
+        const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+        const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+        return {
+          ...doc,
+          rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
+          softFilterMatch: false,
+          softCategoryMatches: 0,
+          exactMatchBonus: exactMatchBonus,
+          fuzzyRank: ranks.fuzzyRank,
+          vectorRank: ranks.vectorRank
+        };
+      }).sort((a, b) => b.rrf_score - a.rrf_score);
+    }
+
+    // Return category-filtered results
+    const response = (categoryFilteredResults || []).slice(0, searchLimit).map(product => ({
+      _id: product._id.toString(),
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      type: product.type,
+      specialSales: product.specialSales,
+      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+      ItemID: product.ItemID,
+      highlight: false,
+      softFilterMatch: false,
+      softCategoryMatches: 0,
+      simpleSearch: false,
+      filterOnly: false,
+      softCategoryExpansion: true, // Mark as category-filtered
+      explanation: null
+    }));
+
+    console.log(`[${requestId}] Phase 2: Returning ${response.length} category-filtered results`);
+
+    res.json({
+      products: response,
+      pagination: {
+        totalAvailable: response.length,
+        returned: response.length,
+        batchNumber: 2,
+        hasMore: false,
+        nextToken: null,
+        autoLoadMore: false,
+        secondBatchToken: null,
+        hasCategoryFiltering: false,
+        categoryFilterToken: null
+      },
+      metadata: {
+        query: query,
+        requestId: requestId,
+        executionTime: Date.now() - req.startTime || 0,
+        phase: 'category-filtered',
+        extractedCategories: extractedCategories,
+        tiers: {
+          hasCategoryExpansion: true,
+          categoryRelated: response.length,
+          description: `Phase 2: ${response.length} category-filtered results`
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] Error in category filtered phase:`, error);
+    res.status(500).json({ error: "Category filtered search failed" });
+  }
+}
+
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
   
-  const { query, example, noWord, noHebrewWord, context, useImages, modern } = req.body;
+  const { query, example, noWord, noHebrewWord, context, useImages, modern, phase, extractedCategories } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
   // Default to legacy mode (array only) for backward compatibility
@@ -3109,13 +3561,24 @@ app.post("/search", async (req, res) => {
     const collection = db.collection("products");
     const querycollection = db.collection("queries");
 
-    const initialFilters = {};
-    const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
-    const isComplexQueryResult = !isSimpleResult;
-    
-    console.log(`[${requestId}] Query classification: "${query}" → ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'}`);
-    
-    const translatedQuery = await translateQuery(query, context);
+  const initialFilters = {};
+  const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
+  const isComplexQueryResult = !isSimpleResult;
+
+  console.log(`[${requestId}] Query classification: "${query}" → ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'}`);
+
+  // Handle progressive loading phases
+  if (phase === 'text-matches-only' && isSimpleResult) {
+    console.log(`[${requestId}] 🚀 Phase 1: Returning text matches only`);
+    return await handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, finalSoftCategories, dbName, collectionName, searchLimit);
+  }
+
+  if (phase === 'category-filtered' && extractedCategories && isSimpleResult) {
+    console.log(`[${requestId}] 📂 Phase 2: Returning category-filtered results`);
+    return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit);
+  }
+
+  const translatedQuery = await translateQuery(query, context);
 
     if (!translatedQuery) {
       return res.status(500).json({ error: "Error translating query" });
@@ -3295,6 +3758,7 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] Cleaned query for fuzzy search:`, cleanedHebrewText);
 
     let combinedResults = [];
+    let extractedCategoriesMetadata = null; // Store extracted categories for progressive loading
     let reorderedData;
     let llmReorderingSuccessful = false;
       
@@ -3416,6 +3880,210 @@ app.post("/search", async (req, res) => {
         .sort((a, b) => b.rrf_score - a.rrf_score);
     }
 
+      // TWO-STEP SEARCH FOR SIMPLE QUERIES
+      // Step 1: Pure text search to find strong matches
+      // Step 2: Extract categories and do category-filtered search
+      if (isSimpleResult && !shouldUseFilterOnly) {
+        console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
+
+        try {
+          // STEP 1: Pure text search to find strong matches
+          console.log(`[${requestId}] Step 1: Performing pure text search...`);
+          const textSearchLimit = Math.max(searchLimit, 50); // Get more candidates for better category extraction
+
+          const textSearchPipeline = buildStandardSearchPipeline(
+            cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
+          );
+
+          // Add project to ensure we get categories
+          textSearchPipeline.push({
+            $project: {
+              id: 1,
+              name: 1,
+              description: 1,
+              price: 1,
+              image: 1,
+              url: 1,
+              type: 1,
+              specialSales: 1,
+              ItemID: 1,
+              category: 1,
+              softCategory: 1,
+              stockStatus: 1
+            }
+          });
+
+          const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
+          console.log(`[${requestId}] Step 1: Found ${textSearchResults.length} text search results`);
+
+          // Calculate text match bonuses for these results
+          const textResultsWithBonuses = textSearchResults.map(doc => ({
+            ...doc,
+            exactMatchBonus: getExactMatchBonus(doc.name, query, cleanedText),
+            rrf_score: 0, // Will be calculated in step 2
+            softFilterMatch: false,
+            softCategoryMatches: 0
+          }));
+
+          // Filter for high-quality text matches (lower threshold for better extraction)
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 10000);
+
+          if (highQualityTextMatches.length > 0) {
+            console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches`);
+
+            // STEP 2: Extract categories from high-quality text matches
+            console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
+
+            const extractedHardCategories = new Set();
+            const extractedSoftCategories = new Set();
+
+            highQualityTextMatches.forEach(product => {
+              // Extract hard categories
+              if (product.category) {
+                if (Array.isArray(product.category)) {
+                  product.category.forEach(cat => {
+                    if (cat && cat.trim()) extractedHardCategories.add(cat.trim());
+                  });
+                } else if (typeof product.category === 'string' && product.category.trim()) {
+                  extractedHardCategories.add(product.category.trim());
+                }
+              }
+
+              // Extract soft categories
+              if (product.softCategory && Array.isArray(product.softCategory)) {
+                product.softCategory.forEach(cat => {
+                  if (cat && cat.trim()) extractedSoftCategories.add(cat.trim());
+                });
+              }
+            });
+
+            const hardCategoriesArray = Array.from(extractedHardCategories);
+            const softCategoriesArray = Array.from(extractedSoftCategories);
+
+            console.log(`[${requestId}] 🏷️ Extracted categories: ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft`);
+            if (hardCategoriesArray.length > 0) {
+              console.log(`[${requestId}] Hard categories: ${JSON.stringify(hardCategoriesArray)}`);
+            }
+            if (softCategoriesArray.length > 0) {
+              console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
+            }
+
+            if (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0) {
+              // STEP 3: Perform category-filtered search
+              console.log(`[${requestId}] Step 3: Performing category-filtered search...`);
+
+              const categoryFilteredHardFilters = { ...hardFilters };
+              if (hardCategoriesArray.length > 0) {
+                categoryFilteredHardFilters.category = hardCategoriesArray;
+              }
+
+              // Get full category-filtered results
+              let categoryFilteredResults;
+
+              if (softCategoriesArray.length > 0) {
+                // Use soft category search
+                categoryFilteredResults = await executeExplicitSoftCategorySearch(
+                  collection,
+                  cleanedText,
+                  query,
+                  categoryFilteredHardFilters,
+                  softCategoriesArray,
+                  queryEmbedding,
+                  searchLimit * 2, // Get more results
+                  vectorLimit,
+                  true, // useOrLogic
+                  false,
+                  cleanedText,
+                  []
+                );
+              } else {
+                // Category filter only
+                const searchPromises = [
+                  collection.aggregate(buildStandardSearchPipeline(
+                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true
+                  )).toArray(),
+                  collection.aggregate(buildStandardVectorSearchPipeline(
+                    queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+                  )).toArray()
+                ];
+
+                const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
+
+                const docRanks = new Map();
+                fuzzyRes.forEach((doc, index) => {
+                  docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+                });
+                vectorRes.forEach((doc, index) => {
+                  const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+                  docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
+                });
+
+                categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
+                  const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+                  const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+                  return {
+                    ...doc,
+                    rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
+                    softFilterMatch: false,
+                    softCategoryMatches: 0,
+                    exactMatchBonus: exactMatchBonus,
+                    fuzzyRank: ranks.fuzzyRank,
+                    vectorRank: ranks.vectorRank
+                  };
+                }).sort((a, b) => b.rrf_score - a.rrf_score);
+              }
+
+              if (categoryFilteredResults && categoryFilteredResults.length > 0) {
+                console.log(`[${requestId}] ✅ Category-filtered search completed: ${categoryFilteredResults.length} results`);
+
+                // Preserve original text match bonuses and mark for tier separation
+                const textMatchMap = new Map();
+                highQualityTextMatches.forEach(match => {
+                  textMatchMap.set(match._id.toString(), {
+                    originalBonus: match.exactMatchBonus,
+                    isTextMatch: true
+                  });
+                });
+
+                const finalResults = categoryFilteredResults.map(p => {
+                  const textMatchInfo = textMatchMap.get(p._id.toString());
+                  return {
+                    ...p,
+                    exactMatchBonus: textMatchInfo ? Math.max(p.exactMatchBonus || 0, textMatchInfo.originalBonus) : p.exactMatchBonus,
+                    highTextMatch: !!textMatchInfo // Mark original text matches as Tier 1
+                  };
+                });
+
+                // Replace combinedResults with category-filtered results
+                combinedResults = finalResults;
+
+                // Store metadata for response
+                extractedCategoriesMetadata = {
+                  hardCategories: hardCategoriesArray,
+                  softCategories: softCategoriesArray,
+                  textMatchCount: highQualityTextMatches.length,
+                  categoryFiltered: true
+                };
+
+                console.log(`[${requestId}] 🎯 Two-step search completed successfully`);
+              } else {
+                console.log(`[${requestId}] ⚠️ Category-filtered search returned no results, keeping original approach`);
+                // Fall back to original combined results
+                extractedCategoriesMetadata = null;
+              }
+            } else {
+              console.log(`[${requestId}] No categories extracted, using original search results`);
+            }
+          } else {
+            console.log(`[${requestId}] No high-quality text matches found, using original search`);
+          }
+        } catch (error) {
+          console.error(`[${requestId}] Error in two-step search:`, error.message);
+          // Fall back to original combined results
+          extractedCategoriesMetadata = null;
+        }
+      }
+
       // LLM reordering only for complex queries (not just any query with soft filters)
       // Skip LLM reordering if circuit breaker is open
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI();
@@ -3468,34 +4136,42 @@ app.post("/search", async (req, res) => {
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
 
-    // BINARY SORTING: For simple queries, text keyword matches have highest priority
-    // For complex queries, soft category matches have priority
-    // Also apply text-match prioritization for simple queries even without soft filters
+    // TEXT MATCH PRIORITY SORTING: Text matches prioritized for simple queries
+    // Complex queries use regular RRF scoring
     if (hasSoftFilters || isSimpleResult) {
       if (isSimpleResult) {
         console.log(`[${requestId}] Applying text-match-first sorting for simple query`);
       } else if (hasSoftFilters) {
         console.log(`[${requestId}] Applying binary soft category sorting for complex query`);
       }
-      
+
       combinedResults.sort((a, b) => {
         const aMatches = a.softCategoryMatches || 0;
         const bMatches = b.softCategoryMatches || 0;
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
-        
+
         // For simple queries: text keyword matches have ABSOLUTE PRIORITY - regardless of soft categories
         if (isSimpleResult) {
-          const aHasTextMatch = (a.exactMatchBonus || 0) > 0;
-          const bHasTextMatch = (b.exactMatchBonus || 0) > 0;
-          
+          // Check for text matches: either high exactMatchBonus OR marked as highTextMatch (from two-step search)
+          const aHasTextMatch = (a.exactMatchBonus || 0) >= 20000 || a.highTextMatch === true;
+          const bHasTextMatch = (b.exactMatchBonus || 0) >= 20000 || b.highTextMatch === true;
+
           // Text matches ALWAYS come first for simple queries, even over multi-category products
           if (aHasTextMatch !== bHasTextMatch) {
             return aHasTextMatch ? -1 : 1;
           }
-          
-          // If both have text matches, sort by text match strength FIRST
+
+          // If both have text matches, prioritize marked text matches (from two-step search) first
           if (aHasTextMatch && bHasTextMatch) {
+            const aIsMarkedTextMatch = a.highTextMatch === true;
+            const bIsMarkedTextMatch = b.highTextMatch === true;
+
+            if (aIsMarkedTextMatch !== bIsMarkedTextMatch) {
+              return aIsMarkedTextMatch ? -1 : 1; // Marked text matches first
+            }
+
+            // Within same type, sort by text match strength
             const textMatchDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
             if (textMatchDiff !== 0) {
               return textMatchDiff;
@@ -3503,7 +4179,7 @@ app.post("/search", async (req, res) => {
             // Within same text match strength, still prioritize by score
             return b.rrf_score - a.rrf_score;
           }
-          
+
           // If neither has text match, continue with soft category logic below (if applicable)
           // For simple queries without soft filters, just sort by score
           if (!hasSoftFilters) {
@@ -3536,29 +4212,37 @@ app.post("/search", async (req, res) => {
         // Within same soft match status, sort by score
         return b.rrf_score - a.rrf_score;
       });
-      
-      const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2);
-      const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1);
-      const textMatchProducts = combinedResults.filter(r => (r.exactMatchBonus || 0) > 0);
-      
-      if (isSimpleResult) {
-        console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - HIGHEST PRIORITY for simple queries`);
-      }
-      console.log(`[${requestId}] Multi-category products (2+ matches): ${multiCategoryProducts.length} - ABSOLUTE PRIORITY`);
-      console.log(`[${requestId}] Single-category products: ${singleCategoryProducts.length}`);
-      
-      const topResults = combinedResults.slice(0, 5);
-      console.log(`[${requestId}] Top 5 results after sorting:`, 
-        topResults.map(p => ({
-          name: p.name,
-          textMatchBonus: p.exactMatchBonus || 0,
-          softCategoryMatches: p.softCategoryMatches || 0,
-          rrf_score: p.rrf_score,
-          isMultiCategory: (p.softCategoryMatches || 0) >= 2,
-          hasTextMatch: (p.exactMatchBonus || 0) > 0
-        }))
-      );
+
+    } else {
+      // No special sorting conditions, just sort by RRF score
+      console.log(`[${requestId}] Sorting by RRF score only`);
+      combinedResults.sort((a, b) => b.rrf_score - a.rrf_score);
     }
+
+    // Log results breakdown
+    const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2);
+    const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1);
+    const textMatchProducts = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 20000); // Use same threshold
+
+    if (isSimpleResult) {
+      console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - HIGHEST PRIORITY for simple queries`);
+    } else {
+      console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - not prioritized for complex queries`);
+    }
+    console.log(`[${requestId}] Multi-category products (2+ matches): ${multiCategoryProducts.length} - ABSOLUTE PRIORITY`);
+    console.log(`[${requestId}] Single-category products: ${singleCategoryProducts.length}`);
+
+    const topResults = combinedResults.slice(0, 5);
+    console.log(`[${requestId}] Top 5 results after sorting:`,
+      topResults.map(p => ({
+        name: p.name,
+        textMatchBonus: p.exactMatchBonus || 0,
+        softCategoryMatches: p.softCategoryMatches || 0,
+        rrf_score: p.rrf_score,
+        isMultiCategory: (p.softCategoryMatches || 0) >= 2,
+        hasTextMatch: (p.exactMatchBonus || 0) >= 20000
+      }))
+    );
 
     // LLM reordering for complex queries
 
@@ -3607,7 +4291,8 @@ app.post("/search", async (req, res) => {
           softCategoryMatches: resultData?.softCategoryMatches || 0,
           simpleSearch: false,
           filterOnly: !!(resultData?.filterOnly),
-          highTextMatch: isHighTextMatch // Flag for tier separation
+          highTextMatch: isHighTextMatch, // Flag for tier separation (Tier 1)
+          softCategoryExpansion: !!(resultData?.softCategoryExpansion) // Flag for soft category related products (Tier 2)
         };
       }),
       ...remainingResults.map((r) => {
@@ -3634,7 +4319,8 @@ app.post("/search", async (req, res) => {
           softCategoryMatches: r.softCategoryMatches || 0,
           simpleSearch: false,
           filterOnly: !!r.filterOnly,
-          highTextMatch: isHighTextMatch // Flag for tier separation
+          highTextMatch: isHighTextMatch, // Flag for tier separation (Tier 1)
+          softCategoryExpansion: !!r.softCategoryExpansion // Flag for soft category related products (Tier 2)
         };
       }),
     ];
@@ -3687,25 +4373,59 @@ app.post("/search", async (req, res) => {
       timestamp: Date.now()
     })).toString('base64') : null;
     
+    // Create category-filtered token only for progressive loading (not for two-step search)
+    const categoryFilterToken = (extractedCategoriesMetadata && !extractedCategoriesMetadata.categoryFiltered)
+      ? Buffer.from(JSON.stringify({
+          query,
+          filters: enhancedFilters,
+          extractedCategories: extractedCategoriesMetadata,
+          timestamp: Date.now(),
+          type: 'category-filtered'
+        })).toString('base64')
+      : null;
+    
     // Return products array without per-product metadata (for backward compatibility)
     const response = limitedResults;
     
     // Calculate tier statistics for simple queries
     let tierInfo = null;
     if (isSimpleResult) {
-      const highTextMatchCount = response.filter(p => p.highTextMatch).length;
-      const otherResultsCount = response.length - highTextMatchCount;
-      
-      tierInfo = {
-        hasTextMatchTier: highTextMatchCount > 0,
-        highTextMatches: highTextMatchCount,
-        otherResults: otherResultsCount,
-        description: highTextMatchCount > 0 
-          ? `${highTextMatchCount} high text match${highTextMatchCount > 1 ? 'es' : ''}, ${otherResultsCount} related result${otherResultsCount !== 1 ? 's' : ''}`
-          : 'No high text matches found'
-      };
-      
-      console.log(`[${requestId}] Simple query tiers: ${highTextMatchCount} high text matches, ${otherResultsCount} other results`);
+      if (extractedCategoriesMetadata?.categoryFiltered) {
+        // Two-step search results
+        const highTextMatchCount = response.filter(p => p.highTextMatch === true).length;
+        const categoryFilteredCount = response.length - highTextMatchCount;
+
+        tierInfo = {
+          hasTextMatchTier: highTextMatchCount > 0,
+          hasCategoryFiltered: true,
+          highTextMatches: highTextMatchCount,
+          categoryFiltered: categoryFilteredCount,
+          otherResults: 0,
+          description: `Two-step search: ${highTextMatchCount} text matches, ${categoryFilteredCount} category-filtered results`,
+          searchMethod: 'two-step'
+        };
+
+        console.log(`[${requestId}] Two-step search tiers: ${highTextMatchCount} text matches, ${categoryFilteredCount} category-filtered`);
+      } else {
+        // Original search results
+        const highTextMatchCount = response.filter(p => p.highTextMatch).length;
+        const softCategoryExpansionCount = response.filter(p => p.softCategoryExpansion).length;
+        const otherResultsCount = response.length - highTextMatchCount - softCategoryExpansionCount;
+
+        tierInfo = {
+          hasTextMatchTier: highTextMatchCount > 0,
+          hasCategoryExpansion: softCategoryExpansionCount > 0,
+          highTextMatches: highTextMatchCount,
+          categoryRelated: softCategoryExpansionCount,
+          otherResults: otherResultsCount,
+          description: highTextMatchCount > 0
+            ? `${highTextMatchCount} exact match${highTextMatchCount > 1 ? 'es' : ''}, ${softCategoryExpansionCount} related via categories, ${otherResultsCount} other result${otherResultsCount !== 1 ? 's' : ''}`
+            : 'No exact matches found',
+          searchMethod: 'original'
+        };
+
+        console.log(`[${requestId}] Original search tiers: ${highTextMatchCount} exact matches, ${softCategoryExpansionCount} category related, ${otherResultsCount} other results`);
+      }
     }
     
     // Send response with pagination metadata (manual load-more enabled, auto-load-more disabled)
@@ -3718,19 +4438,25 @@ app.post("/search", async (req, res) => {
         hasMore: hasMore,
         nextToken: nextToken, // Token for manual load-more
         autoLoadMore: false, // Auto-load-more disabled
-        secondBatchToken: null // No auto-load token
+        secondBatchToken: null, // No auto-load token
+        categoryFilterToken: categoryFilterToken, // Token for category-filtered results
+        hasCategoryFiltering: !!categoryFilterToken // Flag indicating category-filtered results available
       },
       metadata: {
         query: query,
         requestId: requestId,
         executionTime: executionTime,
-        ...(tierInfo && { tiers: tierInfo }) // Include tier info for simple queries
+        ...(tierInfo && { tiers: tierInfo }), // Include tier info for simple queries
+        ...(extractedCategoriesMetadata && { extractedCategories: extractedCategoriesMetadata }) // Include extracted categories
       }
     };
     
     console.log(`[${requestId}] === SEARCH RESPONSE ===`);
     console.log(`[${requestId}] Total products: ${searchResponse.products.length}`);
     console.log(`[${requestId}] Mode: ${isLegacyMode ? 'LEGACY (array)' : 'MODERN (with pagination)'}`);
+    if (categoryFilterToken) {
+      console.log(`[${requestId}] ⚡ Category-filtered results available via load-more (Tier 2)`);
+    }
     if (searchResponse.products.length > 0) {
       console.log(`[${requestId}] First product sample:`, JSON.stringify(searchResponse.products[0], null, 2));
     }

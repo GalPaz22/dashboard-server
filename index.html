@@ -268,6 +268,49 @@
             background: #663399;
         }
 
+        .btn-category-filter {
+            background: #f59e0b;
+            color: white;
+            padding: 14px 32px;
+            margin-top: 10px;
+        }
+
+        .btn-category-filter:hover {
+            background: #d97706;
+        }
+
+        .tier-badge {
+            background: #10b981;
+            color: white;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-weight: 600;
+        }
+
+        .tier-2-badge {
+            background: #3b82f6;
+        }
+
+        .category-info {
+            margin-top: 15px;
+            padding: 12px;
+            background: #fef3c7;
+            border-left: 4px solid #f59e0b;
+            border-radius: 6px;
+            font-size: 13px;
+        }
+
+        .category-info-title {
+            font-weight: 600;
+            margin-bottom: 8px;
+            color: #92400e;
+        }
+
+        .category-list {
+            color: #78350f;
+        }
+
         .metadata {
             margin-top: 20px;
             padding: 15px;
@@ -322,6 +365,11 @@
     
 
             <div class="form-group">
+                <label for="apiKeyInput">API Key</label>
+                <input type="text" id="apiKeyInput" placeholder="Enter API key">
+            </div>
+
+            <div class="form-group">
                 <label for="searchQuery">Search Query</label>
                 <input type="text" id="searchQuery" placeholder="Enter search query (e.g., יין אדום)">
             </div>
@@ -355,6 +403,15 @@
                     <button class="btn-load-more" onclick="loadMore()">Load More Products</button>
                 </div>
 
+                <div id="categoryFilterSection" class="load-more-section hidden">
+                    <div id="categoryInfo" class="category-info"></div>
+                    <div id="categoryFilterButton" style="display: none;">
+                        <button class="btn-category-filter" onclick="loadCategoryFiltered()">
+                            🔍 Show All Category-Matched Products
+                        </button>
+                    </div>
+                </div>
+
                 <div class="metadata" id="metadata"></div>
             </div>
         </div>
@@ -364,9 +421,11 @@
         let currentSearchData = null;
         let allProducts = [];
         let currentBatch = 1;
+        let currentApiKey = '';
 
         async function performSearch() {
-            const apiKey = 'fe68c9a09570036a82b98534rggggf45'
+            const apiKeyInput = document.getElementById('apiKeyInput');
+            const apiKey = apiKeyInput.value.trim();
             const query = document.getElementById('searchQuery').value.trim();
 
             if (!apiKey) {
@@ -379,6 +438,10 @@
                 return;
             }
 
+            // Persist API key locally
+            currentApiKey = apiKey;
+            localStorage.setItem('searchDashboardApiKey', apiKey);
+
             // Reset state
             allProducts = [];
             currentBatch = 1;
@@ -387,8 +450,9 @@
             showLoading();
 
             try {
-                // First batch
-                const response = await fetch('https://api.semantix-ai.com/search', {
+                // PHASE 1: Get text matches only (fast response)
+                console.log('🚀 Phase 1: Requesting text matches only...');
+                const phase1Response = await fetch('http://localhost:8000/search', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
@@ -398,21 +462,94 @@
                         query: query,
                         context: 'wine store',
                         explain: true,
-                        modern: true
+                        modern: true,
+                        phase: 'text-matches-only',
                     })
                 });
 
-                if (!response.ok) {
-                    const errorData = await response.json();
-                    throw new Error(errorData.error || 'Search failed');
+                if (!phase1Response.ok) {
+                    const errorData = await phase1Response.json();
+                    throw new Error(errorData.error || 'Text matches search failed');
                 }
 
-                const data = await response.json();
-                currentSearchData = data;
-                allProducts = data.products || [];
+                const phase1Data = await phase1Response.json();
+                console.log(`✅ Phase 1: Got ${phase1Data.products?.length || 0} text matches in ${phase1Data.metadata?.executionTime}ms`);
+
+                // Display text matches immediately
+                currentSearchData = phase1Data;
+                allProducts = phase1Data.products || [];
+                displayResults(phase1Data);
 
                 hideLoading();
-                displayResults(data);
+
+                // PHASE 2: Load category-filtered results in background (if categories were extracted)
+                if (phase1Data.pagination?.hasCategoryFiltering && phase1Data.metadata?.extractedCategories) {
+                    console.log('📂 Phase 2: Loading category-filtered results in background...');
+
+                    // Show loading indicator for additional results
+                    const categoryFilterSection = document.getElementById('categoryFilterSection');
+                    const categoryInfo = document.getElementById('categoryInfo');
+                    categoryInfo.innerHTML = '<div class="category-info-title">🔄 Loading additional category-filtered results...</div>';
+                    categoryFilterSection.classList.remove('hidden');
+
+                    try {
+                        // Get IDs of products already shown in Phase 1
+                        const phase1ProductIds = phase1Data.products.map(p => p._id);
+
+                        const phase2Response = await fetch('http://localhost:8000/search', {
+                            method: 'POST',
+                            headers: {
+                                'Content-Type': 'application/json',
+                                'X-API-Key': apiKey
+                            },
+                            body: JSON.stringify({
+                                query: query,
+                                context: 'wine store',
+                                modern: true,
+                                phase: 'category-filtered',
+                                extractedCategories: phase1Data.metadata.extractedCategories,
+                                excludeIds: phase1ProductIds // Exclude products already shown
+                            })
+                        });
+
+                        if (phase2Response.ok) {
+                            const phase2Data = await phase2Response.json();
+                            console.log(`✅ Phase 2: Got ${phase2Data.products?.length || 0} category-filtered results in ${phase2Data.metadata?.executionTime}ms`);
+
+                            // Append category-filtered results
+                            if (phase2Data.products && phase2Data.products.length > 0) {
+                                allProducts = [...allProducts, ...phase2Data.products];
+                                appendProducts(phase2Data.products);
+
+                                // Update UI
+                                document.getElementById('resultsCount').textContent = `${allProducts.length} products found (${phase1Data.products.length} text matches + ${phase2Data.products.length} category-filtered)`;
+
+                                // Update metadata
+                                const extractedCats = phase1Data.metadata.extractedCategories;
+                                categoryInfo.innerHTML = `
+                                    <div class="category-info-title">✅ Progressive Loading Complete:</div>
+                                    <div class="category-list"><strong>Text Matches:</strong> ${phase1Data.products.length} products</div>
+                                    <div class="category-list"><strong>Category-Filtered:</strong> ${phase2Data.products.length} products</div>
+                                    ${extractedCats.hardCategories?.length > 0 ? `<div class="category-list"><strong>Types:</strong> ${extractedCats.hardCategories.join(', ')}</div>` : ''}
+                                    ${extractedCats.softCategories?.length > 0 ? `<div class="category-list"><strong>Tags:</strong> ${extractedCats.softCategories.join(', ')}</div>` : ''}
+                                `;
+
+                                // Hide after 5 seconds
+                                setTimeout(() => {
+                                    categoryFilterSection.classList.add('hidden');
+                                }, 5000);
+                            }
+                        } else {
+                            console.log('⚠️ Phase 2 failed, but text matches are still displayed');
+                            categoryInfo.innerHTML = '<div class="category-info-title">⚠️ Text matches loaded, but additional results failed</div>';
+                        }
+                    } catch (phase2Error) {
+                        console.error('Phase 2 error:', phase2Error);
+                        categoryInfo.innerHTML = '<div class="category-info-title">⚠️ Text matches loaded, but additional results failed</div>';
+                    }
+                } else {
+                    console.log('ℹ️ No category filtering needed for this query');
+                }
 
             } catch (error) {
                 hideLoading();
@@ -427,9 +564,10 @@
             showLoading();
 
             try {
-                const response = await fetch(`https://api.semantix-ai.com/search/load-more?token=${encodeURIComponent(token)}`, {
-                    method: 'GET'
-                });
+            const response = await fetch(`http://localhost:8000/search/load-more?token=${encodeURIComponent(token)}`, {
+                method: 'GET',
+                headers: currentApiKey ? { 'X-API-Key': currentApiKey } : {}
+            });
 
                 if (!response.ok) {
                     const errorData = await response.json();
@@ -465,12 +603,66 @@
             }
         }
 
+        async function loadCategoryFiltered() {
+            if (!currentSearchData?.pagination?.categoryFilterToken) {
+                console.error('No category filter token available');
+                return;
+            }
+
+            const token = currentSearchData.pagination.categoryFilterToken;
+            const extractedCats = currentSearchData.metadata?.extractedCategories;
+            
+            console.log('Loading category-filtered results:', extractedCats);
+            showLoading();
+
+            try {
+                const response = await fetch(`http://localhost:8000/search/load-more?token=${encodeURIComponent(token)}&limit=50`, {
+                    method: 'GET',
+                    headers: currentApiKey ? { 'X-API-Key': currentApiKey } : {}
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || 'Category filter failed');
+                }
+
+                const data = await response.json();
+                hideLoading();
+                
+                if (data.products && data.products.length > 0) {
+                    // Append Tier 2 products
+                    allProducts = [...allProducts, ...data.products];
+                    appendProducts(data.products);
+                    
+                    // Update UI
+                    document.getElementById('resultsCount').textContent = `${allProducts.length} products found (including ${data.products.length} category-filtered)`;
+                    
+                    console.log(`✅ Loaded ${data.products.length} category-filtered products (Tier 2)`);
+                    
+                    // Show success message
+                    const categoryInfo = document.getElementById('categoryInfo');
+                    categoryInfo.innerHTML = `<div class="category-info-title">✅ Loaded ${data.products.length} products from matching categories</div>`;
+                    
+                    // Hide button after loading
+                    setTimeout(() => {
+                        document.getElementById('categoryFilterSection').classList.add('hidden');
+                    }, 3000);
+                }
+
+            } catch (error) {
+                hideLoading();
+                showError('Category filter failed: ' + error.message);
+            }
+        }
+
         function displayResults(data) {
             const resultsContainer = document.getElementById('resultsContainer');
             const productsGrid = document.getElementById('productsGrid');
             const resultsCount = document.getElementById('resultsCount');
             const batchIndicator = document.getElementById('batchIndicator');
             const loadMoreSection = document.getElementById('loadMoreSection');
+            const categoryFilterSection = document.getElementById('categoryFilterSection');
+            const categoryInfo = document.getElementById('categoryInfo');
             const metadata = document.getElementById('metadata');
 
             // Clear previous results
@@ -478,7 +670,12 @@
 
             // Update count
             const total = data.products?.length || 0;
-            resultsCount.textContent = `${total} products found`;
+            const tierInfo = data.metadata?.tiers;
+            let countText = `${total} products found`;
+            if (tierInfo && tierInfo.hasTextMatchTier) {
+                countText = `${total} products (${tierInfo.highTextMatches} exact matches, ${tierInfo.otherResults} related)`;
+            }
+            resultsCount.textContent = countText;
             batchIndicator.textContent = 'Batch 1';
 
             // Display products
@@ -495,14 +692,75 @@
                 loadMoreSection.classList.add('hidden');
             }
 
+            // Show/hide category filter section
+            if (data.metadata?.extractedCategories) {
+                const extractedCats = data.metadata.extractedCategories;
+                const tierInfo = data.metadata.tiers;
+                const phase = data.metadata.phase;
+
+                let infoHTML = '';
+
+                if (phase === 'text-matches-only') {
+                    // Phase 1: Text matches loaded, Phase 2 loading
+                    infoHTML = '<div class="category-info-title">🚀 Phase 1: Text Matches Loaded</div>';
+                    infoHTML += `<div class="category-list"><strong>Text Matches:</strong> ${tierInfo?.highTextMatches || data.products.length} products</div>`;
+                    infoHTML += '<div class="category-list"><strong>Status:</strong> Loading additional category-filtered results...</div>';
+                } else if (phase === 'category-filtered') {
+                    // Phase 2: Category-filtered results
+                    infoHTML = '<div class="category-info-title">📂 Phase 2: Category-Filtered Results</div>';
+                    infoHTML += `<div class="category-list"><strong>Category-Filtered:</strong> ${tierInfo?.categoryRelated || data.products.length} products</div>`;
+                } else if (tierInfo?.searchMethod === 'two-step') {
+                    // Two-step search completed - show results summary
+                    infoHTML = '<div class="category-info-title">✅ Category-Filtered Search Results:</div>';
+                    infoHTML += `<div class="category-list"><strong>Method:</strong> Two-step search with category filtering</div>`;
+                    if (tierInfo.highTextMatches > 0) {
+                        infoHTML += `<div class="category-list"><strong>Text Matches:</strong> ${tierInfo.highTextMatches} products</div>`;
+                    }
+                    infoHTML += `<div class="category-list"><strong>Category-Filtered:</strong> ${tierInfo.categoryFiltered} products</div>`;
+                } else if (data.pagination?.hasCategoryFiltering && data.pagination?.categoryFilterToken) {
+                    // Progressive loading available
+                    infoHTML = '<div class="category-info-title">📋 Categories Found in Results:</div>';
+                }
+
+                // Show categories
+                if (extractedCats.hardCategories && extractedCats.hardCategories.length > 0) {
+                    infoHTML += `<div class="category-list"><strong>Types:</strong> ${extractedCats.hardCategories.join(', ')}</div>`;
+                }
+                if (extractedCats.softCategories && extractedCats.softCategories.length > 0) {
+                    infoHTML += `<div class="category-list"><strong>Tags:</strong> ${extractedCats.softCategories.join(', ')}</div>`;
+                }
+
+                categoryInfo.innerHTML = infoHTML;
+
+                // Show button only for progressive loading, not for two-step search
+                const buttonElement = document.getElementById('categoryFilterButton');
+                if (tierInfo?.searchMethod === 'two-step' || phase === 'text-matches-only' || phase === 'category-filtered') {
+                    buttonElement.style.display = 'none';
+                } else if (data.pagination?.hasCategoryFiltering && data.pagination?.categoryFilterToken) {
+                    buttonElement.style.display = 'block';
+                } else {
+                    buttonElement.style.display = 'none';
+                }
+
+                categoryFilterSection.classList.remove('hidden');
+            } else {
+                categoryFilterSection.classList.add('hidden');
+            }
+
             // Display metadata
-            metadata.innerHTML = `
+            let metadataHTML = `
                 <div class="metadata-item"><strong>Query:</strong> ${data.metadata?.query || 'N/A'}</div>
                 <div class="metadata-item"><strong>Request ID:</strong> ${data.metadata?.requestId || 'N/A'}</div>
-                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms</div>
+                <div class="metadata-item"><strong>Execution Time:</strong> ${data.metadata?.executionTime || 0}ms ⚡</div>
                 <div class="metadata-item"><strong>Total Available:</strong> ${data.pagination?.totalAvailable || 'N/A'}</div>
                 <div class="metadata-item"><strong>Has More:</strong> ${data.pagination?.hasMore ? '✅ Yes (click Load More)' : '❌ No'}</div>
             `;
+            
+            if (data.metadata?.extractedCategories) {
+                metadataHTML += `<div class="metadata-item"><strong>Category Filtering:</strong> ✅ Available (click button to load)</div>`;
+            }
+            
+            metadata.innerHTML = metadataHTML;
 
             resultsContainer.classList.remove('hidden');
         }
@@ -523,6 +781,14 @@
             card.className = `product-card ${product.highlight ? 'highlighted' : ''}`;
 
             const badges = [];
+            
+            // Tier badges for two-step search
+            if (product.highTextMatch === true) {
+                badges.push('<span class="badge tier-badge">🎯 Tier 1: Text Match</span>');
+            } else if (product.softCategoryExpansion) {
+                badges.push('<span class="badge tier-badge tier-2-badge">📂 Tier 2: Category Match</span>');
+            }
+            
             if (product.highlight) badges.push('<span class="badge badge-highlight">⭐ Highlighted</span>');
             if (product.softFilterMatch) badges.push(`<span class="badge badge-soft">Soft Match (${product.softCategoryMatches || 0})</span>`);
             if (product.type) badges.push(`<span class="badge badge-type">${product.type}</span>`);
@@ -629,6 +895,13 @@ Version: ${data.redis.version || 'N/A'}
                 performSearch();
             }
         });
+
+        // Restore API key from local storage
+        const storedApiKey = localStorage.getItem('searchDashboardApiKey');
+        if (storedApiKey) {
+            document.getElementById('apiKeyInput').value = storedApiKey;
+            currentApiKey = storedApiKey.trim();
+        }
     </script>
 </body>
 </html>
