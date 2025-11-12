@@ -445,15 +445,7 @@ app.use((req, res, next) => {
 });
 
 async function connectToMongoDB(mongodbUri) {
-  if (!client) {
-    client = new MongoClient(mongodbUri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    await client.connect();
-    console.log("Connected to MongoDB");
-  }
-  return client;
+  return await getMongoClient();
 }
 
 /* =========================================================== *\
@@ -2155,13 +2147,17 @@ Focus only on visual elements that match the search intent.`;
 
 async function getProductsByIds(ids, dbName, collectionName) {
   if (!ids || !Array.isArray(ids) || ids.length === 0) {
+    console.log(`[getProductsByIds] No IDs provided`);
     return [];
   }
   try {
+    console.log(`[getProductsByIds] Fetching ${ids.length} products from ${dbName}.${collectionName}`);
+    console.log(`[getProductsByIds] Sample IDs:`, ids.slice(0, 3));
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
-    
+
     // Convert string IDs back to ObjectIds for _id lookup
     const objectIdArray = ids.map((id) => {
       try {
@@ -2171,16 +2167,20 @@ async function getProductsByIds(ids, dbName, collectionName) {
         }
         return null;
       } catch (error) {
-        console.error(`Invalid ObjectId format: ${id}`);
+        console.error(`[getProductsByIds] Invalid ObjectId format: ${id}`);
         return null;
       }
     }).filter((id) => id !== null);
 
+    console.log(`[getProductsByIds] Valid ObjectIds: ${objectIdArray.length}/${ids.length}`);
+
     if (objectIdArray.length === 0) {
+      console.log(`[getProductsByIds] No valid ObjectIds, returning empty array`);
       return [];
     }
-    
+
     const products = await collection.find({ _id: { $in: objectIdArray } }).toArray();
+    console.log(`[getProductsByIds] Found ${products.length} products in database`);
     
     // Create a map for quick lookups
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
@@ -3479,7 +3479,19 @@ app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
   console.log(`[${requestId}] Search request for query: "${req.body.query}" | DB: ${req.store?.dbName}`);
-  
+  console.log(`[${requestId}] Request details:`, {
+    method: req.method,
+    headers: {
+      'content-type': req.headers['content-type'],
+      'user-agent': req.headers['user-agent'],
+      'authorization': req.headers.authorization ? '[PRESENT]' : '[MISSING]'
+    },
+    bodyKeys: Object.keys(req.body || {}),
+    hasModern: 'modern' in req.body,
+    modernValue: req.body?.modern,
+    queryLength: req.body?.query?.length || 0
+  });
+
   const { query, example, noWord, noHebrewWord, context, useImages, modern, phase, extractedCategories } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
@@ -4249,7 +4261,9 @@ app.post("/search", async (req, res) => {
     // Prepare final results
     const reorderedIds = reorderedData.map(item => item._id);
     const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
+    console.log(`[${requestId}] reorderedIds length: ${reorderedIds.length}, sample:`, reorderedIds.slice(0, 3));
     const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
+    console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
     const reorderedProductIds = new Set(reorderedIds);
     const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
      
@@ -4476,6 +4490,7 @@ app.post("/search", async (req, res) => {
     // Return modern format (with pagination) only if explicitly requested
     if (isLegacyMode) {
       console.log(`[${requestId}] ✅ Returning LEGACY format (array only) - backward compatible`);
+      console.log(`[${requestId}] Response: ${searchResponse.products.length} products in array format`);
       res.json(searchResponse.products);
     } else {
       console.log(`[${requestId}] ✅ Returning MODERN format (with pagination, auto-load, etc.)`);
@@ -4494,6 +4509,7 @@ app.post("/search", async (req, res) => {
         pagination: searchResponse.pagination,
         metadata: searchResponse.metadata
       });
+      console.log(`[${requestId}] Response: full object with ${searchResponse.products.length} products + pagination + metadata`);
       res.json(searchResponse);
     }
     
@@ -4528,6 +4544,7 @@ app.get("/products", async (req, res) => {
       price: product.price,
       image: product.image,
       url: product.url,
+      ItemID: product.ItemID,
     }));
     res.json(results);
   } catch (error) {
@@ -4577,6 +4594,7 @@ app.post("/recommend", async (req, res) => {
       price: product.price,
       image: product.image,
       url: product.url,
+      ItemID: product.ItemID,
       rrf_score: product.rrf_score,
     }));
     res.json(results);
