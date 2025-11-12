@@ -4437,7 +4437,6 @@ app.post("/search", async (req, res) => {
         batchNumber: 1,
         hasMore: hasMore,
         nextToken: nextToken, // Token for manual load-more
-        autoLoadMore: false, // Auto-load-more disabled
         secondBatchToken: null, // No auto-load token
         categoryFilterToken: categoryFilterToken, // Token for category-filtered results
         hasCategoryFiltering: !!categoryFilterToken // Flag indicating category-filtered results available
@@ -4477,7 +4476,10 @@ app.post("/search", async (req, res) => {
     // Return modern format (with pagination) only if explicitly requested
     if (isLegacyMode) {
       console.log(`[${requestId}] ✅ Returning LEGACY format (array only) - backward compatible`);
-      
+      res.json(searchResponse.products);
+    } else {
+      console.log(`[${requestId}] ✅ Returning MODERN format (with pagination, auto-load, etc.)`);
+
       // Add pagination info to headers for clients that can use it
       if (searchResponse.pagination && searchResponse.pagination.nextToken) {
         res.setHeader('X-Next-Token', searchResponse.pagination.nextToken);
@@ -4486,10 +4488,7 @@ app.post("/search", async (req, res) => {
       } else {
         res.setHeader('X-Has-More', 'false');
       }
-      
-      res.json(searchResponse.products);
-    } else {
-      console.log(`[${requestId}] ✅ Returning MODERN format (with pagination, auto-load, etc.)`);
+
       console.log(`[${requestId}] Response structure:`, {
         productsCount: searchResponse.products.length,
         pagination: searchResponse.pagination,
