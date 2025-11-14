@@ -876,6 +876,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
   }
 
   // Stock status filter
+
   pipeline.push({
     $match: {
       $or: [
@@ -3035,6 +3036,13 @@ app.get("/search/load-more", async (req, res) => {
     const endIndex = Math.min(startIndex + parseInt(limit), cachedResults.length);
     const nextOffset = endIndex;
     const hasMore = endIndex < cachedResults.length;
+
+    console.log(`[${requestId}] Pagination debug: offset=${offset}, startIndex=${startIndex}, endIndex=${endIndex}, limit=${limit}`);
+    console.log(`[${requestId}] Cached results: ${cachedResults.length} total`);
+    console.log(`[${requestId}] First 3 cached products:`, cachedResults.slice(0, 3).map(p => ({ name: p.name, _id: p._id })));
+    if (startIndex > 0) {
+      console.log(`[${requestId}] Next batch first 3:`, cachedResults.slice(startIndex, startIndex + 3).map(p => ({ name: p.name, _id: p._id })));
+    }
     
     // Get the requested slice
     const paginatedResults = cachedResults.slice(startIndex, endIndex);
@@ -3578,6 +3586,7 @@ app.post("/search", async (req, res) => {
   const isComplexQueryResult = !isSimpleResult;
 
   console.log(`[${requestId}] Query classification: "${query}" → ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'}`);
+  console.log(`[${requestId}] Will use ${isComplexQueryResult ? 'LLM reordering path' : 'direct results path (no DB lookup)'}`);
 
   // Handle progressive loading phases
   if (phase === 'text-matches-only' && isSimpleResult) {
@@ -4256,64 +4265,112 @@ app.post("/search", async (req, res) => {
       }))
     );
 
-    // LLM reordering for complex queries
+    // Prepare final results - different logic for complex vs simple queries
+    let finalResults;
 
-    // Prepare final results
-    const reorderedIds = reorderedData.map(item => item._id);
-    const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
-    console.log(`[${requestId}] reorderedIds length: ${reorderedIds.length}, sample:`, reorderedIds.slice(0, 3));
-    const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
-    console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
-    const reorderedProductIds = new Set(reorderedIds);
-    const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
-     
-    const finalResults = [
-      ...orderedProducts.map((product) => {
-        const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
-        
-        // Highlighting logic based on query type:
-        // - Simple queries with soft filters: highlight soft filter matches
-        // - Complex queries with LLM rerank: highlight only LLM selections
-        let isHighlighted = false;
-        if (llmReorderingSuccessful) {
-          // Complex query with LLM rerank: highlight only LLM selections
-          isHighlighted = reorderedIds.includes(product._id.toString());
-        } else if (hasSoftFilters) {
-          // Simple query with soft filters: highlight soft filter matches
-          isHighlighted = !!(resultData?.softFilterMatch);
+    if (llmReorderingSuccessful) {
+      // Complex query with LLM reordering - need database lookup
+      console.log(`[${requestId}] ✅ Taking COMPLEX QUERY path: LLM-reordered results with database lookup`);
+      const reorderedIds = reorderedData.map(item => item._id);
+      const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
+      console.log(`[${requestId}] reorderedIds length: ${reorderedIds.length}, sample:`, reorderedIds.slice(0, 3));
+      const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
+      console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
+      const reorderedProductIds = new Set(reorderedIds);
+      const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
+
+      // Construct finalResults and deduplicate
+      const complexFinalResults = [
+        ...orderedProducts.map((product) => {
+          const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
+
+          return {
+            _id: product._id.toString(),
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            image: product.image,
+            url: product.url,
+            highlight: reorderedIds.includes(product._id.toString()), // LLM selections are highlighted
+            type: product.type,
+            specialSales: product.specialSales,
+            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+            ItemID: product.ItemID,
+            explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+            softFilterMatch: !!(resultData?.softFilterMatch),
+            softCategoryMatches: resultData?.softCategoryMatches || 0,
+            simpleSearch: false,
+            filterOnly: !!(resultData?.filterOnly),
+            highTextMatch: false, // Not used for complex queries
+            softCategoryExpansion: !!(resultData?.softCategoryExpansion)
+          };
+        }),
+        ...remainingResults.map((r) => {
+          return {
+            _id: r._id.toString(),
+            id: r.id,
+            name: r.name,
+            description: r.description,
+            price: r.price,
+            image: r.image,
+            url: r.url,
+            highlight: false, // Remaining results not highlighted
+            type: r.type,
+            specialSales: r.specialSales,
+            onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
+            ItemID: r.ItemID,
+            explanation: null,
+            softFilterMatch: !!r.softFilterMatch,
+            softCategoryMatches: r.softCategoryMatches || 0,
+            simpleSearch: false,
+            filterOnly: !!r.filterOnly,
+            highTextMatch: false, // Not used for complex queries
+            softCategoryExpansion: !!r.softCategoryExpansion
+          };
+        }),
+      ];
+
+      // Deduplicate complex results by _id
+      const uniqueComplexResults = [];
+      const seenComplexIds = new Set();
+      for (const result of complexFinalResults) {
+        if (!seenComplexIds.has(result._id)) {
+          seenComplexIds.add(result._id);
+          uniqueComplexResults.push(result);
         }
-        
-        // For simple queries: flag products with strong text matches (threshold: 20000+)
-        const exactMatchBonus = resultData?.exactMatchBonus || 0;
-        const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
-        
-        return {
-          _id: product._id.toString(),
-          id: product.id,
-          name: product.name,
-          description: product.description,
-          price: product.price,
-          image: product.image,
-          url: product.url,
-          highlight: isHighlighted,
-          type: product.type,
-          specialSales: product.specialSales,
-          onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-          ItemID: product.ItemID,
-          explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
-          softFilterMatch: !!(resultData?.softFilterMatch),
-          softCategoryMatches: resultData?.softCategoryMatches || 0,
-          simpleSearch: false,
-          filterOnly: !!(resultData?.filterOnly),
-          highTextMatch: isHighTextMatch, // Flag for tier separation (Tier 1)
-          softCategoryExpansion: !!(resultData?.softCategoryExpansion) // Flag for soft category related products (Tier 2)
-        };
-      }),
-      ...remainingResults.map((r) => {
+      }
+
+      console.log(`[${requestId}] Complex query deduplication: ${complexFinalResults.length} -> ${uniqueComplexResults.length} unique results`);
+      finalResults = uniqueComplexResults;
+    } else {
+      // Simple query or failed LLM reordering - use combinedResults directly (no database lookup)
+      console.log(`[${requestId}] ✅ Taking SIMPLE QUERY path: Using combinedResults directly (no database lookup)`);
+      const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
+
+      // First deduplicate combinedResults by _id to prevent pagination duplicates
+      const uniqueCombinedResults = [];
+      const seenIds = new Set();
+      for (const result of combinedResults) {
+        const id = result._id?.toString() || result._id;
+        if (id && !seenIds.has(id)) {
+          seenIds.add(id);
+          uniqueCombinedResults.push(result);
+        }
+      }
+
+      console.log(`[${requestId}] Deduplication: ${combinedResults.length} -> ${uniqueCombinedResults.length} unique results`);
+
+      finalResults = uniqueCombinedResults.map((r) => {
         // For simple queries: flag products with strong text matches (threshold: 20000+)
         const exactMatchBonus = r.exactMatchBonus || 0;
         const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
-        
+
+        // Highlighting logic for simple queries:
+        // - Simple queries with soft filters: highlight soft filter matches
+        // - Simple queries without soft filters: no highlighting
+        const isHighlighted = hasSoftFilters ? !!r.softFilterMatch : false;
+
         return {
           _id: r._id.toString(),
           id: r.id,
@@ -4322,22 +4379,21 @@ app.post("/search", async (req, res) => {
           price: r.price,
           image: r.image,
           url: r.url,
-          // For remaining results, only highlight soft filter matches if no LLM reranking occurred
-          highlight: !llmReorderingSuccessful && hasSoftFilters ? !!r.softFilterMatch : false,
+          highlight: isHighlighted,
           type: r.type,
           specialSales: r.specialSales,
           onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
           ItemID: r.ItemID,
-          explanation: null,
+          explanation: explain ? (explanationsMap.get(r._id.toString()) || null) : null,
           softFilterMatch: !!r.softFilterMatch,
           softCategoryMatches: r.softCategoryMatches || 0,
-          simpleSearch: false,
+          simpleSearch: true, // Mark as simple search result
           filterOnly: !!r.filterOnly,
           highTextMatch: isHighTextMatch, // Flag for tier separation (Tier 1)
           softCategoryExpansion: !!r.softCategoryExpansion // Flag for soft category related products (Tier 2)
         };
-      }),
-    ];
+      });
+    }
 
     // Log query
     try {
@@ -4349,10 +4405,21 @@ app.post("/search", async (req, res) => {
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
     const executionTime = Date.now() - searchStartTime;
-    
+
+    // Check for duplicates in finalResults
+    const uniqueIds = new Set(finalResults.map(r => r._id));
+    const hasDuplicates = uniqueIds.size !== finalResults.length;
+    console.log(`[${requestId}] Final results: ${finalResults.length} total, ${limitedResults.length} returned (limit: ${searchLimit})`);
+    console.log(`[${requestId}] Unique products: ${uniqueIds.size}/${finalResults.length} ${hasDuplicates ? '(HAS DUPLICATES!)' : '(no duplicates)'}`);
+    console.log(`[${requestId}] Legacy mode: ${isLegacyMode}, Modern mode: ${!isLegacyMode}`);
+    console.log(`[${requestId}] First batch products:`, limitedResults.slice(0, 3).map(p => ({ name: p.name, _id: p._id })));
+    if (finalResults.length > limitedResults.length) {
+      console.log(`[${requestId}] Next batch preview:`, finalResults.slice(searchLimit, searchLimit + 3).map(p => ({ name: p.name, _id: p._id })));
+    }
+
     // Debug soft filter matching
     const highlightedProducts = finalResults.filter(r => r.highlight).length;
-    console.log(`[${requestId}] Final results: ${finalResults.length} total, ${highlightedProducts} highlighted`);
+    console.log(`[${requestId}] Highlighted products: ${highlightedProducts}/${finalResults.length}`);
     
     if (hasSoftFilters) {
       console.log(`[${requestId}] Soft filters extracted:`, JSON.stringify(softFilters.softCategory));
