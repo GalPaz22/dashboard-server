@@ -3029,7 +3029,125 @@ app.get("/search/load-more", async (req, res) => {
         });
       }
     }
-    
+
+    // If extracted categories are available and this is not already a category-filtered request,
+    // perform a category-filtered search to get additional products matching the same categories
+    if (!isCategoryFiltered && extractedCategories && (extractedCategories.hardCategories || extractedCategories.softCategories)) {
+      console.log(`[${requestId}] 🔍 Load-more: Found extracted categories from initial search, performing category-filtered search`);
+      console.log(`[${requestId}] 📋 Extracted Filters:`);
+      console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
+      console.log(`[${requestId}]   • Soft categories: ${extractedCategories.softCategories ? JSON.stringify(extractedCategories.softCategories) : 'none'}`);
+      if (extractedCategories.categoryFiltered) {
+        console.log(`[${requestId}]   • Category filtered: ${extractedCategories.categoryFiltered}`);
+      }
+      if (extractedCategories.textMatchCount !== undefined) {
+        console.log(`[${requestId}]   • Text match count: ${extractedCategories.textMatchCount}`);
+      }
+
+      try {
+        const { dbName } = req.store;
+        const client = await connectToMongoDB(mongodbUri);
+        const db = client.db(dbName);
+        const collection = db.collection("products");
+
+        // Create hard filters with extracted categories
+        const categoryFilteredHardFilters = { ...filters };
+        if (extractedCategories.hardCategories && extractedCategories.hardCategories.length > 0) {
+          categoryFilteredHardFilters.category = extractedCategories.hardCategories;
+        }
+
+        // Prepare search parameters
+        const cleanedText = cleanHebrewText(query);
+        const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
+        const searchLimit = parseInt(limit) * 3;
+        const vectorLimit = parseInt(limit) * 2;
+
+        // Run category-filtered search
+        let categoryFilteredResults;
+
+        if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
+          // Use soft category search
+          categoryFilteredResults = await executeExplicitSoftCategorySearch(
+            collection,
+            cleanedText,
+            query,
+            categoryFilteredHardFilters,
+            extractedCategories.softCategories,
+            queryEmbedding,
+            searchLimit,
+            vectorLimit,
+            true, // useOrLogic
+            false,
+            cleanedText,
+            [] // No exclusion since we're loading more
+          );
+        } else {
+          // Just category filter without soft categories
+          const [fuzzyRes, vectorRes] = await Promise.all([
+            collection.aggregate(buildStandardSearchPipeline(
+              cleanedText, query, categoryFilteredHardFilters, searchLimit, true
+            )).toArray(),
+            collection.aggregate(buildStandardVectorSearchPipeline(
+              queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+            )).toArray()
+          ]);
+
+          const docRanks = new Map();
+          fuzzyRes.forEach((doc, index) => {
+            docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+          });
+          vectorRes.forEach((doc, index) => {
+            const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+            docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
+          });
+
+          categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
+            const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+            const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+            return {
+              ...doc,
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
+              softFilterMatch: false,
+              softCategoryMatches: 0,
+              exactMatchBonus: exactMatchBonus,
+              fuzzyRank: ranks.fuzzyRank,
+              vectorRank: ranks.vectorRank
+            };
+          }).sort((a, b) => b.rrf_score - a.rrf_score);
+        }
+
+        // Remove duplicates that might already be in cached results
+        const cachedIds = new Set(cachedResults.map(r => r._id));
+        const newCategoryResults = categoryFilteredResults.filter(r => !cachedIds.has(r._id));
+
+        console.log(`[${requestId}] 🔎 Category-filtered search results:`);
+        console.log(`[${requestId}]   • Total category matches: ${categoryFilteredResults.length}`);
+        console.log(`[${requestId}]   • New products (not in first batch): ${newCategoryResults.length}`);
+        console.log(`[${requestId}]   • Duplicates removed: ${categoryFilteredResults.length - newCategoryResults.length}`);
+
+        if (newCategoryResults.length > 0) {
+          // Add new results to cached results for this load-more request
+          cachedResults = [...cachedResults, ...newCategoryResults];
+          console.log(`[${requestId}] 📈 Extended cached results: ${cachedResults.length} total products (${cachedResults.length - newCategoryResults.length} original + ${newCategoryResults.length} category-filtered)`);
+
+          // Log a few examples of the new category-filtered products
+          const sampleNewProducts = newCategoryResults.slice(0, 3).map(p => ({
+            name: p.name,
+            softCategoryMatches: p.softCategoryMatches || 0,
+            _id: p._id?.toString()
+          }));
+          console.log(`[${requestId}] 🎯 Sample new category-filtered products:`, sampleNewProducts);
+        } else {
+          console.log(`[${requestId}] ⚠️ No new category-filtered products found`);
+        }
+      } catch (error) {
+        console.error(`[${requestId}] ❌ Error in category-filtered load-more search:`, error.message);
+        // Continue with original cached results
+      }
+    } else if (!isCategoryFiltered) {
+      console.log(`[${requestId}] ℹ️ Load-more: No extracted categories found, using cached results only`);
+    }
+
     // Calculate pagination
     // For category-filtered requests, offset starts at 0 (it's a new search)
     const startIndex = isCategoryFiltered ? 0 : (offset || 0);
@@ -3052,7 +3170,8 @@ app.get("/search/load-more", async (req, res) => {
       query,
       filters,
       offset: nextOffset,
-      timestamp: timestamp // Keep original timestamp
+      timestamp: timestamp, // Keep original timestamp
+      extractedCategories: extractedCategories // Include extracted categories for subsequent load-more
     })).toString('base64') : null;
     
     console.log(`[${requestId}] Returning ${paginatedResults.length} products (${startIndex}-${endIndex} of ${cachedResults.length})`);
@@ -4451,7 +4570,8 @@ app.post("/search", async (req, res) => {
       query,
       filters: enhancedFilters,
       offset: limitedResults.length,
-      timestamp: Date.now()
+      timestamp: Date.now(),
+      extractedCategories: extractedCategoriesMetadata // Include extracted categories for load-more
     })).toString('base64') : null;
     
     // Create category-filtered token only for progressive loading (not for two-step search)
