@@ -3160,8 +3160,16 @@ app.get("/search/load-more", async (req, res) => {
       }
       console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
       console.log(`[${requestId}]   • Soft categories: ${extractedCategories.softCategories ? JSON.stringify(extractedCategories.softCategories) : 'none'}`);
-      
-      try {
+
+      // Validate extractedCategories before processing
+      if (!extractedCategories.hardCategories && !extractedCategories.softCategories) {
+        console.warn(`[${requestId}] No categories found in extractedCategories, skipping category-filtered search`);
+        cachedResults = [];
+      } else if ((extractedCategories.hardCategories?.length || 0) === 0 && (extractedCategories.softCategories?.length || 0) === 0) {
+        console.warn(`[${requestId}] Empty category arrays in extractedCategories, skipping category-filtered search`);
+        cachedResults = [];
+      } else {
+        try {
         const { dbName } = req.store;
         const client = await connectToMongoDB(mongodbUri);
         const db = client.db(dbName);
@@ -3239,14 +3247,27 @@ app.get("/search/load-more", async (req, res) => {
         
         cachedResults = categoryFilteredResults;
         console.log(`[${requestId}] Category-filtered search returned ${cachedResults.length} products`);
-        
-      } catch (error) {
-        console.error(`[${requestId}] Error in category-filtered search:`, error);
-        return res.status(500).json({ 
-          error: "Category-filtered search failed",
-          message: error.message,
-          requestId: requestId
-        });
+
+        } catch (error) {
+          console.error(`[${requestId}] Error in category-filtered search:`, error);
+          console.error(`[${requestId}] Error stack:`, error.stack);
+          console.error(`[${requestId}] Error details:`, {
+            message: error.message,
+            name: error.name,
+            query: query,
+            extractedCategories: extractedCategories
+          });
+
+          return res.status(500).json({
+            error: "Category-filtered search failed",
+            message: error.message || "An unexpected error occurred during category-filtered search",
+            details: process.env.NODE_ENV === 'development' ? {
+              errorName: error.name,
+              errorType: isCategoryFiltered ? 'category-filtered' : 'complex-tier2'
+            } : undefined,
+            requestId: requestId
+          });
+        }
       }
       
     } else {
@@ -3714,15 +3735,76 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 async function handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, originalSoftFilters = null) {
   const { excludeIds = [] } = req.body;
   try {
+    // Validate input parameters
+    if (!extractedCategories || typeof extractedCategories !== 'object') {
+      console.error(`[${requestId}] Phase 2 error: Invalid extractedCategories`, extractedCategories);
+      return res.status(400).json({
+        error: "Invalid extracted categories",
+        message: "Missing or invalid category data for progressive loading",
+        requestId: requestId
+      });
+    }
+
+    if (!query || !dbName || !collectionName) {
+      console.error(`[${requestId}] Phase 2 error: Missing required parameters`, { query, dbName, collectionName });
+      return res.status(400).json({
+        error: "Missing required parameters",
+        message: "Query, database name, and collection name are required",
+        requestId: requestId
+      });
+    }
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
     const translatedQuery = await translateQuery(query, context);
+
+    if (!translatedQuery) {
+      console.error(`[${requestId}] Phase 2 error: Translation failed for query: "${query}"`);
+      return res.status(500).json({
+        error: "Query translation failed",
+        message: "Unable to translate query for category-filtered search",
+        requestId: requestId
+      });
+    }
+
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
 
     const hardCategoriesArray = extractedCategories.hardCategories || [];
     const softCategoriesArray = extractedCategories.softCategories || [];
+
+    // Check if there are any categories to filter by
+    if (hardCategoriesArray.length === 0 && softCategoriesArray.length === 0) {
+      console.warn(`[${requestId}] Phase 2 warning: No categories found in extractedCategories`);
+      return res.json({
+        products: [],
+        pagination: {
+          totalAvailable: 0,
+          returned: 0,
+          batchNumber: 2,
+          hasMore: false,
+          nextToken: null,
+          autoLoadMore: false,
+          secondBatchToken: null,
+          hasCategoryFiltering: false,
+          categoryFilterToken: null
+        },
+        metadata: {
+          query: query,
+          requestId: requestId,
+          executionTime: Date.now() - req.startTime || 0,
+          phase: 'category-filtered',
+          warning: 'No categories available for filtering',
+          extractedCategories: extractedCategories,
+          tiers: {
+            hasCategoryExpansion: true,
+            categoryRelated: 0,
+            description: 'Phase 2: No categories available for filtering'
+          }
+        }
+      });
+    }
 
     console.log(`[${requestId}] Phase 2: Filtering by ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
     console.log(`[${requestId}] Excluding ${excludeIds.length} products already shown in Phase 1`);
@@ -3858,7 +3940,25 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     });
   } catch (error) {
     console.error(`[${requestId}] Error in category-filtered phase:`, error);
-    res.status(500).json({ error: "Category-filtered search failed" });
+    console.error(`[${requestId}] Error stack:`, error.stack);
+    console.error(`[${requestId}] Error details:`, {
+      message: error.message,
+      name: error.name,
+      query: query,
+      dbName: dbName,
+      collectionName: collectionName,
+      extractedCategories: extractedCategories
+    });
+
+    res.status(500).json({
+      error: "Category-filtered search failed",
+      message: error.message || "An unexpected error occurred during category-filtered search",
+      details: process.env.NODE_ENV === 'development' ? {
+        errorName: error.name,
+        stack: error.stack?.split('\n').slice(0, 3).join('\n')
+      } : undefined,
+      requestId: requestId
+    });
   }
 }
 
@@ -4550,7 +4650,69 @@ app.post("/search", async (req, res) => {
           
           llmReorderingSuccessful = true;
           console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
-          
+
+          // Extract soft categories from LLM-reordered tier 1 results for tier 2 matching
+          if (reorderedData && reorderedData.length > 0) {
+            console.log(`[${requestId}] 🏷️ Extracting soft categories from LLM-reordered tier 1 results for tier 2 matching`);
+
+            const extractedHardCategories = new Set();
+            const extractedSoftCategories = new Set();
+
+            // Get the actual product objects from reorderedData
+            const tier1Products = reorderedData.map(item => {
+              return combinedResults.find(r => r._id.toString() === item._id);
+            }).filter(Boolean);
+
+            console.log(`[${requestId}] 📊 TIER 1 LLM-REORDERED - Top products with extracted filters:`);
+            tier1Products.slice(0, 5).forEach((product, idx) => {
+              const categories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
+              const softCategories = Array.isArray(product.softCategory) ? product.softCategory.slice(0, 3) : [];
+              console.log(`[${requestId}]   ${idx + 1}. "${product.name}"`);
+              console.log(`[${requestId}]      Categories: ${categories.length > 0 ? JSON.stringify(categories) : 'none'}`);
+              console.log(`[${requestId}]      Soft Categories: ${softCategories.length > 0 ? JSON.stringify(softCategories) : 'none'}`);
+
+              // Extract hard categories
+              if (product.category) {
+                if (Array.isArray(product.category)) {
+                  product.category.forEach(cat => {
+                    if (cat && cat.trim()) extractedHardCategories.add(cat.trim());
+                  });
+                } else if (typeof product.category === 'string' && product.category.trim()) {
+                  extractedHardCategories.add(product.category.trim());
+                }
+              }
+
+              // Extract soft categories
+              if (product.softCategory && Array.isArray(product.softCategory)) {
+                product.softCategory.forEach(cat => {
+                  if (cat && cat.trim()) extractedSoftCategories.add(cat.trim());
+                });
+              }
+            });
+
+            const hardCategoriesArray = Array.from(extractedHardCategories);
+            const softCategoriesArray = Array.from(extractedSoftCategories);
+
+            console.log(`[${requestId}] 🏷️ Extracted from LLM tier 1: ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
+            if (hardCategoriesArray.length > 0) {
+              console.log(`[${requestId}] Hard categories: ${JSON.stringify(hardCategoriesArray)}`);
+            }
+            if (softCategoriesArray.length > 0) {
+              console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
+            }
+
+            // Store metadata for tier 2 progressive loading
+            if (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0) {
+              extractedCategoriesMetadata = {
+                hardCategories: hardCategoriesArray,
+                softCategories: softCategoriesArray,
+                textMatchCount: tier1Products.length,
+                categoryFiltered: false // Will be used for progressive loading
+              };
+              console.log(`[${requestId}] ✅ Stored extracted categories for tier 2 progressive loading`);
+            }
+          }
+
         } catch (error) {
           console.error("Error reordering results with Gemini:", error);
           
