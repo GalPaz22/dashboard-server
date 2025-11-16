@@ -149,9 +149,65 @@ function classifyQueryFallback(query) {
 }
 
 // Fallback: Rule-based filter extraction
+// Hard-coded category extraction patterns
+// These patterns will be checked BEFORE AI extraction to catch important categories
+// that the model frequently misses
+function extractHardCodedCategories(query) {
+  const queryLower = query.toLowerCase().trim();
+  const extractedCategories = [];
+  
+  // Define hard-coded category patterns with priority order
+  // Format: { pattern: RegExp, category: string, priority: number }
+  const categoryPatterns = [
+    // Wine categories (יין) - highest priority
+    { pattern: /\bיין\s+אדום\b/, category: 'יין אדום', priority: 10 },
+    { pattern: /\bיין\s+לבן\b/, category: 'יין לבן', priority: 10 },
+    { pattern: /\bיין\s+מבעבע\b/, category: 'יין מבעבע', priority: 10 },
+    { pattern: /\bיין\s+כתום\b/, category: 'יין כתום', priority: 10 },
+    { pattern: /\bיין\s+רוזה\b/, category: 'יין רוזה', priority: 10 },
+    { pattern: /\bred\s+wine\b/, category: 'יין אדום', priority: 10 },
+    { pattern: /\bwhite\s+wine\b/, category: 'יין לבן', priority: 10 },
+    { pattern: /\bsparkling\s+wine\b/, category: 'יין מבעבע', priority: 10 },
+    { pattern: /\borange\s+wine\b/, category: 'יין כתום', priority: 10 },
+    { pattern: /\brose\s+wine\b/, category: 'יין רוזה', priority: 10 },
+    // Generic wine - lower priority (only if no specific wine type was found)
+    { pattern: /\bיין\b/, category: 'יין', priority: 5 },
+    { pattern: /\bwine\b/, category: 'יין', priority: 5 },
+    // Add more categories here as needed
+  ];
+  
+  // Sort patterns by priority (highest first)
+  categoryPatterns.sort((a, b) => b.priority - a.priority);
+  
+  // Check each pattern
+  for (const { pattern, category, priority } of categoryPatterns) {
+    if (pattern.test(queryLower)) {
+      // If we found a high-priority match, add it
+      if (priority >= 10) {
+        extractedCategories.push(category);
+        console.log(`[HARD-CODED CATEGORY] Extracted "${category}" from query (priority ${priority})`);
+        // For high-priority specific matches, skip generic "יין" pattern
+        break;
+      } else if (extractedCategories.length === 0) {
+        // Only add low-priority matches if no high-priority match was found
+        extractedCategories.push(category);
+        console.log(`[HARD-CODED CATEGORY] Extracted "${category}" from query (priority ${priority})`);
+      }
+    }
+  }
+  
+  return extractedCategories.length > 0 ? (extractedCategories.length === 1 ? extractedCategories[0] : extractedCategories) : null;
+}
+
 function extractFiltersFallback(query) {
   const queryLower = query.toLowerCase().trim();
   const filters = {};
+  
+  // Extract hard-coded categories first
+  const hardCodedCategory = extractHardCodedCategories(query);
+  if (hardCodedCategory) {
+    filters.category = hardCodedCategory;
+  }
   
   // Extract price information using regex
   // Pattern: ב-100 or באיזור ה-100 (Hebrew "at" or "around")
@@ -1283,6 +1339,83 @@ Analyze the query and return your classification.`;
   }, 7200);
 }
 
+// Function to extract categories from a list of products (used for complex query tier-2)
+function extractCategoriesFromProducts(products) {
+  const categoryCount = new Map();
+  const softCategoryCount = new Map();
+
+  // Hardcoded priority categories to always check for
+  const priorityHardCategories = [
+    'יין', 'יין אדום', 'יין לבן', 'יין מבעבע', 'יין כתום',
+    'וויסקי', 'וודקה', 'גין', 'סאקה', 'בירה', 'ברנדי',
+    'ורמוט', 'מארז', 'סיידר', 'דג׳סטיף', 'אפרטיף'
+  ];
+
+  // Count occurrences of each category across products
+  for (const product of products) {
+    // Hard categories
+    if (product.category) {
+      const cats = Array.isArray(product.category) ? product.category : [product.category];
+      cats.forEach(cat => {
+        categoryCount.set(cat, (categoryCount.get(cat) || 0) + 1);
+        
+        // Boost priority categories (ensure they're always extracted if present)
+        if (priorityHardCategories.includes(cat)) {
+          categoryCount.set(cat, (categoryCount.get(cat) || 0) + 100);
+        }
+      });
+    }
+
+    // Soft categories
+    if (product.softCategory) {
+      const softCats = Array.isArray(product.softCategory) ? product.softCategory : [product.softCategory];
+      softCats.forEach(cat => {
+        softCategoryCount.set(cat, (softCategoryCount.get(cat) || 0) + 1);
+      });
+    }
+  }
+
+  // Extract categories that appear in multiple products
+  // For 4 LLM-selected products: require at least 2 occurrences (50%)
+  // For larger sets: require at least 25%
+  const minOccurrences = products.length <= 4 
+    ? Math.max(2, Math.ceil(products.length * 0.5)) // For small sets (4 products), need 50%
+    : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
+  
+  // Hard categories: get the most common ones
+  const hardCategories = Array.from(categoryCount.entries())
+    .filter(([_, count]) => count >= minOccurrences)
+    .sort((a, b) => b[1] - a[1]) // Sort by count, most common first
+    .slice(0, 3) // Take top 3 hard categories max
+    .map(([cat, _]) => cat);
+
+  // Soft categories: get the most common ones
+  const softCategories = Array.from(softCategoryCount.entries())
+    .filter(([_, count]) => count >= minOccurrences)
+    .sort((a, b) => b[1] - a[1]) // Sort by count, most common first
+    .slice(0, 5) // Take top 5 soft categories max
+    .map(([cat, _]) => cat);
+
+  // Log priority categories found
+  const priorityCatsFound = hardCategories.filter(cat => priorityHardCategories.includes(cat));
+  
+  console.log(`[extractCategoriesFromProducts] Analyzed ${products.length} products:`);
+  console.log(`  • Hard categories found: ${hardCategories.length} (min occurrences: ${minOccurrences})`);
+  console.log(`  • Soft categories found: ${softCategories.length} (min occurrences: ${minOccurrences})`);
+  if (priorityCatsFound.length > 0) {
+    console.log(`  • ⭐ Priority hard categories: ${JSON.stringify(priorityCatsFound)}`);
+  }
+  if (hardCategories.length > 0) console.log(`  • Hard: ${JSON.stringify(hardCategories)}`);
+  if (softCategories.length > 0) console.log(`  • Soft: ${JSON.stringify(softCategories)}`);
+
+  return {
+    hardCategories,
+    softCategories,
+    categoryFiltered: true,
+    textMatchCount: 0
+  };
+}
+
 async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null) {
   if (filters && Object.keys(filters).length > 0) {
     return false;
@@ -1552,6 +1685,33 @@ ${example}.`;
     filters.category = validateFilter(filters.category, categoriesList, 'category', false);
     filters.type = validateFilter(filters.type, typesList, 'type', false);
     filters.softCategory = validateFilter(filters.softCategory, softCategoriesList, 'softCategory', true);
+    
+    // Check for hard-coded categories and prioritize them if AI missed them
+    const hardCodedCategory = extractHardCodedCategories(query);
+    if (hardCodedCategory) {
+      // Validate hard-coded category against available categories
+      const validatedHardCodedCategory = validateFilter(hardCodedCategory, categoriesList, 'hard-coded category', false);
+      
+      if (validatedHardCodedCategory) {
+        if (!filters.category) {
+          // AI didn't extract a category, use hard-coded one
+          filters.category = validatedHardCodedCategory;
+          console.log(`[HARD-CODED OVERRIDE] AI missed category, using hard-coded: ${JSON.stringify(validatedHardCodedCategory)}`);
+        } else {
+          // AI extracted a category, but let's check if hard-coded is more specific
+          const aiCategory = Array.isArray(filters.category) ? filters.category[0] : filters.category;
+          const hardCategory = Array.isArray(validatedHardCodedCategory) ? validatedHardCodedCategory[0] : validatedHardCodedCategory;
+          
+          // If hard-coded category is more specific (longer string), prefer it
+          if (hardCategory.length > aiCategory.length) {
+            filters.category = validatedHardCodedCategory;
+            console.log(`[HARD-CODED OVERRIDE] Hard-coded category "${hardCategory}" is more specific than AI's "${aiCategory}", using hard-coded`);
+          } else {
+            console.log(`[HARD-CODED CHECK] AI category "${aiCategory}" is acceptable, keeping it over hard-coded "${hardCategory}"`);
+          }
+        }
+      }
+    }
     
     // Record success
     aiCircuitBreaker.recordSuccess();
@@ -2906,10 +3066,13 @@ app.get("/search/load-more", async (req, res) => {
       });
     }
     
-    // Check if this is a category-filtered request
+    // Check if this is a category-filtered request or complex tier-2 request
     const isCategoryFiltered = type === 'category-filtered';
+    const isComplexTier2 = type === 'complex-tier2';
     
-    if (isCategoryFiltered) {
+    if (isComplexTier2) {
+      console.log(`[${requestId}] 🔄 Complex query tier-2: Finding additional products matching LLM-selected categories`);
+    } else if (isCategoryFiltered) {
       console.log(`[${requestId}] Category-filtered load request for query: "${query}"`);
     } else {
       console.log(`[${requestId}] Loading more for query: "${query}", offset: ${offset}`);
@@ -2917,11 +3080,15 @@ app.get("/search/load-more", async (req, res) => {
     
     let cachedResults = null;
     
-    // HANDLE CATEGORY-FILTERED REQUEST (Tier 2)
-    if (isCategoryFiltered && extractedCategories) {
-      console.log(`[${requestId}] Running category-filtered search with:`);
-      console.log(`[${requestId}] - Hard categories: ${JSON.stringify(extractedCategories.hardCategories)}`);
-      console.log(`[${requestId}] - Soft categories: ${JSON.stringify(extractedCategories.softCategories)}`);
+    // HANDLE CATEGORY-FILTERED REQUEST OR COMPLEX TIER-2 (both use category filtering)
+    if ((isCategoryFiltered || isComplexTier2) && extractedCategories) {
+      if (isComplexTier2) {
+        console.log(`[${requestId}] 📋 Categories from LLM-selected products:`);
+      } else {
+        console.log(`[${requestId}] Running category-filtered search with:`);
+      }
+      console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
+      console.log(`[${requestId}]   • Soft categories: ${extractedCategories.softCategories ? JSON.stringify(extractedCategories.softCategories) : 'none'}`);
       
       try {
         const { dbName } = req.store;
@@ -3120,7 +3287,8 @@ app.get("/search/load-more", async (req, res) => {
         const cachedIds = new Set(cachedResults.map(r => r._id));
         const newCategoryResults = categoryFilteredResults.filter(r => !cachedIds.has(r._id));
 
-        console.log(`[${requestId}] 🔎 Category-filtered search results:`);
+        const operationType = isComplexTier2 ? 'Complex tier-2' : 'Category-filtered';
+        console.log(`[${requestId}] 🔎 ${operationType} search results:`);
         console.log(`[${requestId}]   • Total category matches: ${categoryFilteredResults.length}`);
         console.log(`[${requestId}]   • New products (not in first batch): ${newCategoryResults.length}`);
         console.log(`[${requestId}]   • Duplicates removed: ${categoryFilteredResults.length - newCategoryResults.length}`);
@@ -3128,23 +3296,24 @@ app.get("/search/load-more", async (req, res) => {
         if (newCategoryResults.length > 0) {
           // Add new results to cached results for this load-more request
           cachedResults = [...cachedResults, ...newCategoryResults];
-          console.log(`[${requestId}] 📈 Extended cached results: ${cachedResults.length} total products (${cachedResults.length - newCategoryResults.length} original + ${newCategoryResults.length} category-filtered)`);
+          console.log(`[${requestId}] 📈 Extended cached results: ${cachedResults.length} total products (${cachedResults.length - newCategoryResults.length} original + ${newCategoryResults.length} ${isComplexTier2 ? 'LLM-category-filtered' : 'category-filtered'})`);
 
-          // Log a few examples of the new category-filtered products
+          // Log a few examples of the new products
           const sampleNewProducts = newCategoryResults.slice(0, 3).map(p => ({
             name: p.name,
-            softCategoryMatches: p.softCategoryMatches || 0,
+            category: p.category,
+            softCategory: p.softCategory,
             _id: p._id?.toString()
           }));
-          console.log(`[${requestId}] 🎯 Sample new category-filtered products:`, sampleNewProducts);
+          console.log(`[${requestId}] 🎯 Sample new ${isComplexTier2 ? 'tier-2' : 'category-filtered'} products:`, sampleNewProducts);
         } else {
-          console.log(`[${requestId}] ⚠️ No new category-filtered products found`);
+          console.log(`[${requestId}] ⚠️ No new ${isComplexTier2 ? 'tier-2' : 'category-filtered'} products found`);
         }
       } catch (error) {
-        console.error(`[${requestId}] ❌ Error in category-filtered load-more search:`, error.message);
+        console.error(`[${requestId}] ❌ Error in ${isComplexTier2 ? 'complex tier-2' : 'category-filtered'} load-more search:`, error.message);
         // Continue with original cached results
       }
-    } else if (!isCategoryFiltered) {
+    } else if (!isCategoryFiltered && !isComplexTier2) {
       console.log(`[${requestId}] ℹ️ Load-more: No extracted categories found, using cached results only`);
     }
 
@@ -3704,8 +3873,10 @@ app.post("/search", async (req, res) => {
   const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
   const isComplexQueryResult = !isSimpleResult;
 
-  console.log(`[${requestId}] Query classification: "${query}" → ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'}`);
-  console.log(`[${requestId}] Will use ${isComplexQueryResult ? 'LLM reordering path' : 'direct results path (no DB lookup)'}`);
+  console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
+  console.log(`[${requestId}] 🔍 Query classification: "${query}" → ${isComplexQueryResult ? '🔴 COMPLEX' : '🟢 SIMPLE'}`);
+  console.log(`[${requestId}] 🛤️  Will use ${isComplexQueryResult ? 'LLM reordering path' : 'direct results path (no DB lookup)'}`);
+  console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
 
   // Handle progressive loading phases
   if (phase === 'text-matches-only' && isSimpleResult) {
@@ -4566,13 +4737,46 @@ app.post("/search", async (req, res) => {
     const hasMore = totalAvailable > limitedResults.length;
     
     // Create pagination token for manual load-more (not auto-load)
-    const nextToken = hasMore ? Buffer.from(JSON.stringify({
-      query,
-      filters: enhancedFilters,
-      offset: limitedResults.length,
-      timestamp: Date.now(),
-      extractedCategories: extractedCategoriesMetadata // Include extracted categories for load-more
-    })).toString('base64') : null;
+    let nextToken = null;
+    
+    if (isComplexQueryResult) {
+      // Complex queries: Extract categories from the TOP 4 LLM-reordered products for tier-2
+      console.log(`[${requestId}] 🎯 COMPLEX QUERY DETECTED - Preparing tier-2 token`);
+      
+      // Get ONLY the first 4 LLM-selected products (the perfect matches)
+      const top4LLMProducts = limitedResults.slice(0, 4);
+      console.log(`[${requestId}] Analyzing TOP 4 LLM-selected products for category extraction (perfect matches only)`);
+      console.log(`[${requestId}] Top 4 product names:`, top4LLMProducts.map(p => p.name));
+      
+      const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
+
+      nextToken = Buffer.from(JSON.stringify({
+        query,
+        filters: enhancedFilters,
+        offset: limitedResults.length,
+        timestamp: Date.now(),
+        extractedCategories: extractedFromLLM, // Categories extracted from TOP 4 LLM-selected products
+        type: 'complex-tier2' // Mark as complex query tier 2
+      })).toString('base64');
+      
+      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 4 LLM perfect matches`);
+      console.log(`[${requestId}] 📊 LLM-extracted categories (from 4 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
+      if (extractedFromLLM.hardCategories?.length > 0) {
+        console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromLLM.hardCategories)}`);
+      }
+      if (extractedFromLLM.softCategories?.length > 0) {
+        console.log(`[${requestId}]    🎯 Soft: ${JSON.stringify(extractedFromLLM.softCategories)}`);
+      }
+    } else if (hasMore) {
+      // Simple queries: Only create token if there are more results
+      nextToken = Buffer.from(JSON.stringify({
+        query,
+        filters: enhancedFilters,
+        offset: limitedResults.length,
+        timestamp: Date.now(),
+        extractedCategories: extractedCategoriesMetadata // Include extracted categories for load-more
+      })).toString('base64');
+    }
     
     // Create category-filtered token only for progressive loading (not for two-step search)
     const categoryFilterToken = (extractedCategoriesMetadata && !extractedCategoriesMetadata.categoryFiltered)
