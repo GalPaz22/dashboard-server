@@ -1268,6 +1268,7 @@ Context: ${context || "e-commerce product search"}
 
 SIMPLE queries are:
 - Exact product names or brand names (e.g., "Coca Cola", "iPhone 14", "יין כרמל")
+- vague names which probably related to the product name (e.g., "רגליים אוחזות ברום")
 - Simple brand + basic descriptor (e.g., "Nike shoes", "יין ברקן")
 - Single product references without descriptive attributes
 
@@ -1420,8 +1421,78 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
   if (filters && Object.keys(filters).length > 0) {
     return false;
   }
-  const isSimple = await classifyQueryComplexity(query, context, dbName);
-  return isSimple;
+  
+  // TEXT-BASED CLASSIFICATION ONLY: Always perform text search to check for matches
+  // If we find good text matches, it's a simple query (product name)
+  // If no good matches, it's complex (descriptive/intent-based)
+  // NO AI CLASSIFICATION USED
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName || process.env.MONGODB_DB_NAME);
+    const collection = db.collection("products");
+    
+    // Perform a quick text search with a small limit
+    const quickTextSearchPipeline = [
+      {
+        $search: {
+          index: "default",
+          text: {
+            query: query,
+            path: ["name", "description"],
+            fuzzy: {
+              maxEdits: 1,
+              prefixLength: 2
+            }
+          }
+        }
+      },
+      {
+        $limit: 10 // Just need a few results to check
+      },
+      {
+        $project: {
+          name: 1,
+          score: { $meta: "searchScore" }
+        }
+      }
+    ];
+    
+    const quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
+    
+    if (quickResults.length > 0) {
+      // Calculate text match quality
+      const topResult = quickResults[0];
+      const exactMatchBonus = getExactMatchBonus(topResult.name, query, query);
+      
+      // If we have a high-quality text match, it's definitely a simple query (product name)
+      if (exactMatchBonus >= 10000) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Text match found: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
+        return true;
+      }
+      
+      // If we have decent matches but not perfect, still likely a product name
+      if (quickResults.length >= 3 && exactMatchBonus >= 1000) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Multiple decent text matches found (bonus: ${exactMatchBonus}) → SIMPLE query`);
+        return true;
+      }
+      
+      // Lower threshold: if we have any reasonable match
+      if (quickResults.length >= 1 && exactMatchBonus >= 500) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Reasonable text match found (bonus: ${exactMatchBonus}) → SIMPLE query`);
+        return true;
+      }
+    }
+    
+    // No good text matches found → COMPLEX query (descriptive/intent-based)
+    console.log(`[QUERY CLASSIFICATION] ❌ No strong text matches found (${quickResults.length} results) → COMPLEX query`);
+    return false;
+    
+  } catch (error) {
+    console.error('[QUERY CLASSIFICATION] Text search failed:', error.message);
+    // If text search fails, default to COMPLEX to be safe (will use LLM reordering)
+    console.log('[QUERY CLASSIFICATION] ⚠️ Text search error, defaulting to COMPLEX query');
+    return false;
+  }
 }
 
 function removeWineFromQuery(translatedQuery, noWord) {
@@ -3150,11 +3221,16 @@ app.get("/search/load-more", async (req, res) => {
           categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
             const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+            // Calculate soft category matches for tier 2 results
+            const softCategoryMatches = softFilters.softCategory ?
+              calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory) : 0;
+            const softFilterMatch = softCategoryMatches > 0;
+
             return {
               ...doc,
-              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
-              softFilterMatch: false,
-              softCategoryMatches: 0,
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+              softFilterMatch: softFilterMatch,
+              softCategoryMatches: softCategoryMatches,
               exactMatchBonus: exactMatchBonus,
               softCategoryExpansion: true // All results are Tier 2
             };
@@ -3635,7 +3711,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 }
 
 // Handle Phase 2: Category-filtered results for progressive loading
-async function handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit) {
+async function handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, originalSoftFilters = null) {
   const { excludeIds = [] } = req.body;
   try {
     const client = await connectToMongoDB(mongodbUri);
@@ -3650,12 +3726,21 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 
     console.log(`[${requestId}] Phase 2: Filtering by ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
     console.log(`[${requestId}] Excluding ${excludeIds.length} products already shown in Phase 1`);
+    console.log(`[${requestId}] Hard categories: ${JSON.stringify(hardCategoriesArray)}`);
+    console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
 
     // Create category filters
     const categoryFilteredHardFilters = {};
     if (hardCategoriesArray.length > 0) {
       categoryFilteredHardFilters.category = hardCategoriesArray;
     }
+
+    // Determine soft filters source for matching/scoring in tier 2
+    const softFilters = {
+      softCategory: (softCategoriesArray && softCategoriesArray.length > 0)
+        ? softCategoriesArray
+        : (originalSoftFilters && originalSoftFilters.softCategory ? originalSoftFilters.softCategory : null)
+    };
 
     // Get category-filtered results
     let categoryFilteredResults;
@@ -3702,11 +3787,16 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
         const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
         const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+        // Calculate soft category matches using unified softFilters (from query extraction)
+        const softCategoryMatches = softFilters.softCategory ?
+          calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory) : 0;
+        const softFilterMatch = softCategoryMatches > 0;
+
         return {
           ...doc,
-          rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
-          softFilterMatch: false,
-          softCategoryMatches: 0,
+          rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+          softFilterMatch: softFilterMatch,
+          softCategoryMatches: softCategoryMatches,
           exactMatchBonus: exactMatchBonus,
           fuzzyRank: ranks.fuzzyRank,
           vectorRank: ranks.vectorRank
@@ -3724,12 +3814,14 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       image: product.image,
       url: product.url,
       type: product.type,
+      category: product.category,
       specialSales: product.specialSales,
       onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
       ItemID: product.ItemID,
       highlight: false,
-      softFilterMatch: false,
-      softCategoryMatches: 0,
+      softFilterMatch: product.softFilterMatch || false,
+      softCategoryMatches: product.softCategoryMatches || 0,
+      rrf_score: product.rrf_score || 0,
       simpleSearch: false,
       filterOnly: false,
       softCategoryExpansion: true, // Mark as category-filtered
@@ -3764,10 +3856,9 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
         }
       }
     });
-
   } catch (error) {
-    console.error(`[${requestId}] Error in category filtered phase:`, error);
-    res.status(500).json({ error: "Category filtered search failed" });
+    console.error(`[${requestId}] Error in category-filtered phase:`, error);
+    res.status(500).json({ error: "Category-filtered search failed" });
   }
 }
 
@@ -3810,6 +3901,25 @@ app.post("/search", async (req, res) => {
     return res.status(400).json({
       error: "Either apiKey **or** (dbName & collectionName) must be provided",
     });
+  }
+
+  // Early extraction of soft filters for progressive loading phases
+  // This prevents "Cannot access 'enhancedFilters' before initialization" error
+  let earlySoftFilters = null;
+  try {
+    const translatedQuery = await translateQuery(query, context);
+    if (translatedQuery) {
+      const queryForExtraction = translatedQuery || query;
+      const earlyEnhancedFilters = categories
+        ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context)
+        : {};
+      earlySoftFilters = {
+        softCategory: earlyEnhancedFilters.softCategory
+      };
+    }
+  } catch (error) {
+    console.warn(`[${requestId}] Could not extract early soft filters:`, error.message);
+    earlySoftFilters = null;
   }
 
   // Check if this is a digits-only query for SKU search
@@ -3886,7 +3996,8 @@ app.post("/search", async (req, res) => {
 
   if (phase === 'category-filtered' && extractedCategories && isSimpleResult) {
     console.log(`[${requestId}] 📂 Phase 2: Returning category-filtered results`);
-    return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit);
+    // Pass the early-extracted soft filters from the query to phase 2
+    return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, earlySoftFilters);
   }
 
   const translatedQuery = await translateQuery(query, context);
@@ -4189,6 +4300,19 @@ app.post("/search", async (req, res) => {
             };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
+        
+      // Log tier 1 text match results for standard search
+      const tier1Results = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 10000);
+      if (tier1Results.length > 0) {
+        console.log(`[${requestId}] 📊 TIER 1 TEXT MATCH - ${tier1Results.length} high-quality matches with extracted filters:`);
+        tier1Results.slice(0, 5).forEach((match, idx) => {
+          const categories = Array.isArray(match.category) ? match.category : (match.category ? [match.category] : []);
+          const softCategories = Array.isArray(match.softCategory) ? match.softCategory.slice(0, 3) : [];
+          console.log(`[${requestId}]   ${idx + 1}. "${match.name}" (bonus: ${match.exactMatchBonus}, RRF: ${match.rrf_score.toFixed(2)})`);
+          console.log(`[${requestId}]      Categories: ${categories.length > 0 ? JSON.stringify(categories) : 'none'}`);
+          console.log(`[${requestId}]      Soft Categories: ${softCategories.length > 0 ? JSON.stringify(softCategories) : 'none'}`);
+        });
+      }
     }
 
       // TWO-STEP SEARCH FOR SIMPLE QUERIES
@@ -4241,6 +4365,16 @@ app.post("/search", async (req, res) => {
 
           if (highQualityTextMatches.length > 0) {
             console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches`);
+            
+            // Log tier 1 text match results with their categories
+            console.log(`[${requestId}] 📊 TIER 1 TEXT MATCH - Top matches with extracted filters:`);
+            highQualityTextMatches.slice(0, 5).forEach((match, idx) => {
+              const categories = Array.isArray(match.category) ? match.category : (match.category ? [match.category] : []);
+              const softCategories = Array.isArray(match.softCategory) ? match.softCategory.slice(0, 3) : [];
+              console.log(`[${requestId}]   ${idx + 1}. "${match.name}" (bonus: ${match.exactMatchBonus})`);
+              console.log(`[${requestId}]      Categories: ${categories.length > 0 ? JSON.stringify(categories) : 'none'}`);
+              console.log(`[${requestId}]      Soft Categories: ${softCategories.length > 0 ? JSON.stringify(softCategories) : 'none'}`);
+            });
 
             // STEP 2: Extract categories from high-quality text matches
             console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
