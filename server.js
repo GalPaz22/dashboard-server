@@ -1282,7 +1282,7 @@ COMPLEX queries are:
 Analyze the query and return your classification.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite",
+        model: "gemini-2.5-flash",
         contents: [{ text: query }],
         config: {
           systemInstruction,
@@ -1565,7 +1565,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
 ${example}.`;
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash-lite",
+      model: "gemini-2.5-flash",
       contents: [{ text: query }],
       config: {
         systemInstruction,
