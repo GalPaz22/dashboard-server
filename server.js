@@ -3126,7 +3126,7 @@ app.get("/search/load-more", async (req, res) => {
       });
     }
     
-    const { query, filters, offset, timestamp, type, extractedCategories } = paginationData;
+    const { query, filters, offset, timestamp, type, extractedCategories, productEmbeddings } = paginationData;
     
     // Check if token is expired (5 minutes)
     const tokenAge = Date.now() - timestamp;
@@ -3152,91 +3152,162 @@ app.get("/search/load-more", async (req, res) => {
     let cachedResults = null;
     
     // HANDLE CATEGORY-FILTERED REQUEST OR COMPLEX TIER-2 (both use category filtering)
-    if ((isCategoryFiltered || isComplexTier2) && extractedCategories) {
+    if ((isCategoryFiltered || isComplexTier2) && (extractedCategories || productEmbeddings)) {
       if (isComplexTier2) {
         console.log(`[${requestId}] 📋 Categories from LLM-selected products:`);
+        if (productEmbeddings && productEmbeddings.length > 0) {
+          console.log(`[${requestId}] 🧬 Using vector similarity with ${productEmbeddings.length} product embeddings`);
+        }
       } else {
         console.log(`[${requestId}] Running category-filtered search with:`);
       }
-      console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
-      console.log(`[${requestId}]   • Soft categories: ${extractedCategories.softCategories ? JSON.stringify(extractedCategories.softCategories) : 'none'}`);
-      
+      if (extractedCategories) {
+        console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
+        console.log(`[${requestId}]   • Soft categories: ${extractedCategories.softCategories ? JSON.stringify(extractedCategories.softCategories) : 'none'}`);
+      }
+
       try {
         const { dbName } = req.store;
         const client = await connectToMongoDB(mongodbUri);
         const db = client.db(dbName);
         const collection = db.collection("products");
-        
+
         // Create hard filters with extracted categories
         const categoryFilteredHardFilters = { ...filters };
-        if (extractedCategories.hardCategories && extractedCategories.hardCategories.length > 0) {
+        if (extractedCategories && extractedCategories.hardCategories && extractedCategories.hardCategories.length > 0) {
           categoryFilteredHardFilters.category = extractedCategories.hardCategories;
         }
-        
+
         // Prepare search parameters
         const cleanedText = cleanHebrewText(query);
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
         const searchLimit = parseInt(limit) * 3;
         const vectorLimit = parseInt(limit) * 2;
-        
-        // Run category-filtered search
+
+        // Run category-filtered search OR vector similarity search
         let categoryFilteredResults;
-        
-        if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
-          // Use soft category search
-          categoryFilteredResults = await executeExplicitSoftCategorySearch(
-            collection,
-            cleanedText,
-            query,
-            categoryFilteredHardFilters,
-            extractedCategories.softCategories,
-            queryEmbedding,
-            searchLimit,
-            vectorLimit,
-            true, // useOrLogic
-            false,
-            cleanedText,
-            []
-          );
-        } else {
-          // Just category filter without soft categories
-          const [fuzzyRes, vectorRes] = await Promise.all([
-            collection.aggregate(buildStandardSearchPipeline(
-              cleanedText, query, categoryFilteredHardFilters, searchLimit, true
-            )).toArray(),
-            collection.aggregate(buildStandardVectorSearchPipeline(
-              queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
-            )).toArray()
-          ]);
-          
-          const docRanks = new Map();
-          fuzzyRes.forEach((doc, index) => {
-            docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-          });
-          vectorRes.forEach((doc, index) => {
-            const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-            docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
-          });
-          
-          categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
-            const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+
+        // If we have product embeddings, use vector similarity to find nearest neighbors
+        if (isComplexTier2 && productEmbeddings && productEmbeddings.length > 0) {
+          console.log(`[${requestId}] 🔬 Running vector similarity search with embeddings from top text-matched products`);
+
+          // Run vector search for each embedding and combine results
+          const allVectorResults = [];
+          const seenIds = new Set();
+
+          for (let i = 0; i < productEmbeddings.length; i++) {
+            const embedding = productEmbeddings[i];
+            console.log(`[${requestId}]   🧬 Searching with embedding ${i + 1}/${productEmbeddings.length}`);
+
+            // Build vector search pipeline using product embedding
+            const vectorPipeline = buildStandardVectorSearchPipeline(
+              embedding,
+              categoryFilteredHardFilters,
+              vectorLimit,
+              false,
+              []
+            );
+
+            const vectorResults = await collection.aggregate(vectorPipeline).toArray();
+            console.log(`[${requestId}]     Found ${vectorResults.length} similar products`);
+
+            // Add results, avoiding duplicates
+            for (const doc of vectorResults) {
+              const docId = doc._id.toString();
+              if (!seenIds.has(docId)) {
+                seenIds.add(docId);
+                allVectorResults.push({
+                  ...doc,
+                  sourceEmbeddingIndex: i, // Track which embedding found this
+                  vectorSimilarity: true
+                });
+              }
+            }
+          }
+
+          console.log(`[${requestId}] 🎯 Vector similarity found ${allVectorResults.length} unique products across ${productEmbeddings.length} embeddings`);
+
+          // Calculate scores for ranking
+          categoryFilteredResults = allVectorResults.map(doc => {
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-            // Calculate soft category matches for tier 2 results
-            const softCategoryMatches = softFilters.softCategory ?
-              calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory) : 0;
+            const softCategoryMatches = (extractedCategories && extractedCategories.softCategories) ?
+              calculateSoftCategoryMatches(doc?.softCategory, extractedCategories.softCategories) : 0;
             const softFilterMatch = softCategoryMatches > 0;
+
+            // Simple scoring based on position in vector results
+            const vectorScore = 1000 - (allVectorResults.indexOf(doc) * 10);
 
             return {
               ...doc,
-              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+              rrf_score: vectorScore + exactMatchBonus + (softCategoryMatches * 100),
               softFilterMatch: softFilterMatch,
               softCategoryMatches: softCategoryMatches,
               exactMatchBonus: exactMatchBonus,
-              softCategoryExpansion: true // All results are Tier 2
+              softCategoryExpansion: true, // All results are Tier 2
+              vectorSimilarityMatch: true // Mark as found via vector similarity
             };
           }).sort((a, b) => b.rrf_score - a.rrf_score);
+
+        } else if (extractedCategories) {
+          // Original category-based search
+          console.log(`[${requestId}] 📂 Running category-filtered search (no embeddings available)`);
+
+          if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
+            // Use soft category search
+            categoryFilteredResults = await executeExplicitSoftCategorySearch(
+              collection,
+              cleanedText,
+              query,
+              categoryFilteredHardFilters,
+              extractedCategories.softCategories,
+              queryEmbedding,
+              searchLimit,
+              vectorLimit,
+              true, // useOrLogic
+              false,
+              cleanedText,
+              []
+            );
+          } else {
+            // Just category filter without soft categories
+            const [fuzzyRes, vectorRes] = await Promise.all([
+              collection.aggregate(buildStandardSearchPipeline(
+                cleanedText, query, categoryFilteredHardFilters, searchLimit, true
+              )).toArray(),
+              collection.aggregate(buildStandardVectorSearchPipeline(
+                queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+              )).toArray()
+            ]);
+
+            const docRanks = new Map();
+            fuzzyRes.forEach((doc, index) => {
+              docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
+            });
+            vectorRes.forEach((doc, index) => {
+              const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
+              docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
+            });
+
+            categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
+              const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+              const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+              // Calculate soft category matches for tier 2 results
+              const softCategoryMatches = softFilters.softCategory ?
+                calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory) : 0;
+              const softFilterMatch = softCategoryMatches > 0;
+
+              return {
+                ...doc,
+                rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+                softFilterMatch: softFilterMatch,
+                softCategoryMatches: softCategoryMatches,
+                exactMatchBonus: exactMatchBonus,
+                softCategoryExpansion: true // All results are Tier 2
+              };
+            }).sort((a, b) => b.rrf_score - a.rrf_score);
+          }
         }
-        
+
         cachedResults = categoryFilteredResults;
         console.log(`[${requestId}] Category-filtered search returned ${cachedResults.length} products`);
         
@@ -4874,15 +4945,22 @@ app.post("/search", async (req, res) => {
     let nextToken = null;
     
     if (isComplexQueryResult) {
-      // Complex queries: Extract categories from the TOP 4 LLM-reordered products for tier-2
+      // Complex queries: Extract categories AND embeddings from the TOP 4 LLM-reordered products for tier-2
       console.log(`[${requestId}] 🎯 COMPLEX QUERY DETECTED - Preparing tier-2 token`);
-      
+
       // Get ONLY the first 4 LLM-selected products (the perfect matches)
       const top4LLMProducts = limitedResults.slice(0, 4);
-      console.log(`[${requestId}] Analyzing TOP 4 LLM-selected products for category extraction (perfect matches only)`);
+      console.log(`[${requestId}] Analyzing TOP 4 LLM-selected products for category and embedding extraction (perfect matches only)`);
       console.log(`[${requestId}] Top 4 product names:`, top4LLMProducts.map(p => p.name));
-      
+
       const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
+
+      // Extract embeddings from top 4 products for vector similarity in tier-2
+      const productEmbeddings = top4LLMProducts
+        .filter(p => p.embedding && Array.isArray(p.embedding))
+        .map(p => p.embedding);
+
+      console.log(`[${requestId}] 🧬 Extracted ${productEmbeddings.length} embeddings from top 4 products for tier-2 vector similarity`);
 
       nextToken = Buffer.from(JSON.stringify({
         query,
@@ -4890,10 +4968,11 @@ app.post("/search", async (req, res) => {
         offset: limitedResults.length,
         timestamp: Date.now(),
         extractedCategories: extractedFromLLM, // Categories extracted from TOP 4 LLM-selected products
+        productEmbeddings: productEmbeddings, // Embeddings from TOP 4 for vector similarity
         type: 'complex-tier2' // Mark as complex query tier 2
       })).toString('base64');
-      
-      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 4 LLM perfect matches`);
+
+      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories and embeddings from TOP 4 LLM perfect matches`);
       console.log(`[${requestId}] 📊 LLM-extracted categories (from 4 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
       if (extractedFromLLM.hardCategories?.length > 0) {
         console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromLLM.hardCategories)}`);
