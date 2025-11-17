@@ -489,12 +489,11 @@ async function authenticate(req, res, next) {
   }
 }
 
-// Apply authentication to all routes except test endpoints, health, cache management, and pagination
+// Apply authentication to all routes except test endpoints, health, and cache management
 app.use((req, res, next) => {
-  if (req.path.startsWith('/test-') || 
-      req.path === '/health' || 
-      req.path.startsWith('/cache/') ||
-      req.path === '/search/load-more') {
+  if (req.path.startsWith('/test-') ||
+      req.path === '/health' ||
+      req.path.startsWith('/cache/')) {
     return next();
   }
   return authenticate(req, res, next);
