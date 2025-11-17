@@ -1383,6 +1383,56 @@ function extractCategoriesFromProducts(products) {
     }
   }
 
+  // FALLBACK: If no categories found, try to extract from product name/type/description
+  if (categoryCount.size === 0 && softCategoryCount.size === 0) {
+    console.log(`[extractCategoriesFromProducts] ⚠️  No category fields found, attempting fallback extraction from names/types`);
+
+    // Wine type detection patterns
+    const winePatterns = {
+      'יין אדום': ['אדום', 'red', 'rouge', 'cabernet', 'merlot', 'שיראז', 'syrah', 'מלבק', 'malbec'],
+      'יין לבן': ['לבן', 'white', 'blanc', 'chardonnay', 'סוביניון', 'sauvignon', 'גוורץ', 'gewurz', 'ריזלינג', 'riesling', 'פסימנטו'],
+      'יין מבעבע': ['מבעבע', 'שמפניה', 'קאווה', 'prosecco', 'פרוסקו', 'sparkling', 'champagne', 'cava'],
+      'יין רוזה': ['רוזה', 'rose', 'rosé', 'רוזא'],
+      'יין': ['יין', 'wine', 'vin', 'vino', 'וינו', 'וין']
+    };
+
+    const otherPatterns = {
+      'וויסקי': ['וויסקי', 'whisky', 'whiskey', 'סינגל מולט', 'single malt'],
+      'וודקה': ['וודקה', 'vodka'],
+      'גין': ['גין', 'gin'],
+      'בירה': ['בירה', 'beer', 'ale', 'lager'],
+      'ברנדי': ['ברנדי', 'brandy', 'cognac', 'קוניאק'],
+      'ורמוט': ['ורמוט', 'vermouth'],
+      'סאקה': ['סאקה', 'sake']
+    };
+
+    const allPatterns = { ...winePatterns, ...otherPatterns };
+
+    for (const product of products) {
+      const searchText = `${product.name || ''} ${product.type || ''} ${product.description || ''}`.toLowerCase();
+
+      // Check each category pattern
+      for (const [category, keywords] of Object.entries(allPatterns)) {
+        for (const keyword of keywords) {
+          if (searchText.includes(keyword.toLowerCase())) {
+            const count = categoryCount.get(category) || 0;
+            categoryCount.set(category, count + 1);
+
+            // Boost if it's a priority category
+            if (priorityHardCategories.includes(category)) {
+              categoryCount.set(category, (categoryCount.get(category) || 0) + 100);
+            }
+
+            console.log(`[extractCategoriesFromProducts]   ✓ Detected "${category}" in "${product.name}" via keyword "${keyword}"`);
+            break; // Only count once per product per category
+          }
+        }
+      }
+    }
+
+    console.log(`[extractCategoriesFromProducts] Fallback extraction complete. Found ${categoryCount.size} categories.`);
+  }
+
   // Debug: Log category counts
   console.log(`[extractCategoriesFromProducts] DEBUG - Category counts:`);
   if (categoryCount.size > 0) {
@@ -3219,7 +3269,7 @@ app.get("/search/load-more", async (req, res) => {
         }
         
         // Prepare search parameters
-        const cleanedText = cleanHebrewText(query);
+        const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
         const searchLimit = parseInt(limit) * 3;
         const vectorLimit = parseInt(limit) * 2;
@@ -3345,7 +3395,7 @@ app.get("/search/load-more", async (req, res) => {
         }
 
         // Prepare search parameters
-        const cleanedText = cleanHebrewText(query);
+        const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
         const searchLimit = parseInt(limit) * 3;
         const vectorLimit = parseInt(limit) * 2;
@@ -4763,6 +4813,8 @@ app.post("/search", async (req, res) => {
             url: product.url,
             highlight: reorderedIds.includes(product._id.toString()), // LLM selections are highlighted
             type: product.type,
+            category: product.category, // Include for tier-2 category extraction
+            softCategory: product.softCategory, // Include for tier-2 category extraction
             specialSales: product.specialSales,
             onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
             ItemID: product.ItemID,
@@ -4786,6 +4838,8 @@ app.post("/search", async (req, res) => {
             url: r.url,
             highlight: false, // Remaining results not highlighted
             type: r.type,
+            category: r.category, // Include for tier-2 category extraction
+            softCategory: r.softCategory, // Include for tier-2 category extraction
             specialSales: r.specialSales,
             onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
             ItemID: r.ItemID,
@@ -4850,6 +4904,8 @@ app.post("/search", async (req, res) => {
           url: r.url,
           highlight: isHighlighted,
           type: r.type,
+          category: r.category, // Include for tier-2 category extraction
+          softCategory: r.softCategory, // Include for tier-2 category extraction
           specialSales: r.specialSales,
           onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
           ItemID: r.ItemID,
@@ -4926,7 +4982,14 @@ app.post("/search", async (req, res) => {
       const top4LLMProducts = limitedResults.slice(0, 4);
       console.log(`[${requestId}] Analyzing TOP 4 LLM-selected products for category extraction (perfect matches only)`);
       console.log(`[${requestId}] Top 4 product names:`, top4LLMProducts.map(p => p.name));
-      
+
+      // Debug: Log all fields of first product to understand data structure
+      if (top4LLMProducts.length > 0) {
+        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(top4LLMProducts[0]));
+        console.log(`[${requestId}] DEBUG - Sample product type:`, top4LLMProducts[0].type);
+        console.log(`[${requestId}] DEBUG - Sample product description:`, top4LLMProducts[0].description?.substring(0, 100));
+      }
+
       const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
 
       nextToken = Buffer.from(JSON.stringify({
