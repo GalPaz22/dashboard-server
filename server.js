@@ -1099,7 +1099,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
         index: "vector_index",
         path: "embedding",
         queryVector: queryEmbedding,
-        exact: true, // Use ENN (Exact Nearest Neighbor) instead of ANN
+        exact: false, // Use ANN (Approximate Nearest Neighbor)
         limit: limit,
         ...(Object.keys(filter).length && { filter }),
       },
@@ -4527,7 +4527,7 @@ app.post("/search", async (req, res) => {
                   cleanedText,
                   query,
                   categoryFilteredHardFilters,
-                  softCategoriesArray,
+                  { softCategory: softCategoriesArray },
                   queryEmbedding,
                   searchLimit * 2, // Get more results
                   vectorLimit,
@@ -5208,7 +5208,7 @@ app.post("/recommend", async (req, res) => {
           index: "vector_index",
           path: "embedding",
           queryVector: embedding,
-          exact: true, // Use ENN (Exact Nearest Neighbor) instead of ANN
+          exact: false, // Use ANN (Approximate Nearest Neighbor)
           limit: 10,
         },
       },
