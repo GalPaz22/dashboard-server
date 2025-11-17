@@ -489,12 +489,11 @@ async function authenticate(req, res, next) {
   }
 }
 
-// Apply authentication to all routes except test endpoints, health, cache management, and pagination
+// Apply authentication to all routes except test endpoints, health, and cache management
 app.use((req, res, next) => {
-  if (req.path.startsWith('/test-') || 
-      req.path === '/health' || 
-      req.path.startsWith('/cache/') ||
-      req.path === '/search/load-more') {
+  if (req.path.startsWith('/test-') ||
+      req.path === '/health' ||
+      req.path.startsWith('/cache/')) {
     return next();
   }
   return authenticate(req, res, next);
@@ -1352,6 +1351,14 @@ function extractCategoriesFromProducts(products) {
     'ורמוט', 'מארז', 'סיידר', 'דג׳סטיף', 'אפרטיף'
   ];
 
+  // Debug: Log what categories are in each product
+  console.log(`[extractCategoriesFromProducts] DEBUG - Examining ${products.length} products:`);
+  products.forEach((p, idx) => {
+    console.log(`[extractCategoriesFromProducts]   Product ${idx + 1}: "${p.name}"`);
+    console.log(`[extractCategoriesFromProducts]     • category: ${p.category ? JSON.stringify(p.category) : 'MISSING'}`);
+    console.log(`[extractCategoriesFromProducts]     • softCategory: ${p.softCategory ? JSON.stringify(p.softCategory) : 'MISSING'}`);
+  });
+
   // Count occurrences of each category across products
   for (const product of products) {
     // Hard categories
@@ -1359,7 +1366,7 @@ function extractCategoriesFromProducts(products) {
       const cats = Array.isArray(product.category) ? product.category : [product.category];
       cats.forEach(cat => {
         categoryCount.set(cat, (categoryCount.get(cat) || 0) + 1);
-        
+
         // Boost priority categories (ensure they're always extracted if present)
         if (priorityHardCategories.includes(cat)) {
           categoryCount.set(cat, (categoryCount.get(cat) || 0) + 100);
@@ -1376,19 +1383,57 @@ function extractCategoriesFromProducts(products) {
     }
   }
 
-  // Extract categories that appear in multiple products
-  // For 4 LLM-selected products: require at least 2 occurrences (50%)
+  // Debug: Log category counts
+  console.log(`[extractCategoriesFromProducts] DEBUG - Category counts:`);
+  if (categoryCount.size > 0) {
+    console.log(`[extractCategoriesFromProducts]   Hard categories:`, Array.from(categoryCount.entries()));
+  } else {
+    console.log(`[extractCategoriesFromProducts]   Hard categories: NONE FOUND`);
+  }
+  if (softCategoryCount.size > 0) {
+    console.log(`[extractCategoriesFromProducts]   Soft categories:`, Array.from(softCategoryCount.entries()));
+  } else {
+    console.log(`[extractCategoriesFromProducts]   Soft categories: NONE FOUND`);
+  }
+
+  // Extract categories that appear in products
+  // For small LLM-selected sets (≤4 products): More lenient threshold
+  // - Priority categories: extract if they appear at least once
+  // - Other categories: extract most common (at least 2 occurrences for 4 products)
   // For larger sets: require at least 25%
-  const minOccurrences = products.length <= 4 
-    ? Math.max(2, Math.ceil(products.length * 0.5)) // For small sets (4 products), need 50%
+  const minOccurrences = products.length <= 4
+    ? 2 // For 4 LLM products, need at least 2 occurrences (50%)
     : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
-  
-  // Hard categories: get the most common ones
-  const hardCategories = Array.from(categoryCount.entries())
-    .filter(([_, count]) => count >= minOccurrences)
-    .sort((a, b) => b[1] - a[1]) // Sort by count, most common first
-    .slice(0, 3) // Take top 3 hard categories max
-    .map(([cat, _]) => cat);
+
+  const minOccurrencesForPriority = products.length <= 4 ? 1 : minOccurrences; // Priority categories: 1 occurrence is enough for small sets
+
+  console.log(`[extractCategoriesFromProducts] Using thresholds: regular=${minOccurrences}, priority=${minOccurrencesForPriority}`);
+
+  // Hard categories: Extract priority categories first, then common ones
+  const sortedHardCategories = Array.from(categoryCount.entries())
+    .sort((a, b) => b[1] - a[1]); // Sort by count, most common first
+
+  const hardCategories = [];
+
+  // First pass: Add priority categories that meet the lower threshold
+  for (const [cat, count] of sortedHardCategories) {
+    if (priorityHardCategories.includes(cat) && count >= minOccurrencesForPriority && hardCategories.length < 3) {
+      hardCategories.push(cat);
+    }
+  }
+
+  // Second pass: Add non-priority categories that meet the regular threshold
+  for (const [cat, count] of sortedHardCategories) {
+    if (!hardCategories.includes(cat) && count >= minOccurrences && hardCategories.length < 3) {
+      hardCategories.push(cat);
+    }
+  }
+
+  // Fallback: If no categories extracted but we have categories, take the most common one
+  if (hardCategories.length === 0 && sortedHardCategories.length > 0) {
+    console.log(`[extractCategoriesFromProducts] WARNING: No categories met threshold, taking most common`);
+    hardCategories.push(sortedHardCategories[0][0]);
+  }
 
   // Soft categories: get the most common ones
   const softCategories = Array.from(softCategoryCount.entries())
