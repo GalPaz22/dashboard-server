@@ -3219,7 +3219,7 @@ app.get("/search/load-more", async (req, res) => {
         }
         
         // Prepare search parameters
-        const cleanedText = cleanHebrewText(query);
+        const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
         const searchLimit = parseInt(limit) * 3;
         const vectorLimit = parseInt(limit) * 2;
@@ -3345,7 +3345,7 @@ app.get("/search/load-more", async (req, res) => {
         }
 
         // Prepare search parameters
-        const cleanedText = cleanHebrewText(query);
+        const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
         const searchLimit = parseInt(limit) * 3;
         const vectorLimit = parseInt(limit) * 2;
