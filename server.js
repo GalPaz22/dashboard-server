@@ -4813,6 +4813,8 @@ app.post("/search", async (req, res) => {
             url: product.url,
             highlight: reorderedIds.includes(product._id.toString()), // LLM selections are highlighted
             type: product.type,
+            category: product.category, // Include for tier-2 category extraction
+            softCategory: product.softCategory, // Include for tier-2 category extraction
             specialSales: product.specialSales,
             onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
             ItemID: product.ItemID,
@@ -4836,6 +4838,8 @@ app.post("/search", async (req, res) => {
             url: r.url,
             highlight: false, // Remaining results not highlighted
             type: r.type,
+            category: r.category, // Include for tier-2 category extraction
+            softCategory: r.softCategory, // Include for tier-2 category extraction
             specialSales: r.specialSales,
             onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
             ItemID: r.ItemID,
@@ -4900,6 +4904,8 @@ app.post("/search", async (req, res) => {
           url: r.url,
           highlight: isHighlighted,
           type: r.type,
+          category: r.category, // Include for tier-2 category extraction
+          softCategory: r.softCategory, // Include for tier-2 category extraction
           specialSales: r.specialSales,
           onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
           ItemID: r.ItemID,
