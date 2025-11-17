@@ -859,194 +859,14 @@ const buildAutocompletePipeline = (query, indexName, path) => {
   return pipeline;
 };
 
-// Standard search pipeline without soft filter boosting - OPTIMIZED
-const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false, excludeIds = [], softFilters = null, invertSoftFilter = false) => {
+// Standard search pipeline without soft filter boosting
+const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false, excludeIds = []) => {
   const pipeline = [];
-
+  
   if (cleanedHebrewText && cleanedHebrewText.trim() !== '') {
     // Reduce text search boosts significantly in image mode with soft categories
     const textBoostMultiplier = isImageModeWithSoftCategories ? 0.1 : 1.0;
-
-    // Build filter clauses for compound operator (moved from $match stages for 10x performance)
-    const filterClauses = [];
-
-    // Stock status filter - using compound should for OR logic
-    filterClauses.push({
-      compound: {
-        should: [
-          {
-            compound: {
-              mustNot: [
-                { exists: { path: "stockStatus" } }
-              ]
-            }
-          },
-          {
-            text: {
-              query: "instock",
-              path: "stockStatus"
-            }
-          }
-        ],
-        minimumShouldMatch: 1
-      }
-    });
-
-    // Type filter
-    if (hardFilters && hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
-      const types = Array.isArray(hardFilters.type) ? hardFilters.type : [hardFilters.type];
-      if (types.length === 1) {
-        filterClauses.push({
-          text: {
-            query: types[0],
-            path: "type"
-          }
-        });
-      } else {
-        // Multiple types - use should with minimumShouldMatch for OR logic
-        filterClauses.push({
-          compound: {
-            should: types.map(t => ({
-              text: {
-                query: t,
-                path: "type"
-              }
-            })),
-            minimumShouldMatch: 1
-          }
-        });
-      }
-    }
-
-    // Category filter
-    if (hardFilters && hardFilters.category) {
-      const categories = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
-      if (useOrLogic && categories.length > 1) {
-        // OR logic - any category matches
-        filterClauses.push({
-          compound: {
-            should: categories.map(c => ({
-              text: {
-                query: c,
-                path: "category"
-              }
-            })),
-            minimumShouldMatch: 1
-          }
-        });
-      } else if (categories.length === 1) {
-        // Single category
-        filterClauses.push({
-          text: {
-            query: categories[0],
-            path: "category"
-          }
-        });
-      } else {
-        // AND logic - all categories must match (for $all behavior)
-        categories.forEach(c => {
-          filterClauses.push({
-            text: {
-              query: c,
-              path: "category"
-            }
-          });
-        });
-      }
-    }
-
-    // Price filters - using range operator
-    if (hardFilters) {
-      if (hardFilters.minPrice !== undefined && hardFilters.maxPrice !== undefined) {
-        filterClauses.push({
-          range: {
-            path: "price",
-            gte: Number(hardFilters.minPrice),
-            lte: Number(hardFilters.maxPrice)
-          }
-        });
-      } else if (hardFilters.minPrice !== undefined) {
-        filterClauses.push({
-          range: {
-            path: "price",
-            gte: Number(hardFilters.minPrice)
-          }
-        });
-      } else if (hardFilters.maxPrice !== undefined) {
-        filterClauses.push({
-          range: {
-            path: "price",
-            lte: Number(hardFilters.maxPrice)
-          }
-        });
-      } else if (hardFilters.price !== undefined) {
-        const price = Number(hardFilters.price);
-        const priceRange = price * 0.15;
-        filterClauses.push({
-          range: {
-            path: "price",
-            gte: Math.max(0, price - priceRange),
-            lte: price + priceRange
-          }
-        });
-      }
-    }
-
-    // Soft category filter - OPTIMIZED: moved into $search filter clause
-    if (softFilters && softFilters.softCategory) {
-      const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-
-      if (invertSoftFilter) {
-        // For non-soft-category filtering: exclude documents with these soft categories
-        filterClauses.push({
-          compound: {
-            should: [
-              {
-                compound: {
-                  mustNot: [
-                    { exists: { path: "softCategory" } }
-                  ]
-                }
-              },
-              {
-                compound: {
-                  mustNot: softCats.map(sc => ({
-                    text: {
-                      query: sc,
-                      path: "softCategory"
-                    }
-                  }))
-                }
-              }
-            ],
-            minimumShouldMatch: 1
-          }
-        });
-      } else {
-        // For soft-category filtering: include only documents with these soft categories
-        if (softCats.length === 1) {
-          filterClauses.push({
-            text: {
-              query: softCats[0],
-              path: "softCategory"
-            }
-          });
-        } else {
-          filterClauses.push({
-            compound: {
-              should: softCats.map(sc => ({
-                text: {
-                  query: sc,
-                  path: "softCategory"
-                }
-              })),
-              minimumShouldMatch: 1
-            }
-          });
-        }
-      }
-    }
-
+    
     const searchStage = {
       $search: {
         index: "default",
@@ -1101,8 +921,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 score: { boost: { value: 5 * textBoostMultiplier } }
               }
             }
-          ],
-          filter: filterClauses
+          ]
         }
       }
     };
@@ -1111,7 +930,18 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     pipeline.push({ $match: {} });
   }
 
-  // Exclude already delivered IDs - kept as $match since Atlas Search filter doesn't support $nin
+  // Stock status filter
+
+  pipeline.push({
+    $match: {
+      $or: [
+        { stockStatus: { $exists: false } },
+        { stockStatus: "instock" }
+      ],
+    },
+  });
+
+  // Exclude already delivered IDs
   if (excludeIds && excludeIds.length > 0) {
     const objectIds = excludeIds.map(id => {
       try {
@@ -1127,87 +957,140 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     });
   }
 
+  // Apply hard filters
+  if (hardFilters && Object.keys(hardFilters).length > 0) {
+    if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
+      pipeline.push({
+        $match: {
+          type: Array.isArray(hardFilters.type) 
+            ? { $in: hardFilters.type } 
+            : hardFilters.type
+        }
+      });
+    }
+    
+    if (hardFilters.category) {
+      if (Array.isArray(hardFilters.category) && useOrLogic) {
+        pipeline.push({
+          $match: {
+            category: { $in: hardFilters.category }
+          }
+        });
+      } else {
+        pipeline.push({
+          $match: {
+            category: Array.isArray(hardFilters.category) 
+              ? { $all: hardFilters.category } 
+              : hardFilters.category
+          }
+        });
+      }
+    }
+    
+    // Price filters
+    const priceMatch = {};
+    let hasPriceFilter = false;
+    
+    if (hardFilters.minPrice !== undefined && hardFilters.maxPrice !== undefined) {
+      priceMatch.$gte = Number(hardFilters.minPrice);
+      priceMatch.$lte = Number(hardFilters.maxPrice);
+      hasPriceFilter = true;
+    } else if (hardFilters.minPrice !== undefined) {
+      priceMatch.$gte = Number(hardFilters.minPrice);
+      hasPriceFilter = true;
+    } else if (hardFilters.maxPrice !== undefined) {
+      priceMatch.$lte = Number(hardFilters.maxPrice);
+      hasPriceFilter = true;
+    } else if (hardFilters.price !== undefined) {
+      const price = Number(hardFilters.price);
+      const priceRange = price * 0.15;
+      priceMatch.$gte = Math.max(0, price - priceRange);
+      priceMatch.$lte = price + priceRange;
+      hasPriceFilter = true;
+    }
+    
+    if (hasPriceFilter) {
+      pipeline.push({
+        $match: {
+          price: priceMatch
+        }
+      });
+    }
+  }
+  
   pipeline.push({ $limit: limit });
   return pipeline;
 };
 
-// Search pipeline WITH soft category filter - OPTIMIZED
+// Search pipeline WITH soft category filter
 const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
-  // Soft category filter now integrated into $search compound operator
-  return buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories, [], softFilters, false);
-};
-
-// Search pipeline WITHOUT soft category filter - OPTIMIZED
-const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
-  // Inverted soft category filter now integrated into $search compound operator
-  return buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories, [], softFilters, true);
-};
-
-// Standard vector search pipeline - OPTIMIZED
-function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 12, useOrLogic = false, excludeIds = [], softFilters = null, invertSoftFilter = false) {
-  const filter = { $and: [] };
-
-  // Stock status filter - OPTIMIZED: moved into $vectorSearch filter
-  filter.$and.push({
-    $or: [
-      { stockStatus: "instock" },
-      { stockStatus: { $exists: false } },
-    ],
-  });
-
-  // Category filter with proper logic handling
-  if (hardFilters.category) {
-    if (Array.isArray(hardFilters.category) && hardFilters.category.length > 0) {
-      if (useOrLogic) {
-        filter.$and.push({ category: { $in: hardFilters.category } });
-      } else {
-        filter.$and.push({ category: { $all: hardFilters.category } });
-      }
-    } else if (!Array.isArray(hardFilters.category)) {
-      filter.$and.push({ category: hardFilters.category });
+  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
+  
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    const limitIndex = pipeline.findIndex(stage => stage.$limit);
+    if (limitIndex !== -1) {
+      pipeline.splice(limitIndex, 0, {
+        $match: {
+          softCategory: { $in: softCats }
+        }
+      });
     }
   }
+  
+  return pipeline;
+};
 
-  // Type filter
-  if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
-    filter.$and.push({
-      type: Array.isArray(hardFilters.type)
-        ? { $in: hardFilters.type }
-        : hardFilters.type
-    });
+// Search pipeline WITHOUT soft category filter 
+const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
+  const pipeline = buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories);
+  
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    const limitIndex = pipeline.findIndex(stage => stage.$limit);
+    if (limitIndex !== -1) {
+      pipeline.splice(limitIndex, 0, {
+        $match: {
+          $or: [
+            { softCategory: { $exists: false } },
+            { softCategory: { $not: { $in: softCats } } }
+          ]
+        }
+      });
+    }
+  }
+  
+  return pipeline;
+};
+
+// Standard vector search pipeline
+function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 12, useOrLogic = false, excludeIds = []) {
+  const filter = {};
+
+  if (hardFilters.category) {
+    filter.category = Array.isArray(hardFilters.category)
+      ? { $in: hardFilters.category }
+      : hardFilters.category;
   }
 
-  // Price filters
+  if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
+    filter.type = Array.isArray(hardFilters.type)
+      ? { $in: hardFilters.type }
+      : hardFilters.type;
+  }
+
   if (hardFilters.minPrice && hardFilters.maxPrice) {
-    filter.$and.push({ price: { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice } });
+    filter.price = { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice };
   } else if (hardFilters.minPrice) {
-    filter.$and.push({ price: { $gte: hardFilters.minPrice } });
+    filter.price = { $gte: hardFilters.minPrice };
   } else if (hardFilters.maxPrice) {
-    filter.$and.push({ price: { $lte: hardFilters.maxPrice } });
+    filter.price = { $lte: hardFilters.maxPrice };
   }
 
   if (hardFilters.price) {
     const price = hardFilters.price;
     const priceRange = price * 0.15;
-    filter.$and.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
-  }
-
-  // Soft category filter - OPTIMIZED: moved into $vectorSearch filter
-  if (softFilters && softFilters.softCategory) {
-    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-
-    if (invertSoftFilter) {
-      // For non-soft-category filtering: exclude documents with these soft categories
-      filter.$and.push({
-        $or: [
-          { softCategory: { $exists: false } },
-          { softCategory: { $nin: softCats } }
-        ]
-      });
-    } else {
-      // For soft-category filtering: include only documents with these soft categories
-      filter.$and.push({ softCategory: { $in: softCats } });
-    }
+    filter.price = { $gte: price - priceRange, $lte: price + priceRange };
   }
 
   const pipeline = [
@@ -1219,12 +1102,29 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
         numCandidates: Math.max(limit * 10, 200), // Required for ANN search
         exact: false, // Use ANN (Approximate Nearest Neighbor)
         limit: limit,
-        filter: filter,
+        ...(Object.keys(filter).length && { filter }),
       },
     },
   ];
+  
+  const postMatchClauses = [];
 
-  // Exclude already delivered IDs - kept as $match since $nin on _id is more efficient here
+  if (Array.isArray(hardFilters.category) && hardFilters.category.length > 0) {
+    if (useOrLogic) {
+      postMatchClauses.push({ category: { $in: hardFilters.category } });
+    } else {
+      postMatchClauses.push({ category: { $all: hardFilters.category } });
+    }
+  }
+
+  postMatchClauses.push({
+    $or: [
+      { stockStatus: "instock" },
+      { stockStatus: { $exists: false } },
+    ],
+  });
+
+  // Exclude already delivered IDs
   if (excludeIds && excludeIds.length > 0) {
     const objectIds = excludeIds.map(id => {
       try {
@@ -1233,26 +1133,51 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
         return id;
       }
     });
-    pipeline.push({
-      $match: {
-        _id: { $nin: objectIds }
-      }
+    postMatchClauses.push({
+      _id: { $nin: objectIds }
     });
+  }
+
+  if (postMatchClauses.length > 0) {
+    pipeline.push({ $match: { $and: postMatchClauses } });
   }
 
   return pipeline;
 }
 
-// Vector search pipeline WITH soft category filter - OPTIMIZED
+// Vector search pipeline WITH soft category filter
 function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 12, useOrLogic = false) {
-  // Soft category filter now integrated into $vectorSearch filter
-  return buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic, [], softFilters, false);
+  const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
+  
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    pipeline.push({
+      $match: {
+        softCategory: { $in: softCats }
+      }
+    });
+  }
+  
+  return pipeline;
 }
 
-// Vector search pipeline WITHOUT soft category filter - OPTIMIZED
+// Vector search pipeline WITHOUT soft category filter
 function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 12, useOrLogic = false) {
-  // Inverted soft category filter now integrated into $vectorSearch filter
-  return buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic, [], softFilters, true);
+  const pipeline = buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic);
+  
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    pipeline.push({
+      $match: {
+        $or: [
+          { softCategory: { $exists: false } },
+          { softCategory: { $not: { $in: softCats } } }
+        ]
+      }
+    });
+  }
+
+  return pipeline;
 }
 
 /* =========================================================== *\
@@ -6306,10 +6231,10 @@ function isDigitsOnlyQuery(query) {
   return /^\d+$/.test(trimmed) && trimmed.length > 0;
 }
 
-// SKU search pipeline - OPTIMIZED for exact digit matches
+// SKU search pipeline - optimized for exact digit matches
 function buildSKUSearchPipeline(skuQuery, limit = 65) {
   console.log(`Building SKU search pipeline for: ${skuQuery}`);
-
+  
   const pipeline = [
     {
       $search: {
@@ -6328,7 +6253,7 @@ function buildSKUSearchPipeline(skuQuery, limit = 65) {
             {
               text: {
                 query: skuQuery,
-                path: "ItemID",
+                path: "ItemID", 
                 score: { boost: { value: 900 } } // High boost for ItemID match
               }
             },
@@ -6357,36 +6282,22 @@ function buildSKUSearchPipeline(skuQuery, limit = 65) {
               }
             }
           ],
-          minimumShouldMatch: 1,
-          // Stock status filter - OPTIMIZED: moved into $search filter for 10x performance
-          filter: [
-            {
-              compound: {
-                should: [
-                  {
-                    compound: {
-                      mustNot: [
-                        { exists: { path: "stockStatus" } }
-                      ]
-                    }
-                  },
-                  {
-                    text: {
-                      query: "instock",
-                      path: "stockStatus"
-                    }
-                  }
-                ],
-                minimumShouldMatch: 1
-              }
-            }
-          ]
+          minimumShouldMatch: 1
         }
+      }
+    },
+    // Stock status filter
+    {
+      $match: {
+        $or: [
+          { stockStatus: { $exists: false } },
+          { stockStatus: "instock" }
+        ]
       }
     },
     { $limit: limit }
   ];
-
+  
   return pipeline;
 }
 
