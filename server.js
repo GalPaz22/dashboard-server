@@ -1099,6 +1099,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
         index: "vector_index",
         path: "embedding",
         queryVector: queryEmbedding,
+        numCandidates: Math.max(limit * 10, 200), // Required for ANN search
         exact: false, // Use ANN (Approximate Nearest Neighbor)
         limit: limit,
         ...(Object.keys(filter).length && { filter }),
@@ -5208,6 +5209,7 @@ app.post("/recommend", async (req, res) => {
           index: "vector_index",
           path: "embedding",
           queryVector: embedding,
+          numCandidates: 100, // Required for ANN search
           exact: false, // Use ANN (Approximate Nearest Neighbor)
           limit: 10,
         },
