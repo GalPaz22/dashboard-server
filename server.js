@@ -6434,7 +6434,399 @@ app.delete("/cache/key/:key", async (req, res) => {
     });
   }
 });
+// ============================================
+// ACTIVE USERS PROFILE ENDPOINT
+// ============================================
 
+/**
+ * POST /active-users
+ * Store and update user profiles for personalization
+ */
+app.post("/active-users", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    const { dbName } = store;
+    const { user_profile } = req.body;
+    
+    // Validate required fields
+    if (!user_profile || !user_profile.visitor_id) {
+      console.error("[ACTIVE USERS] Missing visitor_id in request body:", req.body);
+      return res.status(400).json({ 
+        error: "Missing required fields: visitor_id",
+        received: req.body 
+      });
+    }
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const usersCollection = db.collection('active_users');
+    
+    // Enhanced user profile with metadata
+    const enhancedProfile = {
+      ...user_profile,
+      last_updated: new Date(),
+      user_agent: req.get('user-agent') || null,
+      ip_address: req.ip || req.connection.remoteAddress,
+      store_context: store.context || 'wine store',
+      store_name: store.storeName || 'unknown'
+    };
+    
+    console.log(`[ACTIVE USERS] Received profile for visitor: ${user_profile.visitor_id}`);
+    console.log(`[ACTIVE USERS] Segment: ${user_profile.customer_segment || 'unknown'}, Purchases: ${user_profile.purchase_count || 0}`);
+    
+    // Upsert: Update if visitor exists, insert if new
+    const updateResult = await usersCollection.updateOne(
+      { visitor_id: user_profile.visitor_id },
+      { 
+        $set: enhancedProfile,
+        $setOnInsert: { 
+          first_seen: new Date(),
+          profile_created_at: new Date()
+        }
+      },
+      { upsert: true }
+    );
+    
+    // Log activity
+    if (updateResult.upsertedCount) {
+      console.log(`[ACTIVE USERS] ✨ NEW USER CREATED: ${user_profile.visitor_id}`);
+    } else {
+      console.log(`[ACTIVE USERS] 📝 UPDATED existing user: ${user_profile.visitor_id}`);
+    }
+    
+    res.status(200).json({
+      success: true,
+      message: updateResult.upsertedCount ? 'User profile created' : 'User profile updated',
+      visitor_id: user_profile.visitor_id,
+      is_new_user: !!updateResult.upsertedCount,
+      matched_count: updateResult.matchedCount,
+      modified_count: updateResult.modifiedCount,
+      upserted_id: updateResult.upsertedId
+    });
+    
+  } catch (error) {
+    console.error("[ACTIVE USERS] ❌ Error saving user profile:", error);
+    res.status(500).json({ 
+      error: "Server error",
+      details: error.message 
+    });
+  }
+});
+
+/**
+ * GET /active-users/:visitor_id
+ * Retrieve a specific user profile
+ */
+app.get("/active-users/:visitor_id", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    const { visitor_id } = req.params;
+    const { dbName } = store;
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const usersCollection = db.collection('active_users');
+    
+    const userProfile = await usersCollection.findOne({ visitor_id });
+    
+    if (!userProfile) {
+      return res.status(404).json({ 
+        error: "User profile not found",
+        visitor_id 
+      });
+    }
+    
+    console.log(`[ACTIVE USERS] Retrieved profile for: ${visitor_id}`);
+    
+    res.status(200).json({
+      success: true,
+      user_profile: userProfile
+    });
+    
+  } catch (error) {
+    console.error("[ACTIVE USERS] Error retrieving user profile:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /active-users-stats
+ * Get aggregated statistics about all users
+ */
+app.get("/active-users-stats", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    const { dbName } = store;
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const usersCollection = db.collection('active_users');
+    
+    // Aggregate statistics
+    const stats = await usersCollection.aggregate([
+      {
+        $facet: {
+          total_users: [{ $count: "count" }],
+          by_segment: [
+            {
+              $group: {
+                _id: "$customer_segment",
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+          by_price_sensitivity: [
+            {
+              $group: {
+                _id: "$price_sensitivity",
+                count: { $sum: 1 }
+              }
+            },
+            { $sort: { count: -1 } }
+          ],
+          logged_in_users: [
+            {
+              $match: { is_logged_in: true }
+            },
+            { $count: "count" }
+          ],
+          active_today: [
+            {
+              $match: {
+                last_updated: {
+                  $gte: new Date(new Date().setHours(0, 0, 0, 0))
+                }
+              }
+            },
+            { $count: "count" }
+          ],
+          active_this_week: [
+            {
+              $match: {
+                last_updated: {
+                  $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+                }
+              }
+            },
+            { $count: "count" }
+          ],
+          total_purchases: [
+            {
+              $group: {
+                _id: null,
+                total_purchases: { $sum: "$purchase_count" },
+                total_revenue: { $sum: "$total_spent" },
+                avg_purchase_count: { $avg: "$purchase_count" },
+                avg_spent: { $avg: "$total_spent" }
+              }
+            }
+          ]
+        }
+      }
+    ]).toArray();
+    
+    console.log("[ACTIVE USERS] Stats retrieved successfully");
+    
+    res.status(200).json({
+      success: true,
+      stats: stats[0],
+      generated_at: new Date()
+    });
+    
+  } catch (error) {
+    console.error("[ACTIVE USERS] Error retrieving user statistics:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /active-users-recent
+ * Get recently active users
+ */
+app.get("/active-users-recent", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    const { dbName } = store;
+    const limit = parseInt(req.query.limit) || 50;
+    const hours = parseInt(req.query.hours) || 24;
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const usersCollection = db.collection('active_users');
+    
+    const cutoffTime = new Date(Date.now() - hours * 60 * 60 * 1000);
+    
+    const recentUsers = await usersCollection
+      .find({
+        last_updated: { $gte: cutoffTime }
+      })
+      .sort({ last_updated: -1 })
+      .limit(limit)
+      .toArray();
+    
+    console.log(`[ACTIVE USERS] Found ${recentUsers.length} users active in last ${hours} hours`);
+    
+    res.status(200).json({
+      success: true,
+      count: recentUsers.length,
+      hours_window: hours,
+      limit: limit,
+      users: recentUsers
+    });
+    
+  } catch (error) {
+    console.error("[ACTIVE USERS] Error retrieving recent users:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * POST /active-users-search
+ * Search users by various criteria
+ */
+app.post("/active-users-search", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    const { dbName } = store;
+    const { 
+      customer_segment, 
+      price_sensitivity, 
+      min_purchases,
+      max_purchases,
+      min_spent,
+      max_spent,
+      is_logged_in,
+      search_count_min,
+      view_count_min
+    } = req.body;
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const usersCollection = db.collection('active_users');
+    
+    // Build query
+    const query = {};
+    
+    if (customer_segment) query.customer_segment = customer_segment;
+    if (price_sensitivity) query.price_sensitivity = price_sensitivity;
+    if (is_logged_in !== undefined) query.is_logged_in = is_logged_in;
+    
+    // Purchase filters
+    if (min_purchases !== undefined || max_purchases !== undefined) {
+      query.purchase_count = {};
+      if (min_purchases !== undefined) query.purchase_count.$gte = min_purchases;
+      if (max_purchases !== undefined) query.purchase_count.$lte = max_purchases;
+    }
+    
+    // Spending filters
+    if (min_spent !== undefined || max_spent !== undefined) {
+      query.total_spent = {};
+      if (min_spent !== undefined) query.total_spent.$gte = min_spent;
+      if (max_spent !== undefined) query.total_spent.$lte = max_spent;
+    }
+    
+    // Activity filters
+    if (search_count_min !== undefined) {
+      query.search_count = { $gte: search_count_min };
+    }
+    if (view_count_min !== undefined) {
+      query.view_count = { $gte: view_count_min };
+    }
+    
+    const users = await usersCollection
+      .find(query)
+      .sort({ last_updated: -1 })
+      .limit(100)
+      .toArray();
+    
+    console.log(`[ACTIVE USERS] Search found ${users.length} matching users`);
+    
+    res.status(200).json({
+      success: true,
+      count: users.length,
+      filters: req.body,
+      users
+    });
+    
+  } catch (error) {
+    console.error("[ACTIVE USERS] Error searching users:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * DELETE /active-users/:visitor_id
+ * Delete a user profile (GDPR compliance)
+ */
+app.delete("/active-users/:visitor_id", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+    
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+    
+    const { visitor_id } = req.params;
+    const { dbName } = store;
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const usersCollection = db.collection('active_users');
+    
+    const deleteResult = await usersCollection.deleteOne({ visitor_id });
+    
+    if (deleteResult.deletedCount === 0) {
+      return res.status(404).json({ 
+        error: "User profile not found",
+        visitor_id 
+      });
+    }
+    
+    console.log(`[ACTIVE USERS] 🗑️ DELETED user profile: ${visitor_id}`);
+    
+    res.status(200).json({
+      success: true,
+      message: "User profile deleted successfully",
+      visitor_id,
+      deleted_count: deleteResult.deletedCount
+    });
+    
+  } catch (error) {
+    console.error("[ACTIVE USERS] Error deleting user profile:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
 /* =========================================================== *\
    SERVER STARTUP
 \* =========================================================== */
