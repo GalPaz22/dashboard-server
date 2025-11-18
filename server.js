@@ -5341,6 +5341,9 @@ app.post("/search-to-cart", async (req, res) => {
       case 'checkout_completed':
         targetCollection = db.collection('checkout_events');
         break;
+        case 'active_user_profile':
+        targetCollection = db.collection('user_profiles');
+        break;
       case 'add_to_cart':
         targetCollection = db.collection('cart');
         break;
