@@ -572,7 +572,7 @@ function isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText) 
 function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQuery) {
   const hasHardFilters = hardFilters && Object.keys(hardFilters).length > 0;
   const hasSoftFilters = softFilters && softFilters.softCategory && softFilters.softCategory.length > 0;
-
+  
   // Check if this is primarily a filter-based query (high filter coverage)
   const isPrimarilyFilterBased = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
 
@@ -641,8 +641,8 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   if (hardFilters && Object.keys(hardFilters).length > 0) {
     if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
       matchConditions.push({
-        type: Array.isArray(hardFilters.type)
-          ? { $in: hardFilters.type }
+        type: Array.isArray(hardFilters.type) 
+          ? { $in: hardFilters.type } 
           : { $eq: hardFilters.type }
       });
     }
@@ -654,8 +654,8 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
         });
       } else {
         matchConditions.push({
-          category: Array.isArray(hardFilters.category)
-            ? { $all: hardFilters.category }
+          category: Array.isArray(hardFilters.category) 
+            ? { $all: hardFilters.category } 
             : { $eq: hardFilters.category }
         });
       }
@@ -2272,8 +2272,89 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
       return 20000;
     }
   }
+
+  // NEAR EXACT MATCHES - More forgiving matching for partial/high similarity matches
+  // Single word query with high similarity
+  if (queryWords.length === 1) {
+    const queryWord = queryWords[0];
+    // Query word is prefix of product name
+    if (productNameLower.startsWith(queryWord)) {
+      return 15000;
+    }
+    // Product name starts with query word
+    if (queryWord.length >= 3 && productNameLower.startsWith(queryWord)) {
+      return 12000;
+    }
+    // Query word appears early in product name
+    const wordPosition = productNameLower.indexOf(queryWord);
+    if (wordPosition >= 0 && wordPosition <= 20) {
+      return 10000; // Near exact for words appearing early
+    }
+  }
+
+  // Multi-word partial matches
+  if (queryWords.length > 1) {
+    let matchedWords = 0;
+    for (const word of queryWords) {
+      if (word.length > 2 && productNameLower.includes(word)) {
+        matchedWords++;
+      }
+    }
+    // If 70% or more of query words are found
+    if (matchedWords >= Math.ceil(queryWords.length * 0.7)) {
+      return 15000;
+    }
+    // If at least 2 words match in a multi-word query
+    if (matchedWords >= 2) {
+      return 12000;
+    }
+  }
+
+  // Fuzzy similarity for short queries
+  if (queryLower.length >= 4 && productNameLower.length >= 4) {
+    const similarity = calculateStringSimilarity(queryLower, productNameLower.substring(0, Math.min(30, productNameLower.length)));
+    if (similarity >= 0.8) {
+      return 10000; // Near exact for high similarity
+    }
+  }
   
   return 0;
+}
+
+// Simple string similarity calculation
+function calculateStringSimilarity(str1, str2) {
+  const longer = str1.length > str2.length ? str1 : str2;
+  const shorter = str1.length > str2.length ? str2 : str1;
+
+  if (longer.length === 0) return 1.0;
+
+  const distance = levenshteinDistance(longer, shorter);
+  return (longer.length - distance) / longer.length;
+}
+
+// Levenshtein distance for fuzzy matching
+function levenshteinDistance(str1, str2) {
+  const matrix = [];
+  for (let i = 0; i <= str2.length; i++) {
+    matrix[i] = [i];
+  }
+  for (let j = 0; j <= str1.length; j++) {
+    matrix[0][j] = j;
+  }
+  for (let i = 1; i <= str2.length; i++) {
+    for (let j = 1; j <= str1.length; j++) {
+      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
+        matrix[i][j] = matrix[i - 1][j - 1];
+      } else {
+        matrix[i][j] = Math.min(
+          matrix[i - 1][j - 1] + 1, // substitution
+          matrix[i][j - 1] + 1,     // insertion
+          matrix[i - 1][j] + 1      // deletion
+        );
+      }
+    }
+  }
+  return matrix[str2.length][str1.length];
 }
 
 async function logQuery(queryCollection, query, filters) {
@@ -3119,11 +3200,11 @@ app.get("/search/auto-load-more", async (req, res) => {
     const softFilters = {
       softCategory: filters.softCategory
     };
-
+    
     // Clean up hardFilters and softFilters to remove undefined, null, empty arrays, and empty strings
     cleanFilters(hardFilters);
     cleanFilters(softFilters);
-
+    
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
@@ -3513,7 +3594,7 @@ app.get("/search/load-more", async (req, res) => {
 
         // Clean up filters to remove empty arrays and invalid values
         cleanFilters(categoryFilteredHardFilters);
-
+        
         // Prepare search parameters
         const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
@@ -3892,7 +3973,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       softCategoryMatches: 0
     }));
 
-    const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 10000);
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 8000);
 
     // Sort by text match strength
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
@@ -4512,7 +4593,27 @@ app.post("/search", async (req, res) => {
     const hasExtractedSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
 
     if (isComplexQueryResult && !hasExtractedHardFilters && !hasExtractedSoftFilters) {
-      softFilters.softCategory = softFilters.softCategory ? [...softFilters.softCategory, query] : [query];
+      // Split query into individual terms for better soft category matching
+      const queryTerms = query.toLowerCase().split(/\s+/).filter(term => term.length > 1);
+      // Try to match terms against available soft categories
+      const matchedSoftCategories = [];
+      for (const term of queryTerms) {
+        const matchedCategory = finalSoftCategories.find(cat =>
+          cat.toLowerCase().includes(term) || term.includes(cat.toLowerCase())
+        );
+        if (matchedCategory && !matchedSoftCategories.includes(matchedCategory)) {
+          matchedSoftCategories.push(matchedCategory);
+        }
+      }
+      // If no matches found, use individual terms that might be relevant soft categories
+      if (matchedSoftCategories.length === 0) {
+        // Use common wine-related terms or split the query
+        const potentialTerms = queryTerms.filter(term =>
+          term.length > 2 && !['the', 'and', 'for', 'with', 'from'].includes(term)
+        );
+        matchedSoftCategories.push(...potentialTerms.slice(0, 2)); // Limit to 2 terms
+      }
+      softFilters.softCategory = matchedSoftCategories.length > 0 ? matchedSoftCategories : [query];
     }
 
     // Clean up hardFilters and softFilters to remove undefined, null, empty arrays, and empty strings
@@ -4659,8 +4760,8 @@ app.post("/search", async (req, res) => {
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
         
-      // Log tier 1 text match results for standard search
-      const tier1Results = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 10000);
+      // Log tier 1 text match results for standard search (including near-exact matches)
+      const tier1Results = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 8000);
       if (tier1Results.length > 0) {
         console.log(`[${requestId}] 📊 TIER 1 TEXT MATCH - ${tier1Results.length} high-quality matches with extracted filters:`);
         tier1Results.slice(0, 5).forEach((match, idx) => {
@@ -4719,7 +4820,7 @@ app.post("/search", async (req, res) => {
           }));
 
           // Filter for high-quality text matches (lower threshold for better extraction)
-          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 10000);
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 8000);
 
           if (highQualityTextMatches.length > 0) {
             console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches`);
@@ -6452,14 +6553,15 @@ app.post("/active-users", async (req, res) => {
     }
     
     const { dbName } = store;
-    const { user_profile } = req.body;
-    
+    const { user_profile, document } = req.body;
+    const profileData = user_profile || document;
+
     // Validate required fields
-    if (!user_profile || !user_profile.visitor_id) {
+    if (!profileData || !profileData.visitor_id) {
       console.error("[ACTIVE USERS] Missing visitor_id in request body:", req.body);
-      return res.status(400).json({ 
-        error: "Missing required fields: visitor_id",
-        received: req.body 
+      return res.status(400).json({
+        error: "Missing required fields: visitor_id (expected in user_profile or document)",
+        received: req.body
       });
     }
     
@@ -6469,7 +6571,7 @@ app.post("/active-users", async (req, res) => {
     
     // Enhanced user profile with metadata
     const enhancedProfile = {
-      ...user_profile,
+      ...profileData,
       last_updated: new Date(),
       user_agent: req.get('user-agent') || null,
       ip_address: req.ip || req.connection.remoteAddress,
@@ -6477,12 +6579,12 @@ app.post("/active-users", async (req, res) => {
       store_name: store.storeName || 'unknown'
     };
     
-    console.log(`[ACTIVE USERS] Received profile for visitor: ${user_profile.visitor_id}`);
-    console.log(`[ACTIVE USERS] Segment: ${user_profile.customer_segment || 'unknown'}, Purchases: ${user_profile.purchase_count || 0}`);
-    
+    console.log(`[ACTIVE USERS] Received profile for visitor: ${profileData.visitor_id}`);
+    console.log(`[ACTIVE USERS] Segment: ${profileData.customer_segment || 'unknown'}, Purchases: ${profileData.purchase_count || 0}`);
+
     // Upsert: Update if visitor exists, insert if new
     const updateResult = await usersCollection.updateOne(
-      { visitor_id: user_profile.visitor_id },
+      { visitor_id: profileData.visitor_id },
       { 
         $set: enhancedProfile,
         $setOnInsert: { 
@@ -6495,15 +6597,15 @@ app.post("/active-users", async (req, res) => {
     
     // Log activity
     if (updateResult.upsertedCount) {
-      console.log(`[ACTIVE USERS] ✨ NEW USER CREATED: ${user_profile.visitor_id}`);
+      console.log(`[ACTIVE USERS] ✨ NEW USER CREATED: ${profileData.visitor_id}`);
     } else {
-      console.log(`[ACTIVE USERS] 📝 UPDATED existing user: ${user_profile.visitor_id}`);
+      console.log(`[ACTIVE USERS] 📝 UPDATED existing user: ${profileData.visitor_id}`);
     }
-    
+
     res.status(200).json({
       success: true,
       message: updateResult.upsertedCount ? 'User profile created' : 'User profile updated',
-      visitor_id: user_profile.visitor_id,
+      visitor_id: profileData.visitor_id,
       is_new_user: !!updateResult.upsertedCount,
       matched_count: updateResult.matchedCount,
       modified_count: updateResult.modifiedCount,
