@@ -1768,27 +1768,65 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     const db = client.db(dbName || process.env.MONGODB_DB_NAME);
     const collection = db.collection("products");
     
-    // Perform a quick text search with a small limit
+    // Perform a quick text search with a small limit across multiple fields
     const quickTextSearchPipeline = [
       {
         $search: {
           index: "default",
+          compound: {
+            should: [
+              {
           text: {
             query: query,
-            path: ["name", "description"],
+                  path: "name",
             fuzzy: {
               maxEdits: 1,
               prefixLength: 2
             }
+                }
+              },
+              {
+                text: {
+                  query: query,
+                  path: "description",
+                  fuzzy: {
+                    maxEdits: 1,
+                    prefixLength: 3
           }
         }
       },
       {
-        $limit: 10 // Just need a few results to check
+                text: {
+                  query: query,
+                  path: "category",
+                  fuzzy: {
+                    maxEdits: 1,
+                    prefixLength: 2
+                  }
+                }
+              },
+              {
+                text: {
+                  query: query,
+                  path: "softCategory",
+                  fuzzy: {
+                    maxEdits: 1,
+                    prefixLength: 2
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        $limit: 15 // Increased limit to get more diverse matches
       },
       {
         $project: {
           name: 1,
+          category: 1,
+          softCategory: 1,
           score: { $meta: "searchScore" }
         }
       }
@@ -1812,11 +1850,26 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
         console.log(`[QUERY CLASSIFICATION] ✅ Multiple decent text matches found (bonus: ${exactMatchBonus}) → SIMPLE query`);
         return true;
       }
+
+      // ENHANCED: More forgiving for fuzzy matches - if Atlas fuzzy search found good matches, consider it simple
+      if (quickResults.length >= 1 && topResult.score > 3.0) {
+        console.log(`[QUERY CLASSIFICATION] ✅ High Atlas fuzzy score: "${topResult.name}" (atlas_score: ${topResult.score}) → SIMPLE query`);
+        return true;
+      }
       
       // Lower threshold: if we have any reasonable match
       if (quickResults.length >= 1 && exactMatchBonus >= 500) {
         console.log(`[QUERY CLASSIFICATION] ✅ Reasonable text match found (bonus: ${exactMatchBonus}) → SIMPLE query`);
         return true;
+      }
+
+      // ENHANCED: Even more forgiving - if we have multiple fuzzy matches with decent scores
+      if (quickResults.length >= 2) {
+        const avgScore = quickResults.reduce((sum, r) => sum + (r.score || 0), 0) / quickResults.length;
+        if (avgScore > 2.0) {
+          console.log(`[QUERY CLASSIFICATION] ✅ Multiple fuzzy matches with good avg score: ${avgScore.toFixed(2)} → SIMPLE query`);
+          return true;
+        }
       }
     }
     
