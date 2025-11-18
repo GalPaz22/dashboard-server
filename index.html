@@ -903,6 +903,87 @@ Version: ${data.redis.version || 'N/A'}
             document.getElementById('apiKeyInput').value = storedApiKey;
             currentApiKey = storedApiKey.trim();
         }
+        async function fetchSuggestions(input) {
+try {
+const response = await fetch(
+`https://api.semantix-ai.com/autocomplete?&query=${encodeURIComponent(input)}`,
+{
+method: "GET",
+headers: {
+"Content-Type": "application/json",
+"X-API-Key": "fe68c9a095700362jif9hh2342gsd23" // Place your API key here
+}
+}
+);
+if (!response.ok) throw new Error("Failed to fetch suggestions");
+const data = await response.json();
+suggestions = data;
+displaySuggestions(suggestions);
+} catch (error) {
+console.error("Error fetching suggestions:", error);
+}
+}
+// ...existing code...
+
+// Debounced fetchSuggestions
+const debouncedFetchSuggestions = debounce(fetchSuggestions, 200);
+
+// Update query and fetch suggestions as user types
+window.handleQueryChange = function(event) { // Expose to global scope
+query = event.target.value; // Update query variable with input value
+if (query.length > 1) {
+debouncedFetchSuggestions(query); // Fetch suggestions when query length is more than 1
+} else {
+suggestions = []; // Clear suggestions if query length is 1 or less
+displaySuggestions(suggestions);
+}
+}
+
+// Display suggestions in the dropdown
+function displaySuggestions(suggestions) {
+suggestionsDropdown.innerHTML = "";
+if (suggestions.length > 0) {
+suggestionsDropdown.style.display = "block";
+suggestions.forEach(suggestionObj => {
+const listItem = document.createElement("li");
+listItem.classList.add("suggestion-item");
+
+listItem.innerHTML = `
+${suggestionObj.image ? `<img src="${suggestionObj.image}" alt="${suggestionObj.suggestion}" class="suggestion-image">` : ""}
+<div class="suggestion-text">
+<span class="suggestion-title">${suggestionObj.suggestion}</span>
+${suggestionObj.source === "products" ? `<span class="suggestion-price">${suggestionObj.price} ₪</span>` : `<span class="text-quotation">גולשים חיפשו</span>`}
+</div>
+`;
+
+listItem.onclick = () => handleSuggestionClick(suggestionObj);
+suggestionsDropdown.appendChild(listItem);
+});
+} else {
+suggestionsDropdown.style.display = "none";
+}
+}
+
+// Handle suggestion click
+function handleSuggestionClick(suggestionObj) {
+query = suggestionObj.suggestion; // Set query to clicked suggestion text
+searchInput.value = query;
+suggestionsDropdown.style.display = "none"; // Hide suggestions
+
+console.log("Clicked suggestion:", suggestionObj);
+
+if (suggestionObj.url) {
+// Redirect if URL field exists
+console.log("Redirecting to:", suggestionObj.url);
+window.location.href = suggestionObj.url;
+} else {
+// Perform search if no URL
+performSearch(query);
+}
+}
+
+// Expose performSearch to global scope for suggestions without URL
+
     </script>
 </body>
 </html>

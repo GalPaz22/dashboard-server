@@ -570,14 +570,22 @@ function isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText) 
 
 // Enhanced filter-only detection for the main search endpoint
 function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQuery) {
-  // Only use filter-only path if there are hard filters BUT NO soft filters
   const hasHardFilters = hardFilters && Object.keys(hardFilters).length > 0;
   const hasSoftFilters = softFilters && softFilters.softCategory && softFilters.softCategory.length > 0;
-  
-  // If there are soft filters, never use filter-only path - we want full search + soft boosting
-  if (hasSoftFilters) {
-    console.log("[FILTER-ONLY] Soft filters detected - using full search with soft category boosting");
+
+  // Check if this is primarily a filter-based query (high filter coverage)
+  const isPrimarilyFilterBased = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
+
+  // Allow filter-only path even with soft filters if the query is primarily filter-based
+  if (hasSoftFilters && !isPrimarilyFilterBased) {
+    console.log("[FILTER-ONLY] Soft filters with text content detected - using full search with soft category boosting");
     return false;
+  }
+
+  // If it's primarily filter-based (whether with soft filters or not), use fast filter-only path
+  if (isPrimarilyFilterBased) {
+    console.log("[FILTER-ONLY] Primarily filter-based query detected - using ultra-fast filter-only pipeline");
+    return true;
   }
   
   // Only proceed with filter-only detection if we have hard filters but no soft filters
@@ -1047,6 +1055,8 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
       }
     }
 
+    console.log(`[TEXT SEARCH] Building compound search with ${filterClauses.length} filter clauses and text queries for: name, description, category, softCategory`);
+
     const searchStage = {
       $search: {
         index: "default",
@@ -1091,6 +1101,30 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
               }
             },
             {
+              text: {
+                query: cleanedHebrewText,
+                path: "category",
+                fuzzy: {
+                  maxEdits: 1,
+                  prefixLength: 2,
+                  maxExpansions: 10,
+                },
+                score: { boost: { value: 2 * textBoostMultiplier } }
+              }
+            },
+            {
+              text: {
+                query: cleanedHebrewText,
+                path: "softCategory",
+                fuzzy: {
+                  maxEdits: 1,
+                  prefixLength: 2,
+                  maxExpansions: 10,
+                },
+                score: { boost: { value: 1.5 * textBoostMultiplier } }
+              }
+            },
+            {
               autocomplete: {
                 query: cleanedHebrewText,
                 path: "name",
@@ -1099,6 +1133,28 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                   prefixLength: 3
                 },
                 score: { boost: { value: 5 * textBoostMultiplier } }
+              }
+            },
+            {
+              autocomplete: {
+                query: cleanedHebrewText,
+                path: "category",
+                fuzzy: {
+                  maxEdits: 1,
+                  prefixLength: 2
+                },
+                score: { boost: { value: 1 * textBoostMultiplier } }
+              }
+            },
+            {
+              autocomplete: {
+                query: cleanedHebrewText,
+                path: "softCategory",
+                fuzzy: {
+                  maxEdits: 1,
+                  prefixLength: 2
+                },
+                score: { boost: { value: 0.8 * textBoostMultiplier } }
               }
             }
           ],
@@ -1145,58 +1201,53 @@ const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, ha
 
 // Standard vector search pipeline - OPTIMIZED
 function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 12, useOrLogic = false, excludeIds = [], softFilters = null, invertSoftFilter = false) {
-  const filter = { $and: [] };
+  // Build filter conditions array
+  const conditions = [];
 
   // Stock status filter - OPTIMIZED: moved into $vectorSearch filter
-  filter.$and.push({
-    $or: [
-      { stockStatus: "instock" },
-      { stockStatus: { $exists: false } },
-    ],
-  });
+  // Simplified for Atlas Search compatibility - just check for instock
+  conditions.push({ stockStatus: "instock" });
 
   // Category filter with proper logic handling
   if (hardFilters.category) {
     if (Array.isArray(hardFilters.category)) {
       // Only add filter if array is not empty
       if (hardFilters.category.length > 0) {
-        if (useOrLogic) {
-          filter.$and.push({ category: { $in: hardFilters.category } });
-        } else {
-          filter.$and.push({ category: { $all: hardFilters.category } });
-        }
+        // Always use $in for Atlas Search vector filter compatibility
+        conditions.push({ category: { $in: hardFilters.category } });
       }
     } else if (typeof hardFilters.category === 'string' && hardFilters.category.trim() !== '') {
-      // Only add filter if it's a non-empty string
-      filter.$and.push({ category: { $eq: hardFilters.category } });
+      // Only add filter if it's a non-empty string - use simple equality for Atlas Search compatibility
+      conditions.push({ category: hardFilters.category });
     } else if (typeof hardFilters.category === 'object' && hardFilters.category !== null) {
       // If it's an object (like a MongoDB query operator), add it directly
-      filter.$and.push({ category: hardFilters.category });
+      conditions.push({ category: hardFilters.category });
     }
   }
 
   // Type filter
   if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
-    filter.$and.push({
-      type: Array.isArray(hardFilters.type)
-        ? { $in: hardFilters.type }
-        : { $eq: hardFilters.type }
-    });
+    if (Array.isArray(hardFilters.type)) {
+      conditions.push({ type: { $in: hardFilters.type } });
+    } else {
+      // Use simple equality for Atlas Search compatibility
+      conditions.push({ type: hardFilters.type });
+    }
   }
 
   // Price filters
   if (hardFilters.minPrice && hardFilters.maxPrice) {
-    filter.$and.push({ price: { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice } });
+    conditions.push({ price: { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice } });
   } else if (hardFilters.minPrice) {
-    filter.$and.push({ price: { $gte: hardFilters.minPrice } });
+    conditions.push({ price: { $gte: hardFilters.minPrice } });
   } else if (hardFilters.maxPrice) {
-    filter.$and.push({ price: { $lte: hardFilters.maxPrice } });
+    conditions.push({ price: { $lte: hardFilters.maxPrice } });
   }
 
   if (hardFilters.price) {
     const price = hardFilters.price;
     const priceRange = price * 0.15;
-    filter.$and.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
+    conditions.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
   }
 
   // Soft category filter - OPTIMIZED: moved into $vectorSearch filter
@@ -1204,21 +1255,29 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
 
     if (invertSoftFilter) {
-      // For non-soft-category filtering: exclude documents with these soft categories
-      filter.$and.push({
-        $or: [
-          { softCategory: { $exists: false } },
-          { softCategory: { $nin: softCats } }
-        ]
-      });
+      // For non-soft-category filtering: this is complex, skip for now to avoid Atlas Search issues
+      // Just don't add soft category filter when inverting
     } else {
       // For soft-category filtering: include only documents with these soft categories
-      filter.$and.push({ softCategory: { $in: softCats } });
+      conditions.push({ softCategory: { $in: softCats } });
     }
   }
 
+  // Build final filter - use $and only if multiple conditions
+  let filter;
+  if (conditions.length === 0) {
+    filter = {};
+  } else if (conditions.length === 1) {
+    filter = conditions[0];
+  } else {
+    filter = { $and: conditions };
+  }
+
   // Debug: Log the filter being used
-  console.log(`[VECTOR SEARCH FILTER] Filter for hardFilters=${JSON.stringify(hardFilters)}, softFilters=${JSON.stringify(softFilters)}:`, JSON.stringify(filter));
+  console.log(`[VECTOR SEARCH FILTER] Final filter for hardFilters=${JSON.stringify(hardFilters)}, softFilters=${JSON.stringify(softFilters)}:`, JSON.stringify(filter));
+
+  // Log vector search details
+  console.log(`[VECTOR SEARCH] Filters: hard=${Object.keys(hardFilters).length}, soft=${softFilters ? Object.keys(softFilters).length : 0}`);
 
   const pipeline = [
     {
@@ -1631,6 +1690,68 @@ function extractCategoriesFromProducts(products) {
     categoryFiltered: true,
     textMatchCount: 0
   };
+}
+
+// Function to check matches across all searchable fields
+async function checkFieldMatches(query, dbName = null) {
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName || process.env.MONGODB_DB_NAME);
+    const collection = db.collection("products");
+
+    const fields = ['name', 'description', 'category', 'softCategory'];
+    const results = {};
+
+    console.log(`[FIELD MATCH CHECK] Checking query "${query}" across all fields:`);
+
+    for (const field of fields) {
+      try {
+        const pipeline = [
+          {
+            $search: {
+              index: "default",
+              text: {
+                query: query,
+                path: field,
+                fuzzy: {
+                  maxEdits: 2,
+                  prefixLength: 2
+                }
+              }
+            }
+          },
+          { $limit: 5 },
+          {
+            $project: {
+              [field]: 1,
+              name: 1,
+              score: { $meta: "searchScore" }
+            }
+          }
+        ];
+
+        const matches = await collection.aggregate(pipeline).toArray();
+        results[field] = matches;
+
+        if (matches.length > 0) {
+          console.log(`[FIELD MATCH] ${field.toUpperCase()}: ${matches.length} matches found`);
+          matches.forEach((match, idx) => {
+            console.log(`  ${idx + 1}. "${match[field]}" (name: "${match.name}", score: ${match.score?.toFixed(2) || 'N/A'})`);
+          });
+        } else {
+          console.log(`[FIELD MATCH] ${field.toUpperCase()}: No matches`);
+        }
+      } catch (error) {
+        console.log(`[FIELD MATCH] ${field.toUpperCase()}: Error - ${error.message}`);
+        results[field] = [];
+      }
+    }
+
+    return results;
+  } catch (error) {
+    console.error(`[FIELD MATCH CHECK] Error:`, error);
+    return null;
+  }
 }
 
 async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null) {
@@ -3069,7 +3190,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
-          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, false, deliveredIds
+          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray(),
         queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
           queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
@@ -3175,7 +3296,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       
       const fallbackPromises = [
         collection.aggregate(buildStandardSearchPipeline(
-          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, false, deliveredIds
+          cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray(),
         queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
           queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
@@ -3422,7 +3543,7 @@ app.get("/search/load-more", async (req, res) => {
           // Just category filter without soft categories
           const [fuzzyRes, vectorRes] = await Promise.all([
             collection.aggregate(buildStandardSearchPipeline(
-              cleanedText, query, categoryFilteredHardFilters, searchLimit, true
+              cleanedText, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
             )).toArray(),
             collection.aggregate(buildStandardVectorSearchPipeline(
               queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
@@ -3533,6 +3654,7 @@ app.get("/search/load-more", async (req, res) => {
 
         if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
           // Use soft category search
+          const { syncMode } = req.store;
           categoryFilteredResults = await executeExplicitSoftCategorySearch(
             collection,
             cleanedText,
@@ -3543,15 +3665,16 @@ app.get("/search/load-more", async (req, res) => {
             searchLimit,
             vectorLimit,
             true, // useOrLogic
-            false,
+            syncMode === 'image',
             cleanedText,
             [] // No exclusion since we're loading more
           );
         } else {
           // Just category filter without soft categories
+          const { syncMode } = req.store;
           const [fuzzyRes, vectorRes] = await Promise.all([
             collection.aggregate(buildStandardSearchPipeline(
-              cleanedText, query, categoryFilteredHardFilters, searchLimit, true
+              cleanedText, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
             )).toArray(),
             collection.aggregate(buildStandardVectorSearchPipeline(
               queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
@@ -3934,7 +4057,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 }
 
 // Handle Phase 2: Category-filtered results for progressive loading
-async function handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, originalSoftFilters = null) {
+async function handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, originalSoftFilters = null, syncMode = 'text') {
   const { excludeIds = [] } = req.body;
   try {
     const client = await connectToMongoDB(mongodbUri);
@@ -3992,7 +4115,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       // Category filter only
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
-          cleanedText, query, categoryFilteredHardFilters, searchLimit, true, false, excludeIds
+          cleanedText, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image', excludeIds
         )).toArray(),
         collection.aggregate(buildStandardVectorSearchPipeline(
           await getQueryEmbedding(cleanedText), categoryFilteredHardFilters, searchLimit, true, excludeIds
@@ -4105,7 +4228,7 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  const { query, example, noWord, noHebrewWord, context, useImages, modern, phase, extractedCategories } = req.body;
+  const { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
   // Default to legacy mode (array only) for backward compatibility
@@ -4223,13 +4346,21 @@ app.post("/search", async (req, res) => {
   if (phase === 'category-filtered' && extractedCategories && isSimpleResult) {
     console.log(`[${requestId}] 📂 Phase 2: Returning category-filtered results`);
     // Pass the early-extracted soft filters from the query to phase 2
-    return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, earlySoftFilters);
+    return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, earlySoftFilters, syncMode);
   }
 
   const translatedQuery = await translateQuery(query, context);
 
     if (!translatedQuery) {
       return res.status(500).json({ error: "Error translating query" });
+    }
+
+    // Check for matches across all searchable fields
+    console.log(`[${requestId}] 🔍 Checking field matches for query: "${query}"`);
+    await checkFieldMatches(query, dbName);
+    if (translatedQuery !== query) {
+      console.log(`[${requestId}] 🔍 Checking field matches for translated query: "${translatedQuery}"`);
+      await checkFieldMatches(translatedQuery, dbName);
     }
 
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
@@ -4493,7 +4624,7 @@ app.post("/search", async (req, res) => {
         
         const searchPromises = [
           collection.aggregate(buildStandardSearchPipeline(
-            cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic
+            cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, syncMode === 'image'
           )).toArray(),
           collection.aggregate(buildStandardVectorSearchPipeline(
             queryEmbedding, hardFilters, vectorLimit, useOrLogic
@@ -4554,7 +4685,7 @@ app.post("/search", async (req, res) => {
           const textSearchLimit = Math.max(searchLimit, 50); // Get more candidates for better category extraction
 
           const textSearchPipeline = buildStandardSearchPipeline(
-            cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
+            cleanedTextForSearch, query, {}, textSearchLimit, false, syncMode === 'image', []
           );
 
           // Add project to ensure we get categories
@@ -4675,7 +4806,7 @@ app.post("/search", async (req, res) => {
                 // Category filter only
                 const searchPromises = [
                   collection.aggregate(buildStandardSearchPipeline(
-                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true
+                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
                   )).toArray(),
                   collection.aggregate(buildStandardVectorSearchPipeline(
                     queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
@@ -5318,6 +5449,26 @@ app.get("/products", async (req, res) => {
   } catch (error) {
     console.error("Error fetching products:", error);
     res.status(500).json({ error: "Server error" });
+  }
+});
+
+// Debug endpoint to check field matches
+app.post("/check-field-matches", async (req, res) => {
+  const { query, dbName } = req.body;
+  if (!query) {
+    return res.status(400).json({ error: "Query parameter is required" });
+  }
+
+  try {
+    const results = await checkFieldMatches(query, dbName);
+    res.json({
+      query: query,
+      results: results,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    console.error("Error checking field matches:", error);
+    res.status(500).json({ error: "Field match check failed", message: error.message });
   }
 });
 

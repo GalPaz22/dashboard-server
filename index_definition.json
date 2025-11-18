@@ -1,0 +1,55 @@
+{
+  "mappings": {
+    "dynamic": true,
+    "fields": {
+      "description": [
+        {
+          "maxGrams": 20,
+          "minGrams": 2,
+          "tokenization": "edgeGram",
+          "type": "autocomplete"
+        },
+        {
+          "analyzer": "lucene.standard",
+          "type": "string"
+        }
+      ],
+      "name": [
+        {
+          "maxGrams": 20,
+          "minGrams": 2,
+          "tokenization": "edgeGram",
+          "type": "autocomplete"
+        },
+        {
+          "analyzer": "lucene.standard",
+          "type": "string"
+        }
+      ],
+      "category": [
+        {
+          "maxGrams": 15,
+          "minGrams": 2,
+          "tokenization": "edgeGram",
+          "type": "autocomplete"
+        },
+        {
+          "analyzer": "lucene.standard",
+          "type": "string"
+        }
+      ],
+      "softCategory": [
+        {
+          "maxGrams": 15,
+          "minGrams": 2,
+          "tokenization": "edgeGram",
+          "type": "autocomplete"
+        },
+        {
+          "analyzer": "lucene.standard",
+          "type": "string"
+        }
+      ]
+    }
+  }
+}
