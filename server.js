@@ -1157,13 +1157,20 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 
   // Category filter with proper logic handling
   if (hardFilters.category) {
-    if (Array.isArray(hardFilters.category) && hardFilters.category.length > 0) {
-      if (useOrLogic) {
-        filter.$and.push({ category: { $in: hardFilters.category } });
-      } else {
-        filter.$and.push({ category: { $all: hardFilters.category } });
+    if (Array.isArray(hardFilters.category)) {
+      // Only add filter if array is not empty
+      if (hardFilters.category.length > 0) {
+        if (useOrLogic) {
+          filter.$and.push({ category: { $in: hardFilters.category } });
+        } else {
+          filter.$and.push({ category: { $all: hardFilters.category } });
+        }
       }
-    } else if (!Array.isArray(hardFilters.category)) {
+    } else if (typeof hardFilters.category === 'string' && hardFilters.category.trim() !== '') {
+      // Only add filter if it's a non-empty string
+      filter.$and.push({ category: hardFilters.category });
+    } else if (typeof hardFilters.category === 'object' && hardFilters.category !== null) {
+      // If it's an object (like a MongoDB query operator), add it directly
       filter.$and.push({ category: hardFilters.category });
     }
   }
@@ -1258,6 +1265,41 @@ function buildNonSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFi
 /* =========================================================== *\
    UTILITY FUNCTIONS (UNCHANGED)
 \* =========================================================== */
+
+// Helper function to clean up filter objects by removing undefined, null, empty arrays, and empty strings
+function cleanFilters(filters) {
+  if (!filters || typeof filters !== 'object') {
+    return filters;
+  }
+
+  Object.keys(filters).forEach(key => {
+    const value = filters[key];
+    // Remove undefined, null, empty strings, and whitespace-only strings
+    if (value === undefined || value === null || value === '' || (typeof value === 'string' && value.trim() === '')) {
+      delete filters[key];
+    }
+    // Remove empty arrays
+    else if (Array.isArray(value) && value.length === 0) {
+      delete filters[key];
+    }
+    // Remove arrays that only contain empty/null/undefined values
+    else if (Array.isArray(value)) {
+      const cleanedArray = value.filter(v => {
+        if (v === undefined || v === null || v === '') return false;
+        if (typeof v === 'string' && v.trim() === '') return false;
+        return true;
+      });
+      if (cleanedArray.length === 0) {
+        delete filters[key];
+      } else if (cleanedArray.length !== value.length) {
+        // Update with cleaned array if we removed some values
+        filters[key] = cleanedArray;
+      }
+    }
+  });
+
+  return filters;
+}
 
 async function isHebrew(query) {
   const hebrewPattern = /[\u0590-\u05FF]/;
@@ -2953,10 +2995,11 @@ app.get("/search/auto-load-more", async (req, res) => {
     const softFilters = {
       softCategory: filters.softCategory
     };
-    
-    Object.keys(hardFilters).forEach(key => hardFilters[key] === undefined && delete hardFilters[key]);
-    Object.keys(softFilters).forEach(key => softFilters[key] === undefined && delete softFilters[key]);
-    
+
+    // Clean up hardFilters and softFilters to remove undefined, null, empty arrays, and empty strings
+    cleanFilters(hardFilters);
+    cleanFilters(softFilters);
+
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
@@ -3343,7 +3386,10 @@ app.get("/search/load-more", async (req, res) => {
         if (extractedCategories.hardCategories && extractedCategories.hardCategories.length > 0) {
           categoryFilteredHardFilters.category = extractedCategories.hardCategories;
         }
-        
+
+        // Clean up filters to remove empty arrays and invalid values
+        cleanFilters(categoryFilteredHardFilters);
+
         // Prepare search parameters
         const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
         const queryEmbedding = await getQueryEmbedding(query, mongodbUri, dbName);
@@ -3469,6 +3515,9 @@ app.get("/search/load-more", async (req, res) => {
         if (extractedCategories.hardCategories && extractedCategories.hardCategories.length > 0) {
           categoryFilteredHardFilters.category = extractedCategories.hardCategories;
         }
+
+        // Clean up filters to remove empty arrays and invalid values
+        cleanFilters(categoryFilteredHardFilters);
 
         // Prepare search parameters
         const cleanedText = query.trim(); // Simple cleanup, category filters do the heavy lifting
@@ -3906,6 +3955,9 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       categoryFilteredHardFilters.category = hardCategoriesArray;
     }
 
+    // Clean up filters to remove empty arrays and invalid values
+    cleanFilters(categoryFilteredHardFilters);
+
     // Determine soft filters source for matching/scoring in tier 2
     const softFilters = {
       softCategory: (softCategoriesArray && softCategoriesArray.length > 0)
@@ -4329,8 +4381,9 @@ app.post("/search", async (req, res) => {
       softFilters.softCategory = softFilters.softCategory ? [...softFilters.softCategory, query] : [query];
     }
 
-    Object.keys(hardFilters).forEach(key => hardFilters[key] === undefined && delete hardFilters[key]);
-    Object.keys(softFilters).forEach(key => softFilters[key] === undefined && delete softFilters[key]);
+    // Clean up hardFilters and softFilters to remove undefined, null, empty arrays, and empty strings
+    cleanFilters(hardFilters);
+    cleanFilters(softFilters);
 
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
@@ -4592,6 +4645,9 @@ app.post("/search", async (req, res) => {
               if (hardCategoriesArray.length > 0) {
                 categoryFilteredHardFilters.category = hardCategoriesArray;
               }
+
+              // Clean up filters to remove empty arrays and invalid values
+              cleanFilters(categoryFilteredHardFilters);
 
               // Get full category-filtered results
               let categoryFilteredResults;
