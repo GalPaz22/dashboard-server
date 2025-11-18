@@ -1834,42 +1834,78 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     
     const quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
     
+    // FIRST: Check if this is clearly a COMPLEX descriptive query
+    const queryWords = query.toLowerCase().split(/\s+/);
+    const complexIndicators = [
+      // Hebrew prepositions and connectors
+      'ל', 'עבור', 'על', 'ב', 'של', 'עם', 'ללא', 'בלי', 'אל', 'מ', 'עד', 'או',
+
+      // Wine-specific complex terms (Hebrew)
+      'גפנים', 'בוגרות', 'בציר', 'מיושן', 'מאוחסן', 'יקב', 'כרם', 'טרואר',
+      'אלון', 'צרפתי', 'אמריקאי', 'בלגי', 'כבישה', 'תסיסה', 'יישון',
+
+      // Usage/pairing terms (Hebrew)
+      'לעל', 'האש', 'עוף', 'דגים', 'בשר', 'גבינות', 'פסטה', 'סלט', 'מרק',
+      'קינוח', 'חג', 'שבת', 'ארוחת', 'ערב', 'צהריים', 'בוקר',
+
+      // Taste descriptors (Hebrew)
+      'יבש', 'חריף', 'מתוק', 'קל', 'כבד', 'מלא', 'פירותי', 'פרחוני', 'עשבי',
+      'ווניל', 'שוקולד', 'עץ', 'בל', 'חלק', 'מחוספס', 'מאוזן', 'הרמוני',
+
+      // Quality/price terms (Hebrew)
+      'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד', 'נדיר', 'יוקרתי',
+      'זול', 'במחיר', 'שווה', 'משתלם',
+
+      // English terms (for mixed queries)
+      'vintage', 'reserve', 'grand', 'premium', 'organic', 'biodynamic',
+      'single', 'estate', 'vineyard', 'barrel', 'aged', 'matured'
+    ];
+
+    const hasComplexIndicators = queryWords.some(word =>
+      complexIndicators.some(indicator => word.includes(indicator) || indicator.includes(word))
+    );
+
+    // If query has complex indicators and is longer than 2 words, it's definitely complex
+    if (hasComplexIndicators && queryWords.length >= 2) {
+      console.log(`[QUERY CLASSIFICATION] 🔴 COMPLEX indicators detected (${queryWords.length} words with context) → COMPLEX query`);
+      return false;
+    }
+
+    // If query is very long (>4 words), likely complex regardless of matches
+    if (queryWords.length > 4) {
+      console.log(`[QUERY CLASSIFICATION] 🔴 Very long query (${queryWords.length} words) → COMPLEX query`);
+      return false;
+    }
+    
     if (quickResults.length > 0) {
       // Calculate text match quality
       const topResult = quickResults[0];
       const exactMatchBonus = getExactMatchBonus(topResult.name, query, query);
       
-      // If we have a high-quality text match, it's definitely a simple query (product name)
-      if (exactMatchBonus >= 10000) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Text match found: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
+      // If we have a high-quality exact text match, it's definitely a simple query (product name)
+      if (exactMatchBonus >= 15000) {
+        console.log(`[QUERY CLASSIFICATION] ✅ High-quality exact text match: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
         return true;
       }
       
-      // If we have decent matches but not perfect, still likely a product name
-      if (quickResults.length >= 3 && exactMatchBonus >= 1000) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Multiple decent text matches found (bonus: ${exactMatchBonus}) → SIMPLE query`);
+      // If query is very short (1-2 words) and has decent matches, likely simple
+      if (queryWords.length <= 2) {
+        if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5)) {
+          console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
         return true;
-      }
-
-      // ENHANCED: More forgiving for fuzzy matches - if Atlas fuzzy search found good matches, consider it simple
-      if (quickResults.length >= 1 && topResult.score > 3.0) {
-        console.log(`[QUERY CLASSIFICATION] ✅ High Atlas fuzzy score: "${topResult.name}" (atlas_score: ${topResult.score}) → SIMPLE query`);
-        return true;
-      }
-      
-      // Lower threshold: if we have any reasonable match
-      if (quickResults.length >= 1 && exactMatchBonus >= 500) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Reasonable text match found (bonus: ${exactMatchBonus}) → SIMPLE query`);
-        return true;
-      }
-
-      // ENHANCED: Even more forgiving - if we have multiple fuzzy matches with decent scores
-      if (quickResults.length >= 2) {
-        const avgScore = quickResults.reduce((sum, r) => sum + (r.score || 0), 0) / quickResults.length;
-        if (avgScore > 2.0) {
-          console.log(`[QUERY CLASSIFICATION] ✅ Multiple fuzzy matches with good avg score: ${avgScore.toFixed(2)} → SIMPLE query`);
-          return true;
         }
+      }
+
+      // For longer queries, be more strict - require strong exact matches only
+      if (queryWords.length === 3 && exactMatchBonus >= 10000) {
+        console.log(`[QUERY CLASSIFICATION] ✅ 3-word query with strong match: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
+        return true;
+      }
+
+      // Fuzzy matches only for very short, high-scoring queries
+      if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}) → SIMPLE query`);
+        return true;
       }
     }
     
