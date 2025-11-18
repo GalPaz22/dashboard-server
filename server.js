@@ -633,9 +633,9 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   if (hardFilters && Object.keys(hardFilters).length > 0) {
     if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
       matchConditions.push({
-        type: Array.isArray(hardFilters.type) 
-          ? { $in: hardFilters.type } 
-          : hardFilters.type
+        type: Array.isArray(hardFilters.type)
+          ? { $in: hardFilters.type }
+          : { $eq: hardFilters.type }
       });
     }
     
@@ -646,9 +646,9 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
         });
       } else {
         matchConditions.push({
-          category: Array.isArray(hardFilters.category) 
-            ? { $all: hardFilters.category } 
-            : hardFilters.category
+          category: Array.isArray(hardFilters.category)
+            ? { $all: hardFilters.category }
+            : { $eq: hardFilters.category }
         });
       }
     }
@@ -1168,7 +1168,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
       }
     } else if (typeof hardFilters.category === 'string' && hardFilters.category.trim() !== '') {
       // Only add filter if it's a non-empty string
-      filter.$and.push({ category: hardFilters.category });
+      filter.$and.push({ category: { $eq: hardFilters.category } });
     } else if (typeof hardFilters.category === 'object' && hardFilters.category !== null) {
       // If it's an object (like a MongoDB query operator), add it directly
       filter.$and.push({ category: hardFilters.category });
@@ -1180,7 +1180,7 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     filter.$and.push({
       type: Array.isArray(hardFilters.type)
         ? { $in: hardFilters.type }
-        : hardFilters.type
+        : { $eq: hardFilters.type }
     });
   }
 
@@ -1216,6 +1216,9 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
       filter.$and.push({ softCategory: { $in: softCats } });
     }
   }
+
+  // Debug: Log the filter being used
+  console.log(`[VECTOR SEARCH FILTER] Filter for hardFilters=${JSON.stringify(hardFilters)}, softFilters=${JSON.stringify(softFilters)}:`, JSON.stringify(filter));
 
   const pipeline = [
     {
