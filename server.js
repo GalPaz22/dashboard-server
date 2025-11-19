@@ -2441,27 +2441,46 @@ function calculateStringSimilarity(str1, str2) {
 
 // Levenshtein distance for fuzzy matching
 function levenshteinDistance(str1, str2) {
-  const matrix = [];
-  for (let i = 0; i <= str2.length; i++) {
-    matrix[i] = [i];
+  // Optimization: If strings are too long, truncate them to avoid massive memory usage
+  // Levenshtein matrix is size (N+1)*(M+1)
+  const MAX_LEN = 100;
+  const s1 = str1.length > MAX_LEN ? str1.substring(0, MAX_LEN) : str1;
+  const s2 = str2.length > MAX_LEN ? str2.substring(0, MAX_LEN) : str2;
+
+  const len1 = s1.length;
+  const len2 = s2.length;
+
+  // Memory optimization: Use two rows instead of full matrix
+  // We only need the previous row to calculate the current row
+  let prevRow = new Array(len2 + 1);
+  let currRow = new Array(len2 + 1);
+
+  // Initialize first row
+  for (let j = 0; j <= len2; j++) {
+    prevRow[j] = j;
   }
-  for (let j = 0; j <= str1.length; j++) {
-    matrix[0][j] = j;
-  }
-  for (let i = 1; i <= str2.length; i++) {
-    for (let j = 1; j <= str1.length; j++) {
-      if (str2.charAt(i - 1) === str1.charAt(j - 1)) {
-        matrix[i][j] = matrix[i - 1][j - 1];
+
+  for (let i = 1; i <= len1; i++) {
+    currRow[0] = i;
+    for (let j = 1; j <= len2; j++) {
+      if (s1.charAt(i - 1) === s2.charAt(j - 1)) {
+        currRow[j] = prevRow[j - 1];
       } else {
-        matrix[i][j] = Math.min(
-          matrix[i - 1][j - 1] + 1, // substitution
-          matrix[i][j - 1] + 1,     // insertion
-          matrix[i - 1][j] + 1      // deletion
+        currRow[j] = Math.min(
+          prevRow[j - 1] + 1, // substitution
+          currRow[j - 1] + 1, // insertion
+          prevRow[j] + 1      // deletion
         );
       }
     }
+    // Move current row to previous row for next iteration
+    // Use slice to copy to avoid reference issues or just swap if careful
+    const temp = prevRow;
+    prevRow = currRow;
+    currRow = temp;
   }
-  return matrix[str2.length][str1.length];
+
+  return prevRow[len2];
 }
 
 async function logQuery(queryCollection, query, filters, products = []) {
@@ -4587,17 +4606,28 @@ app.post("/search", async (req, res) => {
     
     if (isSimpleResult) {
       if (enhancedFilters) {
-        // Clear category for simple text-based searches - rely on text matching
-        // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
-        if (originalCategory) {
-          console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - simple queries use text matching only`);
-          enhancedFilters.category = undefined;
-        }
+        // SPECIAL CASE: If query contains exact filter matches (e.g. "יין ספרדי כשר"), it might be classified as simple
+        // because the text matches products (like "יין"), but we absolutely WANT the filters to apply.
+        // Logic: If we extracted BOTH category/type AND soft category/price, keep them!
+        const hasHard = enhancedFilters.category || enhancedFilters.type;
+        const hasSoft = enhancedFilters.softCategory || (enhancedFilters.price || enhancedFilters.minPrice || enhancedFilters.maxPrice);
         
-        // Always clear price filters for simple queries (prices need explicit intent)
-        enhancedFilters.price = undefined;
-        enhancedFilters.minPrice = undefined;
-        enhancedFilters.maxPrice = undefined;
+        if (hasHard && hasSoft) {
+           console.log(`[${requestId}] 🛡️  SIMPLE QUERY WITH MIXED FILTERS: Keeping category "${originalCategory}" because other filters also exist (e.g. soft/price)`);
+           // Do NOT clear category
+        } else {
+            // Clear category for simple text-based searches - rely on text matching
+            // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
+            if (originalCategory) {
+              console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - simple queries use text matching only`);
+              enhancedFilters.category = undefined;
+            }
+            
+            // Always clear price filters for simple queries (prices need explicit intent)
+            enhancedFilters.price = undefined;
+            enhancedFilters.minPrice = undefined;
+            enhancedFilters.maxPrice = undefined;
+        }
       }
     } else {
       // Complex queries: Keep category filters (they're part of the intent)
