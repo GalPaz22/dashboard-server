@@ -1398,7 +1398,9 @@ Instructions:
 2. Remove any extraneous or stop words.
 3. Output only the essential keywords and phrases that will best represent the query context 
 (remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
-Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.`
+Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
+Also:
+- "פלאם" or "פלם" should be translated as "Flam" (winery name), NOT "plum" or "flame".`
         },
         { role: "user", content: query },
       ],
@@ -2336,22 +2338,22 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
   
   // Exact match - highest priority (boosted significantly)
   if (productNameLower === queryLower) {
-    return 50000; // Much higher than soft category boosts
+    return 100000; // MASSIVE boost for exact match (was 50000)
   }
   
   // Cleaned query exact match
   if (cleanedQueryLower && productNameLower === cleanedQueryLower) {
-    return 45000;
+    return 90000; // Very high boost (was 45000)
   }
   
   // Product name contains full query
   if (productNameLower.includes(queryLower)) {
-    return 30000; // High boost for text matches
+    return 60000; // High boost for text matches (was 30000)
   }
   
   // Product name contains cleaned query
   if (cleanedQueryLower && productNameLower.includes(cleanedQueryLower)) {
-    return 25000;
+    return 50000; // (was 25000)
   }
   
   // Multi-word phrase match
@@ -2359,7 +2361,7 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
   if (queryWords.length > 1) {
     const queryPhrase = queryWords.join(' ');
     if (productNameLower.includes(queryPhrase)) {
-      return 20000;
+      return 40000; // (was 20000)
     }
   }
 
@@ -2369,16 +2371,16 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     const queryWord = queryWords[0];
     // Query word is prefix of product name
     if (productNameLower.startsWith(queryWord)) {
-      return 15000;
+      return 30000; // (was 15000)
     }
     // Product name starts with query word
     if (queryWord.length >= 3 && productNameLower.startsWith(queryWord)) {
-      return 12000;
+      return 24000; // (was 12000)
     }
     // Query word appears early in product name
     const wordPosition = productNameLower.indexOf(queryWord);
     if (wordPosition >= 0 && wordPosition <= 20) {
-      return 10000; // Near exact for words appearing early
+      return 20000; // Near exact for words appearing early (was 10000)
     }
   }
 
@@ -2414,7 +2416,9 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     for (const word of productWords) {
       if (word.length >= 3) {
         const wordSimilarity = calculateStringSimilarity(queryLower, word);
-        if (wordSimilarity >= 0.8) { // Higher threshold for single word matching to avoid false positives
+        // LOWER threshold to 0.75 to catch "פלאם" (4 chars) vs "פלם" (3 chars) - distance 1, length 4 -> 0.75
+        // This ensures slight misspellings or variants get the bonus
+        if (wordSimilarity >= 0.75) { 
           return 12000; // High bonus for fuzzy word match
         }
       }
@@ -6554,15 +6558,37 @@ app.post("/cache/clear", async (req, res) => {
       });
     }
     
-    if (pattern) {
-      // Clear specific pattern
-      const count = await invalidateCache(pattern);
-      res.json({ 
-        success: true, 
-        message: `Cleared ${count} cache entries matching pattern: ${pattern}`,
-        count: count
-      });
-    } else {
+  if (pattern) {
+    // If pattern is "translate:query" or "classify:query", we need to reconstruct the hashed key
+    if (pattern.startsWith('translate:') || pattern.startsWith('classify:') || pattern.startsWith('reorder:')) {
+      const parts = pattern.split(':');
+      if (parts.length >= 2) {
+        const prefix = parts[0];
+        // Reconstruct the original args from the rest of the pattern
+        // This is a best-effort approach since we can't easily know all the original args used for hashing
+        // If the user provides the exact hash, we can delete it directly
+        if (parts[1].length === 32 && /^[0-9a-f]+$/.test(parts[1])) {
+          // It looks like a hash, try to delete it directly
+          const key = pattern;
+          await invalidateCacheKey(key);
+           res.json({ 
+            success: true, 
+            message: `Cleared cache key: ${key}`,
+            count: 1
+          });
+          return;
+        }
+      }
+    }
+
+    // Clear specific pattern
+    const count = await invalidateCache(pattern);
+    res.json({ 
+      success: true, 
+      message: `Cleared ${count} cache entries matching pattern: ${pattern}`,
+      count: count
+    });
+  } else {
       // Clear all cache
       const result = await clearAllCache();
       res.json({ 
