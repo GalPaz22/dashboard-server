@@ -27,3 +27,7 @@ node_modules/
 # Test files
 test.js
 
+# HTML files
+*.html
+index.html
+
