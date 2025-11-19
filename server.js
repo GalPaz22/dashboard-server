@@ -2400,10 +2400,23 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
   }
 
   // Fuzzy similarity for short queries
-  if (queryLower.length >= 4 && productNameLower.length >= 4) {
-    const similarity = calculateStringSimilarity(queryLower, productNameLower.substring(0, Math.min(30, productNameLower.length)));
-    if (similarity >= 0.8) {
+  if (queryLower.length >= 3 && productNameLower.length >= 3) {
+    // Check similarity against the start of the product name
+    const prefixSimilarity = calculateStringSimilarity(queryLower, productNameLower.substring(0, Math.min(30, productNameLower.length)));
+    if (prefixSimilarity >= 0.75) {
       return 10000; // Near exact for high similarity
+    }
+
+    // ALSO check similarity against individual words in the product name
+    // This helps find "פלם" when searching "פלאם" even if it's not at the start
+    const productWords = productNameLower.split(/\s+/);
+    for (const word of productWords) {
+      if (word.length >= 3) {
+        const wordSimilarity = calculateStringSimilarity(queryLower, word);
+        if (wordSimilarity >= 0.8) { // Higher threshold for single word matching to avoid false positives
+          return 12000; // High bonus for fuzzy word match
+        }
+      }
     }
   }
   
