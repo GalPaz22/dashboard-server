@@ -798,7 +798,6 @@ async function executeOptimizedFilterOnlySearch(
     throw error;
   }
 }
-
 /* =========================================================== *\
    EXISTING PIPELINE FUNCTIONS (UNCHANGED)
 \* =========================================================== */
@@ -1521,7 +1520,6 @@ Analyze the query and return your classification.`;
     }
   }, 7200);
 }
-
 // Function to extract categories from a list of products (used for complex query tier-2)
 function extractCategoriesFromProducts(products) {
   const categoryCount = new Map();
@@ -2310,7 +2308,6 @@ function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories
   
   return queryCats.filter(cat => productCats.includes(cat)).length;
 }
-
 // Enhanced RRF calculation that accounts for soft filter boosting and exact matches
 function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, softCategoryMatches = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
   const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
@@ -2999,7 +2996,6 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 /* =========================================================== *\
    EXPLICIT SOFT CATEGORY SEARCH (UNCHANGED)
 \* =========================================================== */
-
 async function executeExplicitSoftCategorySearch(
   collection,
   cleanedTextForSearch, 
@@ -4432,7 +4428,6 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     res.status(500).json({ error: "Category-filtered search failed" });
   }
 }
-
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
@@ -5190,11 +5185,9 @@ app.post("/search", async (req, res) => {
         llmReorderingSuccessful = false;
       }
     }
-
     // Log search results summary
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
-
     // TEXT MATCH PRIORITY SORTING: Text matches prioritized for simple queries
     // Complex queries use regular RRF scoring
     if (hasSoftFilters || isSimpleResult) {
@@ -6751,10 +6744,40 @@ app.delete("/cache/key/:key", async (req, res) => {
     });
   }
 });
+
+// New endpoint to clear cache by query
+app.post("/cache/clear-by-query", async (req, res) => {
+  try {
+    const { query, context } = req.body; // Context might be needed if it's part of the key
+    if (!query) {
+      return res.status(400).json({ success: false, message: "Query is required" });
+    }
+
+    // Recreate the exact cache keys that would have been generated for this query
+    const translateKey = generateCacheKey('translate', query, context);
+    const filtersKey = generateCacheKey('filters', query, null, null, null, null, context); // Approximating filter key
+
+    let clearedCount = 0;
+    const translateResult = await invalidateCacheKey(translateKey);
+    if (translateResult) clearedCount++;
+
+    const filtersResult = await invalidateCacheKey(filtersKey);
+    if (filtersResult) clearedCount++;
+
+    res.json({
+      success: true,
+      message: `Cleared ${clearedCount} cache entries for query: "${query}"`,
+      count: clearedCount
+    });
+
+  } catch (error) {
+    console.error("Error clearing cache by query:", error);
+    res.status(500).json({ success: false, message: "Server error", error: error.message });
+  }
+});
 // ============================================
 // ACTIVE USERS PROFILE ENDPOINT
 // ============================================
-
 /**
  * POST /active-users
  * Store and update user profiles for personalization
