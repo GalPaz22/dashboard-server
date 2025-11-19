@@ -2460,9 +2460,12 @@ function levenshteinDistance(str1, str2) {
   return matrix[str2.length][str1.length];
 }
 
-async function logQuery(queryCollection, query, filters) {
+async function logQuery(queryCollection, query, filters, products = []) {
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
+  
+  const deliveredProducts = products.map(p => p._id ? p._id.toString() : (p.id ? p.id.toString() : null)).filter(Boolean).slice(0, 20);
+  
   const queryDocument = {
     query: query,
     timestamp: timestamp,
@@ -2473,6 +2476,7 @@ async function logQuery(queryCollection, query, filters) {
     type: filters.type || "unknown",
     softCategory: filters.softCategory || "unknown",
     entity: entity.trim(),
+    deliveredProducts: deliveredProducts
   };
   await queryCollection.insertOne(queryDocument);
 }
@@ -4493,7 +4497,7 @@ app.post("/search", async (req, res) => {
       
       // Log the query (with empty filters since no filter extraction for SKU search)
       try {
-        await logQuery(querycollection, query, {});
+        await logQuery(querycollection, query, {}, formattedSKUResults);
       } catch (logError) {
         console.error(`[${requestId}] Failed to log SKU query:`, logError.message);
       }
@@ -5416,15 +5420,16 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // Return products based on user's limit configuration
+    const limitedResults = finalResults.slice(0, searchLimit);
+    
     // Log query
     try {
-      await logQuery(querycollection, query, enhancedFilters);
+      await logQuery(querycollection, query, enhancedFilters, limitedResults);
     } catch (logError) {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
     }
 
-    // Return products based on user's limit configuration
-    const limitedResults = finalResults.slice(0, searchLimit);
     const executionTime = Date.now() - searchStartTime;
 
     // Check for duplicates in finalResults
