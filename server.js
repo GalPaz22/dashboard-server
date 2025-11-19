@@ -2464,7 +2464,7 @@ async function logQuery(queryCollection, query, filters, products = []) {
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
   
-  const deliveredProducts = products.map(p => p._id ? p._id.toString() : (p.id ? p.id.toString() : null)).filter(Boolean).slice(0, 20);
+  const deliveredProducts = products.map(p => p.name).filter(Boolean).slice(0, 20);
   
   const queryDocument = {
     query: query,
