@@ -3636,9 +3636,9 @@ app.get("/search/load-more", async (req, res) => {
     
     const { query, filters, offset, timestamp, type, extractedCategories } = paginationData;
     
-    // Check if token is expired (5 minutes)
+    // Check if token is expired (24 hours)
     const tokenAge = Date.now() - timestamp;
-    if (tokenAge > 300000) {
+    if (tokenAge > 86400000) {
       return res.status(410).json({ 
         error: "Pagination token expired",
         requestId: requestId
