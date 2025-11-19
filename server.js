@@ -5155,6 +5155,20 @@ app.post("/search", async (req, res) => {
       }
 
       combinedResults.sort((a, b) => {
+        // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
+        const aTextBonus = a.exactMatchBonus || 0;
+        const bTextBonus = b.exactMatchBonus || 0;
+        const aIsTier1 = aTextBonus >= 8000; // Lowered threshold to include near-exact matches
+        const bIsTier1 = bTextBonus >= 8000;
+
+        if (aIsTier1 && !bIsTier1) return -1; // a comes first
+        if (!aIsTier1 && bIsTier1) return 1;  // b comes first
+
+        // If both are Tier 1, sort by text match strength
+        if (aIsTier1 && bIsTier1) {
+          return bTextBonus - aTextBonus;
+        }
+
         const aMatches = a.softCategoryMatches || 0;
         const bMatches = b.softCategoryMatches || 0;
         const aHasSoftMatch = a.softFilterMatch || false;
@@ -5163,8 +5177,8 @@ app.post("/search", async (req, res) => {
         // For simple queries: text keyword matches have ABSOLUTE PRIORITY - regardless of soft categories
         if (isSimpleResult) {
           // Check for text matches: either high exactMatchBonus OR marked as highTextMatch (from two-step search)
-          const aHasTextMatch = (a.exactMatchBonus || 0) >= 20000 || a.highTextMatch === true;
-          const bHasTextMatch = (b.exactMatchBonus || 0) >= 20000 || b.highTextMatch === true;
+          const aHasTextMatch = aTextBonus >= 8000 || a.highTextMatch === true;
+          const bHasTextMatch = bTextBonus >= 8000 || b.highTextMatch === true;
 
           // Text matches ALWAYS come first for simple queries, even over multi-category products
           if (aHasTextMatch !== bHasTextMatch) {
@@ -5181,7 +5195,7 @@ app.post("/search", async (req, res) => {
             }
 
             // Within same type, sort by text match strength
-            const textMatchDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+            const textMatchDiff = bTextBonus - aTextBonus;
             if (textMatchDiff !== 0) {
               return textMatchDiff;
             }
