@@ -5157,17 +5157,29 @@ app.post("/search", async (req, res) => {
 
       combinedResults.sort((a, b) => {
         // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
+        // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
         const aTextBonus = a.exactMatchBonus || 0;
         const bTextBonus = b.exactMatchBonus || 0;
-        const aIsTier1 = aTextBonus >= 8000; // Lowered threshold to include near-exact matches
+        const aIsTier1 = aTextBonus >= 8000; 
         const bIsTier1 = bTextBonus >= 8000;
 
-        if (aIsTier1 && !bIsTier1) return -1; // a comes first
-        if (!aIsTier1 && bIsTier1) return 1;  // b comes first
+        // Check if either is a "Tier 1" match (high quality text match)
+        if (aIsTier1 !== bIsTier1) {
+           return aIsTier1 ? -1 : 1; // Tier 1 match always wins
+        }
 
-        // If both are Tier 1, sort by text match strength
+        // If both are Tier 1, sort by the higher bonus
         if (aIsTier1 && bIsTier1) {
           return bTextBonus - aTextBonus;
+        }
+
+        // If neither is Tier 1, check for any text match (lower threshold)
+        // This catches partial matches that are still better than generic soft category matches
+        const aHasSomeMatch = aTextBonus >= 2000;
+        const bHasSomeMatch = bTextBonus >= 2000;
+        
+        if (isSimpleResult && (aHasSomeMatch !== bHasSomeMatch)) {
+          return aHasSomeMatch ? -1 : 1;
         }
 
         const aMatches = a.softCategoryMatches || 0;
