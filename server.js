@@ -6338,6 +6338,21 @@ app.post("/test-search-to-cart-flow", async (req, res) => {
    HEALTH CHECK ENDPOINT
 \* =========================================================== */
 
+app.get("/clear-cache", async (req, res) => {
+  try {
+    if (redisClient && redisReady) {
+      await redisClient.flushAll();
+      console.log("[CACHE] Redis cache cleared manually via /clear-cache endpoint");
+      return res.json({ success: true, message: "Redis cache cleared successfully" });
+    } else {
+      return res.status(503).json({ error: "Redis not available" });
+    }
+  } catch (error) {
+    console.error("[CACHE ERROR] Failed to clear cache:", error);
+    return res.status(500).json({ error: "Failed to clear cache", details: error.message });
+  }
+});
+
 app.get("/health", async (req, res) => {
   const health = {
     status: 'healthy',
