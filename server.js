@@ -3067,12 +3067,19 @@ async function executeExplicitSoftCategorySearch(
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedTextForExactMatch);
       const softCategoryMatches = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory);
+      // REMOVED the arbitrary +10000 boost for soft category matches
+      // Now using the standard RRF score calculation which includes exactMatchBonus
       const baseScore = calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches);
-      // Additional multi-category boost for soft category results
-      const multiCategoryBoost = softCategoryMatches > 1 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
+      
+      // Additional multi-category boost for soft category results (kept but slightly reduced to not overpower text)
+      const multiCategoryBoost = softCategoryMatches > 1 ? Math.pow(4, softCategoryMatches) * 1000 : 0;
+      
+      // Force high score ONLY if there's a text match, otherwise let soft categories rank naturally
+      const textMatchBoost = exactMatchBonus > 0 ? exactMatchBonus : 0;
+
       return {
         ...data.doc,
-        rrf_score: baseScore + 10000 + multiCategoryBoost, // Base boost + multi-category boost
+        rrf_score: baseScore + multiCategoryBoost + (textMatchBoost > 0 ? 0 : 2000), // Small boost for soft category if no text match
         softFilterMatch: true,
         softCategoryMatches: softCategoryMatches,
         exactMatchBonus: exactMatchBonus, // Store for sorting
@@ -3112,10 +3119,14 @@ async function executeExplicitSoftCategorySearch(
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
   
+  // Merge and Re-sort combined results
   const combinedResults = [
     ...softCategoryResults,
     ...nonSoftCategoryResults
   ];
+  
+  // Sort by RRF score to ensure high text matches bubble up across both lists
+  combinedResults.sort((a, b) => b.rrf_score - a.rrf_score);
   
   console.log(`Soft category matches: ${softCategoryResults.length} (boosted +10000 + multi-category), Non-soft category matches: ${nonSoftCategoryResults.length}`);
   
