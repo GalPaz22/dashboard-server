@@ -778,7 +778,7 @@ async function executeOptimizedFilterOnlySearch(
       const exactMatchBonus = query ? getExactMatchBonus(doc.name, query, cleanedText) : 0;
       
              // Base score with exponential boost for multiple soft category matches
-       const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(3, softCategoryMatches) * 2000 : 0;
+       const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
       
       return {
         ...doc,
@@ -2313,11 +2313,11 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
   const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
                    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
   
-  // Add soft filter boost
-  const softBoost = softFilterBoost * 1.5;
+  // Add soft filter boost directly - the value is controlled at the call site
+  const softBoost = softFilterBoost;
   
   // Progressive boosting: each additional soft category match provides exponential boost
-  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
+  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 20000 : 0;
   
   // Add keyword match bonus for strong text matches
   // Add MASSIVE exact match bonus to ensure exact matches appear first
@@ -3082,24 +3082,25 @@ async function executeExplicitSoftCategorySearch(
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedTextForExactMatch);
       const softCategoryMatches = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory);
-      // REMOVED the arbitrary +10000 boost for soft category matches
-      // Now using the standard RRF score calculation which includes exactMatchBonus
-      const baseScore = calculateEnhancedRRFScore(data.fuzzyRank, data.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches);
       
-      // Additional multi-category boost for soft category results (kept but slightly reduced to not overpower text)
-      const multiCategoryBoost = softCategoryMatches > 1 ? Math.pow(4, softCategoryMatches) * 1000 : 0;
-      
-      // Force high score ONLY if there's a text match, otherwise let soft categories rank naturally
-      const textMatchBoost = exactMatchBonus > 0 ? exactMatchBonus : 0;
+      // Centralized score calculation
+      const score = calculateEnhancedRRFScore(
+        data.fuzzyRank,
+        data.vectorRank,
+        2000, // Base boost for any soft category match
+        0,
+        exactMatchBonus,
+        softCategoryMatches
+      );
 
       return {
         ...data.doc,
-        rrf_score: baseScore + multiCategoryBoost + (textMatchBoost > 0 ? 0 : 2000), // Small boost for soft category if no text match
+        rrf_score: score,
         softFilterMatch: true,
         softCategoryMatches: softCategoryMatches,
-        exactMatchBonus: exactMatchBonus, // Store for sorting
-        fuzzyRank: data.fuzzyRank, // Store for tier detection
-        vectorRank: data.vectorRank // Store for tier detection
+        exactMatchBonus: exactMatchBonus,
+        fuzzyRank: data.fuzzyRank,
+        vectorRank: data.vectorRank
       };
     })
     .sort((a, b) => b.rrf_score - a.rrf_score);
