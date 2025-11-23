@@ -5531,6 +5531,11 @@ app.post("/search", async (req, res) => {
       }
 
       const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
+      
+      // For complex queries, user requested ONLY soft categories to be extracted from LLM reorder
+      // Hard categories from the few LLM results can be noisy/incorrect for the broader search
+      console.log(`[${requestId}] ℹ️ Complex query: Clearing hard categories from LLM extraction (soft-only mode)`);
+      extractedFromLLM.hardCategories = [];
 
       nextToken = Buffer.from(JSON.stringify({
         query,
