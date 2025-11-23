@@ -5537,6 +5537,32 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] ℹ️ Complex query: Clearing hard categories from LLM extraction (soft-only mode)`);
       extractedFromLLM.hardCategories = [];
 
+      // Merging logic: Ensure initial query filters are preserved and prioritized ("bolder")
+      // If we have initial filters from the query, inject them back into the extracted categories
+      if (enhancedFilters) {
+        // 1. Restore hard category if present in initial query
+        if (enhancedFilters.category) {
+          console.log(`[${requestId}] ℹ️ Complex query: Restoring initial hard category "${enhancedFilters.category}" as priority`);
+          extractedFromLLM.hardCategories.push(enhancedFilters.category);
+        }
+
+        // 2. Merge soft categories, prioritizing initial ones
+        if (enhancedFilters.softCategory) {
+          const initialSoftCats = Array.isArray(enhancedFilters.softCategory) 
+            ? enhancedFilters.softCategory 
+            : [enhancedFilters.softCategory];
+            
+          console.log(`[${requestId}] ℹ️ Complex query: Merging initial soft categories [${initialSoftCats.join(', ')}] with priority`);
+          
+          // Add initial soft categories at the beginning (priority)
+          // Filter out duplicates from LLM extracted ones
+          const llmSoftCats = extractedFromLLM.softCategories || [];
+          const uniqueLlmSoftCats = llmSoftCats.filter(cat => !initialSoftCats.includes(cat));
+          
+          extractedFromLLM.softCategories = [...initialSoftCats, ...uniqueLlmSoftCats];
+        }
+      }
+
       nextToken = Buffer.from(JSON.stringify({
         query,
         filters: enhancedFilters,
