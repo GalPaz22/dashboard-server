@@ -2056,7 +2056,7 @@ MATCHING STRICTNESS LEVELS:
 CRITICAL VALIDATION:
 - Before extracting ANY value, verify it exists in the provided list
 - For category: Only extract if there's a solid, unambiguous match
-- For softCategory: You can be more creative with mapping, but the result must be in the list
+- For softCategory: You can be more creative with mapping, but the result must be in the provided list
 - If you cannot find a match in the lists, do NOT extract that filter
 
 Return the extracted filters in JSON format. Only extract values that exist in the provided lists.
@@ -4541,33 +4541,48 @@ app.post("/search", async (req, res) => {
   }
 
   try {
+    // Invalidate translation and filter caches for this query to ensure fresh processing
+    const translateKey = generateCacheKey('translate', query, context);
+    // The filtersKey also depends on categories, types, finalSoftCategories, example. 
+    // To correctly invalidate, we need to pass the same arguments used to generate it.
+    const filtersKey = generateCacheKey('filters', query, categories, types, finalSoftCategories, example, context);
+    await invalidateCacheKey(translateKey);
+    await invalidateCacheKey(filtersKey);
+  } catch (cacheError) {
+    console.error(`[${requestId}] Failed to invalidate cache for query "${query}":`, cacheError.message);
+    // Continue execution even if cache invalidation fails
+  }
+
+  try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection("products");
     const querycollection = db.collection("queries");
 
-  const initialFilters = {};
-  const isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
-  const isComplexQueryResult = !isSimpleResult;
+    const initialFilters = {};
+    let isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
+    let isComplexQueryResult = !isSimpleResult;
 
-  console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
-  console.log(`[${requestId}] 🔍 Query classification: "${query}" → ${isComplexQueryResult ? '🔴 COMPLEX' : '🟢 SIMPLE'}`);
-  console.log(`[${requestId}] 🛤️  Will use ${isComplexQueryResult ? 'LLM reordering path' : 'direct results path (no DB lookup)'}`);
-  console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
+    console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
+    console.log(`[${requestId}] 🔍 Query classification: "${query}" → ${isComplexQueryResult ? '🔴 COMPLEX' : '🟢 SIMPLE'}`);
+    console.log(`[${requestId}] 🛤️  Will use ${isComplexQueryResult ? 'LLM reordering path' : 'direct results path (no DB lookup)'}`);
+    console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
 
-  // Handle progressive loading phases
-  if (phase === 'text-matches-only' && isSimpleResult) {
-    console.log(`[${requestId}] 🚀 Phase 1: Returning text matches only`);
-    return await handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, finalSoftCategories, dbName, collectionName, searchLimit);
-  }
+    // Handle progressive loading phases
+    if (phase === 'text-matches-only' && isSimpleResult) {
+      console.log(`[${requestId}] 🚀 Phase 1: Returning text matches only`);
+      // No need to format - handleTextMatchesOnlyPhase returns raw products
+      return await handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, finalSoftCategories, dbName, collectionName, searchLimit);
+    }
 
-  if (phase === 'category-filtered' && extractedCategories && isSimpleResult) {
-    console.log(`[${requestId}] 📂 Phase 2: Returning category-filtered results`);
-    // Pass the early-extracted soft filters from the query to phase 2
-    return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, earlySoftFilters, syncMode);
-  }
+    if (phase === 'category-filtered' && extractedCategories && isSimpleResult) {
+      console.log(`[${requestId}] 📂 Phase 2: Returning category-filtered results`);
+      // No need to format - handleCategoryFilteredPhase returns raw products
+      return await handleCategoryFilteredPhase(req, res, requestId, query, context, noWord, extractedCategories, dbName, collectionName, searchLimit, earlySoftFilters, syncMode);
+    }
 
-  const translatedQuery = await translateQuery(query, context);
+    let combinedResults = []; // Initialize combinedResults here
+    let translatedQuery = await translateQuery(query, context);
 
     if (!translatedQuery) {
       return res.status(500).json({ error: "Error translating query" });
@@ -4786,7 +4801,6 @@ app.post("/search", async (req, res) => {
     const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
     console.log(`[${requestId}] Cleaned query for fuzzy search:`, cleanedHebrewText);
 
-    let combinedResults = [];
     let extractedCategoriesMetadata = null; // Store extracted categories for progressive loading
     let reorderedData;
     let llmReorderingSuccessful = false;
@@ -5828,7 +5842,6 @@ app.post("/recommend", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
-
 app.post("/search-to-cart", async (req, res) => {
   try {
     const apiKey = req.get("x-api-key");
@@ -6612,7 +6625,6 @@ app.get("/cache/stats", async (req, res) => {
     });
   }
 });
-
 app.post("/cache/clear", async (req, res) => {
   try {
     const { pattern } = req.body;
