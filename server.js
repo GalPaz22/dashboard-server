@@ -5926,6 +5926,8 @@ app.post("/search-to-cart", async (req, res) => {
     const { dbName } = store;
     const { document } = req.body;
     
+    console.log(`[SEARCH-TO-CART] Incoming document:`, JSON.stringify(document));
+    
     // Updated validation - checkout events don't require product_id
     if (!document || !document.search_query || !document.event_type) {
       return res.status(400).json({ error: "Missing required fields: search_query and event_type" });
@@ -5980,8 +5982,38 @@ app.post("/search-to-cart", async (req, res) => {
         break;
     }
     
+    // Check for existing identical documents to prevent duplicates based on a 30-minute timestamp window
+    const queryForExisting = {
+      search_query: enhancedDocument.search_query,
+      event_type: enhancedDocument.event_type,
+    };
+
+    if (enhancedDocument.product_id) {
+      queryForExisting.product_id = enhancedDocument.product_id;
+    }
+
+    // Convert timestamp to Date object for comparison
+    const incomingTimestamp = new Date(enhancedDocument.timestamp);
+    const thirtyMinutesAgo = new Date(incomingTimestamp.getTime() - 30 * 60 * 1000);
+    const thirtyMinutesFromNow = new Date(incomingTimestamp.getTime() + 30 * 60 * 1000);
+
+    queryForExisting.timestamp = {
+      $gte: thirtyMinutesAgo.toISOString(),
+      $lte: thirtyMinutesFromNow.toISOString(),
+    };
+
+    console.log(`[SEARCH-TO-CART] Checking for duplicates within timestamp range: ${thirtyMinutesAgo.toISOString()} to ${thirtyMinutesFromNow.toISOString()} for query: ${enhancedDocument.search_query}`);
+
+    const existingDocument = await targetCollection.findOne(queryForExisting);
+    if (existingDocument) {
+      console.log(`[SEARCH-TO-CART] Duplicate document found (within 30-min window), preventing insertion. Existing ID: ${existingDocument._id}`);
+      return res.status(200).json({ success: true, message: "Document already exists within 30-minute window, no new insertion." });
+    }
+
+    console.log(`[SEARCH-TO-CART] Inserting into collection: ${targetCollection.collectionName}`);
     // Save to appropriate collection
     const insertResult = await targetCollection.insertOne(enhancedDocument);
+    console.log(`[SEARCH-TO-CART] Insert result:`, insertResult);
     
     // Handle query complexity feedback for conversion events
     if (document.event_type === 'checkout_completed' || document.event_type === 'checkout_initiated') {
@@ -7367,7 +7399,6 @@ function isDigitsOnlyQuery(query) {
   const trimmed = query.trim();
   return /^\d+$/.test(trimmed) && trimmed.length > 0;
 }
-
 // SKU search pipeline - OPTIMIZED for exact digit matches
 function buildSKUSearchPipeline(skuQuery, limit = 65) {
   console.log(`Building SKU search pipeline for: ${skuQuery}`);
