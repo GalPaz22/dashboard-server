@@ -121,31 +121,14 @@ const aiCircuitBreaker = {
 
 // Fallback: Rule-based query classification (simple vs complex)
 function classifyQueryFallback(query) {
-  const queryLower = query.toLowerCase().trim();
-  const words = queryLower.split(/\s+/);
-  
-  // Complex indicators
-  const complexIndicators = [
-    'מתאים ל', 'מומלץ ל', 'טוב ל', 'עבור', 'לארוחת', 'מ', 'עד', // Hebrew: "suitable for", "recommended for", "good for", "for", "for meal", "from", "up to"
-    'suitable for', 'recommended for', 'good for', 'for dinner', 'for meal', 'pairing',
-    'באיזור', 'בסביבות', 'החל מ', // Hebrew: "around", "starting from"
-    'around', 'about', 'approximately', 'between', 'under', 'over'
-  ];
-  
-  // Check for complex indicators
-  const hasComplexIndicator = complexIndicators.some(indicator => queryLower.includes(indicator));
-  
-  // Check for price ranges (numbers with range indicators)
-  const hasPriceRange = /\d+.*(?:עד|to|-).*\d+/.test(queryLower);
-  
-  // Simple query heuristics:
-  // - 1-3 words
-  // - No complex indicators
-  // - No price ranges
-  const isSimple = words.length <= 3 && !hasComplexIndicator && !hasPriceRange;
-  
-  console.log(`[FALLBACK CLASSIFICATION] Query: "${query}" -> ${isSimple ? 'SIMPLE' : 'COMPLEX'} (${words.length} words)`);
-  return isSimple;
+  const lowerQuery = query.toLowerCase().trim();
+  // Simple heuristic for fallback: queries with 1-2 words are often simple
+  // unless they contain obvious complex keywords (e.g., "from", "price")
+  const words = lowerQuery.split(/\s+/);
+  if (words.length <= 2) {
+    return true; // Default to simple for short queries
+  }
+  return false; // Default to complex for longer queries
 }
 
 // Fallback: Rule-based filter extraction
@@ -392,7 +375,7 @@ async function warmCache() {
   for (const query of commonQueries) {
     try {
       await translateQuery(query, context);
-      await classifyQueryComplexity(query, context);
+      await classifyQueryComplexity(query, context, false);
       console.log(`[CACHE WARM] Warmed cache for query: ${query}`);
     } catch (error) {
       console.error(`[CACHE WARM] Failed to warm cache for ${query}:`, error);
@@ -736,7 +719,6 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   console.log(`[FILTER-ONLY] Pipeline stages: ${pipeline.length}, Match conditions: ${matchConditions.length}`);
   return pipeline;
 };
-
 // Fast filter-only execution function
 async function executeOptimizedFilterOnlySearch(
   collection,
@@ -1416,8 +1398,8 @@ Also:
 }
 
 // Enhanced Gemini-based query classification function with learning
-async function classifyQueryComplexity(query, context, dbName = null) {
-  const cacheKey = generateCacheKey('classify', query, context);
+async function classifyQueryComplexity(query, context, hasHighTextMatch = false, dbName = null) {
+  const cacheKey = generateCacheKey('classify', query, context, hasHighTextMatch);
   
   return withCache(cacheKey, async () => {
     try {
@@ -1439,6 +1421,12 @@ async function classifyQueryComplexity(query, context, dbName = null) {
         }
       }
       
+      // If high text match is present, force simple classification
+      if (hasHighTextMatch) {
+        console.log(`[HIGH TEXT MATCH] Forcing SIMPLE classification for query: "${query}"`);
+        return true;
+      }
+
       // Check circuit breaker - use fallback if AI is unavailable
       if (aiCircuitBreaker.shouldBypassAI()) {
         console.log(`[AI BYPASS] Circuit breaker open, using fallback classification for: "${query}"`);
@@ -1516,11 +1504,22 @@ Analyze the query and return your classification.`;
       // Record failure and trigger circuit breaker if needed
       aiCircuitBreaker.recordFailure();
       
-      // Use fallback classification
-      console.log(`[AI FALLBACK] Using rule-based classification for: "${query}"`);
+      // Fallback to simple classification if AI fails or circuit breaker is open
       return classifyQueryFallback(query);
     }
   }, 7200);
+}
+
+// Fallback classification for when AI is bypassed or fails
+function classifyQueryFallback(query) {
+  const lowerQuery = query.toLowerCase().trim();
+  // Simple heuristic for fallback: queries with 1-2 words are often simple
+  // unless they contain obvious complex keywords (e.g., "from", "price")
+  const words = lowerQuery.split(/\s+/);
+  if (words.length <= 2) {
+    return true; // Default to simple for short queries
+  }
+  return false; // Default to complex for longer queries
 }
 // Function to extract categories from a list of products (used for complex query tier-2)
 function extractCategoriesFromProducts(products) {
@@ -1757,7 +1756,7 @@ async function checkFieldMatches(query, dbName = null) {
   }
 }
 
-async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null) {
+async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null, hasHighTextMatch) {
   if (filters && Object.keys(filters).length > 0) {
     return false;
   }
@@ -4607,7 +4606,33 @@ app.post("/search", async (req, res) => {
     const querycollection = db.collection("queries");
 
     const initialFilters = {};
-    let isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName);
+    let hasHighTextMatch = false;
+    try {
+      const preliminaryTextSearchPipeline = buildStandardSearchPipeline(
+        query, // We don't have cleanedTextForSearch here yet, so use query
+        query,
+        initialFilters, // No hard filters yet
+        5, // Limit to a small number for performance
+        false,
+        false,
+        [],
+        earlySoftFilters // Include early soft filters for context
+      );
+      const preliminaryTextSearchResults = await collection.aggregate(preliminaryTextSearchPipeline).toArray();
+      
+      const highQualityPreliminaryMatches = preliminaryTextSearchResults.filter(doc => {
+        const bonus = getExactMatchBonus(doc.name, query, query);
+        return bonus >= 1000; // Threshold for a strong text match
+      });
+      hasHighTextMatch = highQualityPreliminaryMatches.length > 0;
+      console.log(`[${requestId}] Preliminary text search: ${preliminaryTextSearchResults.length} results, hasHighTextMatch: ${hasHighTextMatch}`);
+
+    } catch (error) {
+      console.warn(`[${requestId}] Error during preliminary text search for high match detection:`, error.message);
+      // Continue with hasHighTextMatch = false if there's an error
+    }
+
+    let isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName, hasHighTextMatch);
     let isComplexQueryResult = !isSimpleResult;
 
     console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
@@ -5977,7 +6002,7 @@ app.post("/search-to-cart", async (req, res) => {
         } else {
           // Fallback to re-classification only if no classification provided
           console.log(`[COMPLEXITY FEEDBACK] No classification provided, re-classifying query: "${document.search_query}"`);
-          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', dbName);
+          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', false, dbName);
           classification = queryComplexityResult ? 'simple' : 'complex';
           hasClassification = true;
         }
@@ -6024,7 +6049,7 @@ app.post("/search-to-cart", async (req, res) => {
           classification = document.searchMetadata.classification;
           hasClassification = true;
         } else {
-          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', dbName);
+          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', false, dbName);
           classification = queryComplexityResult ? 'simple' : 'complex';
           hasClassification = true;
         }
@@ -6212,7 +6237,7 @@ app.post("/tag-query-complexity", async (req, res) => {
     const queryComplexityCollection = db.collection('query_complexity_feedback');
     
     // Get current classification
-    const currentClassification = await classifyQueryComplexity(query, req.store.context || 'wine store', dbName);
+    const currentClassification = await classifyQueryComplexity(query, req.store.context || 'wine store', false, dbName);
     const currentComplexityLabel = currentClassification ? 'simple' : 'complex';
     
     // Store manual feedback
@@ -6392,7 +6417,7 @@ app.post("/test-search-to-cart-flow", async (req, res) => {
     console.log("=== TESTING SEARCH-TO-CART FLOW ===");
     
     // Step 1: Simulate a search (get classification)
-    const isSimple = await classifyQueryComplexity(query, 'wine store', dbName);
+    const isSimple = await classifyQueryComplexity(query, 'wine store', false, dbName);
     const classification = isSimple ? 'simple' : 'complex';
     
     console.log(`Step 1: Query "${query}" classified as ${classification.toUpperCase()}`);
