@@ -1751,6 +1751,12 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     return false;
   }
   
+  // PRIORITY: If high text match is present, force simple classification
+  if (hasHighTextMatch) {
+    console.log(`[QUERY CLASSIFICATION] ✅ High-quality text match detected (hasHighTextMatch=true) → SIMPLE query`);
+    return true;
+  }
+  
   // TEXT-BASED CLASSIFICATION ONLY: Always perform text search to check for matches
   // If we find good text matches, it's a simple query (product name)
   // If no good matches, it's complex (descriptive/intent-based)
