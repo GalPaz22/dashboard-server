@@ -386,7 +386,8 @@ async function warmCache() {
     'white wine'
   ];
   
-  const context = 'wine store';
+
+
   
   for (const query of commonQueries) {
     try {
@@ -470,7 +471,8 @@ async function getStoreConfigByApiKey(apiKey) {
     softCategories: userDoc.credentials?.softCategories || "",
     syncMode: userDoc.syncMode || "text",
     explain: userDoc.explain || false,
-    limit: userDoc.limit || 25, // Search limit from user config, default to 25
+    limit: userDoc.limit || 25,
+    context: userDoc.context || "wine store" // Search limit from user config, default to 25
   };
 }
 
