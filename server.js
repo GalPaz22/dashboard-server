@@ -120,16 +120,6 @@ const aiCircuitBreaker = {
 };
 
 // Fallback: Rule-based query classification (simple vs complex)
-function classifyQueryFallback(query) {
-  const lowerQuery = query.toLowerCase().trim();
-  // Simple heuristic for fallback: queries with 1-2 words are often simple
-  // unless they contain obvious complex keywords (e.g., "from", "price")
-  const words = lowerQuery.split(/\s+/);
-  if (words.length <= 2) {
-    return true; // Default to simple for short queries
-  }
-  return false; // Default to complex for longer queries
-}
 
 // Fallback: Rule-based filter extraction
 // Hard-coded category extraction patterns
