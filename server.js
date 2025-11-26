@@ -1884,7 +1884,7 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
       const exactMatchBonus = getExactMatchBonus(topResult.name, query, query);
       
       // If we have a high-quality exact text match, it's definitely a simple query (product name)
-      if (exactMatchBonus >= 15000) {
+      if (exactMatchBonus >= 1000) {
         console.log(`[QUERY CLASSIFICATION] ✅ High-quality exact text match: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
         return true;
       }
@@ -2415,7 +2415,7 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
         const wordSimilarity = calculateStringSimilarity(queryLower, word);
         // LOWER threshold to 0.75 to catch "פלאם" (4 chars) vs "פלם" (3 chars) - distance 1, length 4 -> 0.75
         // This ensures slight misspellings or variants get the bonus
-        if (wordSimilarity >= 0.75) { 
+        if (wordSimilarity >= 0.75) {
           return 12000; // High bonus for fuzzy word match
         }
       }
@@ -2998,10 +2998,10 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 \* =========================================================== */
 async function executeExplicitSoftCategorySearch(
   collection,
-  cleanedTextForSearch, 
-  query, 
-  hardFilters, 
-  softFilters, 
+  cleanedTextForSearch,
+  query,
+  hardFilters,
+  softFilters,
   queryEmbedding,
   searchLimit,
   vectorLimit,
@@ -3011,9 +3011,34 @@ async function executeExplicitSoftCategorySearch(
   deliveredIds = []
 ) {
   console.log("Executing explicit soft category search");
-  
+
   // Use original text for exact match checks, filtered text for search
   const cleanedTextForExactMatch = originalCleanedText || cleanedTextForSearch;
+
+  // FIRST: Find high-quality text matches that should be included regardless of soft categories
+  let highQualityTextMatches = [];
+  try {
+    const textSearchPipeline = buildStandardSearchPipeline(cleanedTextForSearch, query, hardFilters, Math.max(searchLimit, 50), useOrLogic, isImageModeWithSoftCategories);
+    const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
+
+    const textResultsWithBonuses = textSearchResults.map(doc => {
+      const bonus = getExactMatchBonus(doc.name, query, cleanedTextForExactMatch);
+      return {
+        ...doc,
+        exactMatchBonus: bonus,
+        rrf_score: 0,
+        softFilterMatch: false,
+        softCategoryMatches: 0
+      };
+    });
+
+    highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+    highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
+
+    console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include`);
+  } catch (error) {
+    console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
+  }
   
   // Check if this is a pure hard category search
   const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 && 
@@ -3224,14 +3249,34 @@ async function executeExplicitSoftCategorySearch(
   
   console.log(`Phase 3: Added ${sweepOnlyProducts.length} additional products from sweep`);
   
-  // Combine all results: search-based results first (higher scores), then sweep results
+  // Add high-quality text matches that may not have been included in soft category search
+  const existingIds = new Set([
+    ...softCategoryResults.map(p => p._id.toString()),
+    ...nonSoftCategoryResults.map(p => p._id.toString()),
+    ...sweepOnlyProducts.map(p => p._id.toString())
+  ]);
+
+  const textMatchesToAdd = highQualityTextMatches
+    .filter(product => !existingIds.has(product._id.toString()))
+    .map(product => ({
+      ...product,
+      rrf_score: 50000 + (product.exactMatchBonus || 0), // High base score for text matches
+      softFilterMatch: false,
+      softCategoryMatches: 0,
+      textMatchPriority: true // Mark as text match priority
+    }));
+
+  console.log(`[SOFT SEARCH] Adding ${textMatchesToAdd.length} high-quality text matches not found in soft category search`);
+
+  // Combine all results: text matches first (highest priority), then search-based results, then sweep results
   const finalCombinedResults = [
+    ...textMatchesToAdd,
     ...softCategoryResults,
     ...nonSoftCategoryResults,
     ...sweepOnlyProducts
   ];
-  
-  console.log(`Total combined results: ${finalCombinedResults.length} (${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
+
+  console.log(`Total combined results: ${finalCombinedResults.length} (${textMatchesToAdd.length} text matches + ${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
   
   // Filter out already-delivered products
   const filteredResults = deliveredIds && deliveredIds.length > 0
@@ -4111,7 +4156,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       softCategoryMatches: 0
     }));
 
-          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 8000);
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
     // Sort by text match strength
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
@@ -4982,7 +5027,7 @@ app.post("/search", async (req, res) => {
           }));
 
           // Filter for high-quality text matches (lower threshold for better extraction)
-          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 8000);
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
           if (highQualityTextMatches.length > 0) {
             console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches`);
