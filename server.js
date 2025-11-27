@@ -5971,6 +5971,27 @@ app.post("/search-to-cart", async (req, res) => {
       created_at: new Date()
     };
     
+    // Upsale detection: Check if product was in the search results shown to user
+    if (document.event_type === 'add_to_cart' && document.product_id && document.search_results) {
+      // search_results should be an array of product IDs or objects with _id/id fields
+      const searchResultIds = Array.isArray(document.search_results) 
+        ? document.search_results.map(item => {
+            if (typeof item === 'string') return item;
+            return item._id || item.id || item.product_id;
+          }).filter(Boolean)
+        : [];
+      
+      const isUpsale = searchResultIds.includes(document.product_id.toString()) || 
+                       searchResultIds.includes(parseInt(document.product_id));
+      
+      enhancedDocument.upsale = isUpsale;
+      
+      console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, in_search_results=${isUpsale}, search_results_count=${searchResultIds.length}`);
+    } else {
+      // For non-add_to_cart events or when search_results is not provided, upsale is unknown
+      enhancedDocument.upsale = null;
+    }
+    
     // Add conversion type based on event
     switch (document.event_type) {
       case 'checkout_initiated':
