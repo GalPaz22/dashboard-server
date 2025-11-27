@@ -359,8 +359,8 @@ async function warmCache() {
     'white wine'
   ];
   
-
-
+  // Default context for cache warming
+  const context = 'wine store';
   
   for (const query of commonQueries) {
     try {
