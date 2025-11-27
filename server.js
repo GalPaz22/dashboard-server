@@ -4605,19 +4605,6 @@ app.post("/search", async (req, res) => {
   }
 
   try {
-    // Invalidate translation and filter caches for this query to ensure fresh processing
-    const translateKey = generateCacheKey('translate', query, context);
-    // The filtersKey also depends on categories, types, finalSoftCategories, example. 
-    // To correctly invalidate, we need to pass the same arguments used to generate it.
-    const filtersKey = generateCacheKey('filters', query, categories, types, finalSoftCategories, example, context);
-    await invalidateCacheKey(translateKey);
-    await invalidateCacheKey(filtersKey);
-  } catch (cacheError) {
-    console.error(`[${requestId}] Failed to invalidate cache for query "${query}":`, cacheError.message);
-    // Continue execution even if cache invalidation fails
-  }
-
-  try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection("products");
