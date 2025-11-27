@@ -5972,21 +5972,41 @@ app.post("/search-to-cart", async (req, res) => {
     };
     
     // Upsale detection: Check if product was in the search results shown to user
+    // search_results contains product NAMES (not IDs) as stored in queries collection
     if (document.event_type === 'add_to_cart' && document.product_id && document.search_results) {
-      // search_results should be an array of product IDs or objects with _id/id fields
-      const searchResultIds = Array.isArray(document.search_results) 
-        ? document.search_results.map(item => {
-            if (typeof item === 'string') return item;
-            return item._id || item.id || item.product_id;
-          }).filter(Boolean)
-        : [];
-      
-      const isUpsale = searchResultIds.includes(document.product_id.toString()) || 
-                       searchResultIds.includes(parseInt(document.product_id));
-      
-      enhancedDocument.upsale = isUpsale;
-      
-      console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, in_search_results=${isUpsale}, search_results_count=${searchResultIds.length}`);
+      try {
+        // Get the product name from the products collection using product_id
+        const productsCollection = db.collection('products');
+        
+        // Try to find by ItemID first (most common), then by id, then by _id
+        const product = await productsCollection.findOne({
+          $or: [
+            { ItemID: parseInt(document.product_id) },
+            { ItemID: document.product_id.toString() },
+            { id: parseInt(document.product_id) },
+            { id: document.product_id.toString() },
+            { _id: document.product_id }
+          ]
+        });
+        
+        if (product && product.name) {
+          // search_results is an array of product names
+          const searchResultNames = Array.isArray(document.search_results) 
+            ? document.search_results.filter(Boolean)
+            : [];
+          
+          const isUpsale = searchResultNames.includes(product.name);
+          enhancedDocument.upsale = isUpsale;
+          
+          console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, product_name="${product.name}", in_search_results=${isUpsale}, search_results_count=${searchResultNames.length}`);
+        } else {
+          console.warn(`[SEARCH-TO-CART] Product not found for product_id=${document.product_id}, cannot determine upsale status`);
+          enhancedDocument.upsale = null;
+        }
+      } catch (error) {
+        console.error(`[SEARCH-TO-CART] Error in upsale detection:`, error);
+        enhancedDocument.upsale = null;
+      }
     } else {
       // For non-add_to_cart events or when search_results is not provided, upsale is unknown
       enhancedDocument.upsale = null;
