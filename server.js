@@ -435,13 +435,27 @@ async function getStoreConfigByApiKey(apiKey) {
   const coreDb = client.db("users");
   const userDoc = await coreDb.collection("users").findOne({ apiKey });
   if (!userDoc) return null;
+
+  // Intelligent fallback: use boosted soft categories if available, otherwise use original
+  // This keeps the server context light by only loading one version
+  const softCategories = userDoc.credentials?.softCategoriesBoosted ||
+                         userDoc.credentials?.softCategories ||
+                         "";
+
+  // Log which version is being used for debugging
+  if (userDoc.credentials?.softCategoriesBoosted) {
+    console.log(`[CONFIG] Using boosted soft categories for ${userDoc.dbName}`);
+  } else if (userDoc.credentials?.softCategories) {
+    console.log(`[CONFIG] Using original soft categories for ${userDoc.dbName} (no boost field)`);
+  }
+
   return {
     dbName: userDoc.dbName,
     products: userDoc.collections?.products || "products",
     queries: userDoc.collections?.queries || "queries",
     categories: userDoc.credentials?.categories || "",
     types: userDoc.credentials?.type || "",
-    softCategories: userDoc.credentials?.softCategories || "",
+    softCategories: softCategories,
     syncMode: userDoc.syncMode || "text",
     explain: userDoc.explain || false,
     limit: userDoc.limit || 25,
