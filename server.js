@@ -439,6 +439,7 @@ async function getStoreConfigByApiKey(apiKey) {
   // Intelligent fallback: use boosted soft categories if available, otherwise use original
   // This keeps the server context light by only loading one version
   let softCategories = "";
+  let softCategoriesBoost = null; // Store boost scores for weighted ranking
 
   if (userDoc.credentials?.softCategoriesBoosted) {
     // Convert object {category: boostScore} to array sorted by boost score (highest first)
@@ -447,7 +448,10 @@ async function getStoreConfigByApiKey(apiKey) {
       .sort((a, b) => b[1] - a[1]) // Sort by boost score descending
       .map(([category, _]) => category);
 
-    console.log(`[CONFIG] Using boosted soft categories for ${userDoc.dbName} (${softCategories.length} categories)`);
+    // Preserve boost scores for weighted ranking in search pipeline
+    softCategoriesBoost = boostedObj;
+
+    console.log(`[CONFIG] Using boosted soft categories for ${userDoc.dbName} (${softCategories.length} categories with boost weights)`);
   } else if (userDoc.credentials?.softCategories) {
     // Use original soft categories (already in correct format)
     softCategories = userDoc.credentials.softCategories;
@@ -461,6 +465,7 @@ async function getStoreConfigByApiKey(apiKey) {
     categories: userDoc.credentials?.categories || "",
     types: userDoc.credentials?.type || "",
     softCategories: softCategories,
+    softCategoriesBoost: softCategoriesBoost, // Boost scores for weighted ranking
     syncMode: userDoc.syncMode || "text",
     explain: userDoc.explain || false,
     limit: userDoc.limit || 25,
@@ -736,7 +741,8 @@ async function executeOptimizedFilterOnlySearch(
   useOrLogic = false,
   deliveredIds = [],
   query = '',
-  cleanedText = ''
+  cleanedText = '',
+  boostScores = null
 ) {
   console.log("[FILTER-ONLY] Executing optimized filter-only search");
   
@@ -764,14 +770,15 @@ async function executeOptimizedFilterOnlySearch(
     
     // Add simple scoring for consistent ordering with multi-category boosting
     const scoredResults = filteredResults.map((doc, index) => {
-      const softCategoryMatches = softFilters && softFilters.softCategory ? 
-        calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory) : 0;
-      
+      const matchResult = softFilters && softFilters.softCategory ?
+        calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, boostScores) :
+        { count: 0, weightedScore: 0 };
+
       // Calculate text match bonus if query is provided
       const exactMatchBonus = query ? getExactMatchBonus(doc.name, query, cleanedText) : 0;
-      
-             // Base score with exponential boost for multiple soft category matches
-       const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
+
+      // Base score with exponential boost - use weightedScore to respect boost values
+      const multiCategoryBoost = matchResult.weightedScore > 0 ? Math.pow(5, matchResult.weightedScore) * 2000 : 0;
       
       return {
         ...doc,
@@ -2315,26 +2322,41 @@ function shouldUseOrLogicForCategories(query, categories) {
   return orScore > andScore;
 }
 
-// Function to calculate number of soft category matches
-function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories) {
-  if (!productSoftCategories || !querySoftCategories) return 0;
-  
+// Function to calculate number of soft category matches with optional boost weighting
+// Returns: { count: number, weightedScore: number }
+function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories, boostScores = null) {
+  if (!productSoftCategories || !querySoftCategories) return { count: 0, weightedScore: 0 };
+
   const productCats = Array.isArray(productSoftCategories) ? productSoftCategories : [productSoftCategories];
   const queryCats = Array.isArray(querySoftCategories) ? querySoftCategories : [querySoftCategories];
-  
-  return queryCats.filter(cat => productCats.includes(cat)).length;
+
+  const matchedCategories = queryCats.filter(cat => productCats.includes(cat));
+  const count = matchedCategories.length;
+
+  // If boost scores are provided, calculate weighted score
+  let weightedScore = count;
+  if (boostScores && typeof boostScores === 'object') {
+    weightedScore = matchedCategories.reduce((sum, cat) => {
+      const boost = boostScores[cat] || 1; // Default to 1 if category not in boost map
+      return sum + boost;
+    }, 0);
+  }
+
+  return { count, weightedScore };
 }
 // Enhanced RRF calculation that accounts for soft filter boosting and exact matches
+// softCategoryMatches can be a number (backward compatible) or weighted score from boost
 function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, softCategoryMatches = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
-  const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
+  const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) +
                    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
-  
+
   // Add soft filter boost directly - the value is controlled at the call site
   const softBoost = softFilterBoost;
-  
-  // Progressive boosting: each additional soft category match provides exponential boost
+
+  // Progressive boosting: uses weighted score if provided (respects boost values)
+  // Higher boost scores (like 2 for "french") will rank higher than lower scores (like 1 for "fruity")
   const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 20000 : 0;
-  
+
   // Add keyword match bonus for strong text matches
   // Add MASSIVE exact match bonus to ensure exact matches appear first
   return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
@@ -3046,7 +3068,8 @@ async function executeExplicitSoftCategorySearch(
   useOrLogic = false,
   isImageModeWithSoftCategories = false,
   originalCleanedText = null,
-  deliveredIds = []
+  deliveredIds = [],
+  boostScores = null
 ) {
   console.log("Executing explicit soft category search");
 
@@ -3144,23 +3167,24 @@ async function executeExplicitSoftCategorySearch(
   const softCategoryResults = Array.from(softCategoryDocumentRanks.values())
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedTextForExactMatch);
-      const softCategoryMatches = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory);
-      
-      // Centralized score calculation
+      const matchResult = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory, boostScores);
+
+      // Centralized score calculation - use weightedScore to respect boost values
       const score = calculateEnhancedRRFScore(
         data.fuzzyRank,
         data.vectorRank,
         2000, // Base boost for any soft category match
         0,
         exactMatchBonus,
-        softCategoryMatches
+        matchResult.weightedScore // Use weighted score instead of count
       );
 
       return {
         ...data.doc,
         rrf_score: score,
         softFilterMatch: true,
-        softCategoryMatches: softCategoryMatches,
+        softCategoryMatches: matchResult.count, // Store count for reference
+        softCategoryWeightedScore: matchResult.weightedScore, // Store weighted score
         exactMatchBonus: exactMatchBonus,
         fuzzyRank: data.fuzzyRank,
         vectorRank: data.vectorRank
@@ -3272,14 +3296,15 @@ async function executeExplicitSoftCategorySearch(
     .filter(product => !existingProductIds.has(product._id.toString()))
     .map(product => {
       const exactMatchBonus = getExactMatchBonus(product.name, query, cleanedTextForExactMatch);
-      const softCategoryMatches = calculateSoftCategoryMatches(product.softCategory, softFilters.softCategory);
-      // Additional multi-category boost for sweep results
-      const multiCategoryBoost = softCategoryMatches > 1 ? Math.pow(5, softCategoryMatches) * 2000 : 0;
+      const matchResult = calculateSoftCategoryMatches(product.softCategory, softFilters.softCategory, boostScores);
+      // Additional multi-category boost - use weightedScore to respect boost values
+      const multiCategoryBoost = matchResult.weightedScore > 1 ? Math.pow(5, matchResult.weightedScore) * 2000 : 0;
       return {
         ...product,
         rrf_score: 100 + exactMatchBonus + 10000 + multiCategoryBoost, // Base boost + multi-category boost
         softFilterMatch: true,
-        softCategoryMatches: softCategoryMatches,
+        softCategoryMatches: matchResult.count,
+        softCategoryWeightedScore: matchResult.weightedScore,
         exactMatchBonus: exactMatchBonus, // Store for sorting
         sweepResult: true // Mark as sweep result for debugging
       };
@@ -3466,7 +3491,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         useOrLogic,
         deliveredIds,
         query,
-        cleanedText
+        cleanedText,
+        req.store.softCategoriesBoost
       );
     } else if (hasSoftFilters) {
       console.log(`[${requestId}] Using soft category search`);
@@ -3482,7 +3508,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         useOrLogic,
         syncMode === 'image',
         cleanedText,
-        deliveredIds
+        deliveredIds,
+        req.store.softCategoriesBoost
       );
       } else {
         console.log(`[${requestId}] Using standard search`);
@@ -3839,7 +3866,8 @@ app.get("/search/load-more", async (req, res) => {
             true, // useOrLogic
             false,
             cleanedText,
-            []
+            [],
+            req.store.softCategoriesBoost
           );
         } else {
           // Just category filter without soft categories
@@ -3864,16 +3892,18 @@ app.get("/search/load-more", async (req, res) => {
           categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
             const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-            // Calculate soft category matches for tier 2 results
-            const softCategoryMatches = softFilters.softCategory ?
-              calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory) : 0;
-            const softFilterMatch = softCategoryMatches > 0;
+            // Calculate soft category matches for tier 2 results with boost weights
+            const matchResult = softFilters.softCategory ?
+              calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory, req.store.softCategoriesBoost) :
+              { count: 0, weightedScore: 0 };
+            const softFilterMatch = matchResult.count > 0;
 
             return {
               ...doc,
-              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+              rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, matchResult.weightedScore),
               softFilterMatch: softFilterMatch,
-              softCategoryMatches: softCategoryMatches,
+              softCategoryMatches: matchResult.count,
+              softCategoryWeightedScore: matchResult.weightedScore,
               exactMatchBonus: exactMatchBonus,
               softCategoryExpansion: true // All results are Tier 2
             };
@@ -3969,7 +3999,8 @@ app.get("/search/load-more", async (req, res) => {
             true, // useOrLogic
             syncMode === 'image',
             cleanedText,
-            [] // No exclusion since we're loading more
+            [], // No exclusion since we're loading more
+            req.store.softCategoriesBoost
           );
         } else {
           // Just category filter without soft categories
@@ -4411,7 +4442,8 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
         true, // useOrLogic
         false,
         cleanedText,
-        excludeIds // Exclude products already shown in Phase 1
+        excludeIds, // Exclude products already shown in Phase 1
+        req.store.softCategoriesBoost
       );
     } else {
       // Category filter only
@@ -4438,16 +4470,18 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
         const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
         const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-        // Calculate soft category matches using unified softFilters (from query extraction)
-        const softCategoryMatches = softFilters.softCategory ?
-          calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory) : 0;
-        const softFilterMatch = softCategoryMatches > 0;
+        // Calculate soft category matches with boost weights
+        const matchResult = softFilters.softCategory ?
+          calculateSoftCategoryMatches(doc?.softCategory, softFilters.softCategory, req.store.softCategoriesBoost) :
+          { count: 0, weightedScore: 0 };
+        const softFilterMatch = matchResult.count > 0;
 
         return {
           ...doc,
-          rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, softCategoryMatches),
+          rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, matchResult.weightedScore),
           softFilterMatch: softFilterMatch,
-          softCategoryMatches: softCategoryMatches,
+          softCategoryMatches: matchResult.count,
+          softCategoryWeightedScore: matchResult.weightedScore,
           exactMatchBonus: exactMatchBonus,
           fuzzyRank: ranks.fuzzyRank,
           vectorRank: ranks.vectorRank
@@ -4917,7 +4951,8 @@ app.post("/search", async (req, res) => {
           useOrLogic,
           [],
           query,
-          cleanedText
+          cleanedText,
+          req.store.softCategoriesBoost
         );
         
         const filterExecutionTime = Date.now() - filterStartTime;
@@ -4960,7 +4995,9 @@ app.post("/search", async (req, res) => {
           vectorLimit,
           useOrLogic,
           isImageModeWithSoftCategories,
-          cleanedText
+          cleanedText,
+          [],
+          req.store.softCategoriesBoost
         );
           
       } else {
@@ -5159,7 +5196,8 @@ app.post("/search", async (req, res) => {
                   true, // useOrLogic
                   false,
                   cleanedText,
-                  []
+                  [],
+                  req.store.softCategoriesBoost
                 );
               } else {
                 // Category filter only
@@ -6262,19 +6300,20 @@ app.post("/test-filter-only-detection", async (req, res) => {
 
 app.post("/test-multi-category-boosting", async (req, res) => {
   try {
-    const { productSoftCategories, querySoftCategories } = req.body;
-    
+    const { productSoftCategories, querySoftCategories, boostScores } = req.body;
+
     if (!productSoftCategories || !querySoftCategories) {
       return res.status(400).json({ error: "Both productSoftCategories and querySoftCategories are required" });
     }
-    
+
     console.log("=== MULTI-CATEGORY BOOSTING TEST ===");
     console.log("Product soft categories:", JSON.stringify(productSoftCategories));
     console.log("Query soft categories:", JSON.stringify(querySoftCategories));
-    
-    const matches = calculateSoftCategoryMatches(productSoftCategories, querySoftCategories);
-    const multiCategoryBoost = matches > 0 ? Math.pow(5, matches) * 2000 : 0;
-    const filterOnlyBoost = matches > 0 ? Math.pow(3, matches) * 2000 : 0;
+    console.log("Boost scores:", JSON.stringify(boostScores));
+
+    const matchResult = calculateSoftCategoryMatches(productSoftCategories, querySoftCategories, boostScores);
+    const multiCategoryBoost = matchResult.weightedScore > 0 ? Math.pow(5, matchResult.weightedScore) * 2000 : 0;
+    const filterOnlyBoost = matchResult.weightedScore > 0 ? Math.pow(3, matchResult.weightedScore) * 2000 : 0;
     
     // Example scores for different scenarios
     const baseRRFScore = 0.1; // Example base RRF score
@@ -6284,25 +6323,27 @@ app.post("/test-multi-category-boosting", async (req, res) => {
     res.json({
       productSoftCategories,
       querySoftCategories,
-      matchingCategories: matches,
+      boostScores,
+      matchingCategories: matchResult.count,
+      weightedScore: matchResult.weightedScore,
       boostCalculation: {
         standardSearch: {
           baseScore: baseRRFScore,
           multiCategoryBoost: multiCategoryBoost,
           finalScore: finalScore,
-          formula: `baseScore + Math.pow(5, ${matches}) * 2000`
+          formula: `baseScore + Math.pow(5, ${matchResult.weightedScore}) * 2000`
         },
         filterOnlySearch: {
           baseScore: 10000,
           multiCategoryBoost: filterOnlyBoost,
           finalScore: filterOnlyScore,
-          formula: `10000 + Math.pow(3, ${matches}) * 2000`
+          formula: `10000 + Math.pow(3, ${matchResult.weightedScore}) * 2000`
         }
       },
-      explanation: matches > 1 ? 
-        `Products matching ${matches} soft categories get exponentially higher scores than products matching only 1 category` :
-        matches === 1 ?
-        "Product matches 1 soft category - gets standard boost" :
+      explanation: matchResult.count > 1 ?
+        `Products matching ${matchResult.count} soft categories (weighted score: ${matchResult.weightedScore}) get exponentially higher scores than products matching only 1 category` :
+        matchResult.count === 1 ?
+        `Product matches 1 soft category (weighted score: ${matchResult.weightedScore}) - gets standard boost` :
         "Product matches no soft categories - no boost"
     });
     
