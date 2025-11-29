@@ -438,14 +438,19 @@ async function getStoreConfigByApiKey(apiKey) {
 
   // Intelligent fallback: use boosted soft categories if available, otherwise use original
   // This keeps the server context light by only loading one version
-  const softCategories = userDoc.credentials?.softCategoriesBoosted ||
-                         userDoc.credentials?.softCategories ||
-                         "";
+  let softCategories = "";
 
-  // Log which version is being used for debugging
   if (userDoc.credentials?.softCategoriesBoosted) {
-    console.log(`[CONFIG] Using boosted soft categories for ${userDoc.dbName}`);
+    // Convert object {category: boostScore} to array sorted by boost score (highest first)
+    const boostedObj = userDoc.credentials.softCategoriesBoosted;
+    softCategories = Object.entries(boostedObj)
+      .sort((a, b) => b[1] - a[1]) // Sort by boost score descending
+      .map(([category, _]) => category);
+
+    console.log(`[CONFIG] Using boosted soft categories for ${userDoc.dbName} (${softCategories.length} categories)`);
   } else if (userDoc.credentials?.softCategories) {
+    // Use original soft categories (already in correct format)
+    softCategories = userDoc.credentials.softCategories;
     console.log(`[CONFIG] Using original soft categories for ${userDoc.dbName} (no boost field)`);
   }
 
