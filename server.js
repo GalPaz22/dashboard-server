@@ -1793,13 +1793,87 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
   if (filters && Object.keys(filters).length > 0) {
     return false;
   }
-  
-  // PRIORITY: If high text match is present, force simple classification
+
+  // FIRST: Check for complex indicators BEFORE allowing hasHighTextMatch override
+  // This ensures descriptive/contextual queries remain COMPLEX even with partial text matches
+  const queryWords = query.toLowerCase().split(/\s+/);
+
+  // Multi-character complex indicators (reliable matching)
+  const multiCharIndicators = [
+    // Hebrew prepositions and connectors (multi-char only to avoid false positives)
+    'עבור', 'על', 'של', 'עם', 'ללא', 'בלי', 'אל', 'עד', 'או',
+
+    // Wine-specific complex terms (Hebrew)
+    'גפנים', 'בוגרות', 'בציר', 'מיושן', 'מאוחסן', 'יקב', 'כרם', 'טרואר',
+    'אלון', 'צרפתי', 'אמריקאי', 'בלגי', 'כבישה', 'תסיסה', 'יישון',
+
+    // Usage/pairing terms (Hebrew)
+    'לעל', 'האש', 'עוף', 'דגים', 'בשר', 'גבינות', 'פסטה', 'סלט', 'מרק',
+    'קינוח', 'חג', 'שבת', 'ארוחת', 'ערב', 'צהריים', 'בוקר',
+
+    // Seasonal/contextual terms (Hebrew)
+    'חורף', 'קיץ', 'אביב', 'סתיו', 'קר', 'חם', 'חמים', 'קרים', 'טריים',
+
+    // Taste descriptors (Hebrew)
+    'יבש', 'חריף', 'מתוק', 'קל', 'כבד', 'מלא', 'פירותי', 'פרחוני', 'עשבי',
+    'ווניל', 'שוקולד', 'עץ', 'בל', 'חלק', 'מחוספס', 'מאוזן', 'הרמוני',
+
+    // Quality/price terms (Hebrew)
+    'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד', 'נדיר', 'יוקרתי',
+    'במחיר', 'שווה', 'משתלם',
+
+    // English terms (for mixed queries)
+    'vintage', 'reserve', 'grand', 'premium', 'organic', 'biodynamic',
+    'single', 'estate', 'vineyard', 'barrel', 'aged', 'matured'
+  ];
+
+  // Single-letter prefixes (ל, ב, מ) - check only at word start for known patterns
+  const singleLetterPrefixes = ['ל', 'ב', 'מ'];
+
+  // Check for multi-character complex indicators
+  // For short indicators (2-3 chars), require exact word match to avoid false positives
+  // For longer indicators (4+ chars), allow substring matching
+  const hasMultiCharIndicators = queryWords.some(word =>
+    multiCharIndicators.some(indicator => {
+      if (indicator.length <= 3) {
+        // Short indicators: require exact match
+        return word === indicator;
+      } else {
+        // Longer indicators: allow substring matching
+        return word.includes(indicator) || indicator.includes(word);
+      }
+    })
+  );
+
+  // Check for single-letter prefixes at the start of words that form known patterns
+  const hasPrefixPattern = queryWords.some(word => {
+    if (word.length <= 2) return false; // Too short to be a prefix + meaningful word
+    for (const prefix of singleLetterPrefixes) {
+      if (word.startsWith(prefix)) {
+        const remainder = word.substring(1);
+        // Check if remainder matches any known complex indicator (contextual term)
+        if (multiCharIndicators.some(ind => remainder.includes(ind) || ind.includes(remainder))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  });
+
+  const hasComplexIndicators = hasMultiCharIndicators || hasPrefixPattern;
+
+  // If query has complex indicators and is longer than 2 words, it's COMPLEX regardless of text matches
+  if (hasComplexIndicators && queryWords.length >= 2) {
+    console.log(`[QUERY CLASSIFICATION] 🔴 COMPLEX indicators detected (${queryWords.length} words with context) → COMPLEX query (overriding hasHighTextMatch=${hasHighTextMatch})`);
+    return false;
+  }
+
+  // PRIORITY: If high text match is present AND no complex indicators, force simple classification
   if (hasHighTextMatch) {
-    console.log(`[QUERY CLASSIFICATION] ✅ High-quality text match detected (hasHighTextMatch=true) → SIMPLE query`);
+    console.log(`[QUERY CLASSIFICATION] ✅ High-quality text match detected (hasHighTextMatch=true, no complex indicators) → SIMPLE query`);
     return true;
   }
-  
+
   // TEXT-BASED CLASSIFICATION ONLY: Always perform text search to check for matches
   // If we find good text matches, it's a simple query (product name)
   // If no good matches, it's complex (descriptive/intent-based)
@@ -1874,43 +1948,6 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     ];
     
     const quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
-    
-    // FIRST: Check if this is clearly a COMPLEX descriptive query
-    const queryWords = query.toLowerCase().split(/\s+/);
-    const complexIndicators = [
-      // Hebrew prepositions and connectors
-      'ל', 'עבור', 'על', 'ב', 'של', 'עם', 'ללא', 'בלי', 'אל', 'מ', 'עד', 'או',
-
-      // Wine-specific complex terms (Hebrew)
-      'גפנים', 'בוגרות', 'בציר', 'מיושן', 'מאוחסן', 'יקב', 'כרם', 'טרואר',
-      'אלון', 'צרפתי', 'אמריקאי', 'בלגי', 'כבישה', 'תסיסה', 'יישון',
-
-      // Usage/pairing terms (Hebrew)
-      'לעל', 'האש', 'עוף', 'דגים', 'בשר', 'גבינות', 'פסטה', 'סלט', 'מרק',
-      'קינוח', 'חג', 'שבת', 'ארוחת', 'ערב', 'צהריים', 'בוקר',
-
-      // Taste descriptors (Hebrew)
-      'יבש', 'חריף', 'מתוק', 'קל', 'כבד', 'מלא', 'פירותי', 'פרחוני', 'עשבי',
-      'ווניל', 'שוקולד', 'עץ', 'בל', 'חלק', 'מחוספס', 'מאוזן', 'הרמוני',
-
-      // Quality/price terms (Hebrew)
-      'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד', 'נדיר', 'יוקרתי',
-      'זול', 'במחיר', 'שווה', 'משתלם',
-
-      // English terms (for mixed queries)
-      'vintage', 'reserve', 'grand', 'premium', 'organic', 'biodynamic',
-      'single', 'estate', 'vineyard', 'barrel', 'aged', 'matured'
-    ];
-
-    const hasComplexIndicators = queryWords.some(word =>
-      complexIndicators.some(indicator => word.includes(indicator) || indicator.includes(word))
-    );
-
-    // If query has complex indicators and is longer than 2 words, it's definitely complex
-    if (hasComplexIndicators && queryWords.length >= 2) {
-      console.log(`[QUERY CLASSIFICATION] 🔴 COMPLEX indicators detected (${queryWords.length} words with context) → COMPLEX query`);
-      return false;
-    }
 
     // If query is very long (>4 words), likely complex regardless of matches
     if (queryWords.length > 4) {
