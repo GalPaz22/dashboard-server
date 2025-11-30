@@ -636,7 +636,7 @@ function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewT
 }
 
 // Ultra-fast filter-only pipeline - optimized for speed and completeness
-const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic = false) => {
+const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic = false, limit = 200) => {
   const pipeline = [];
 
   // Build compound match in single stage for better performance
@@ -725,6 +725,9 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     } 
   });
 
+  // Limit results to reduce processing latency
+  pipeline.push({ $limit: limit });
+
   // Project only needed fields to reduce network overhead
   pipeline.push({
     $project: {
@@ -743,7 +746,7 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     }
   });
 
-  console.log(`[FILTER-ONLY] Pipeline stages: ${pipeline.length}, Match conditions: ${matchConditions.length}`);
+  console.log(`[FILTER-ONLY] Pipeline stages: ${pipeline.length}, Match conditions: ${matchConditions.length}, Limit: ${limit}`);
   return pipeline;
 };
 // Fast filter-only execution function
@@ -755,15 +758,16 @@ async function executeOptimizedFilterOnlySearch(
   deliveredIds = [],
   query = '',
   cleanedText = '',
-  boostScores = null
+  boostScores = null,
+  limit = 200
 ) {
   console.log("[FILTER-ONLY] Executing optimized filter-only search");
-  
+
   const startTime = Date.now();
-  
+
   try {
-    // Use optimized pipeline
-    const pipeline = buildOptimizedFilterOnlyPipeline(hardFilters, softFilters, useOrLogic);
+    // Use optimized pipeline with user-specified limit to reduce latency
+    const pipeline = buildOptimizedFilterOnlyPipeline(hardFilters, softFilters, useOrLogic, limit);
     
     // Execute with performance optimizations
     const results = await collection.aggregate(pipeline, {
@@ -3357,12 +3361,17 @@ async function executeExplicitSoftCategorySearch(
   const filteredResults = deliveredIds && deliveredIds.length > 0
     ? finalCombinedResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
     : finalCombinedResults;
-  
+
   if (deliveredIds && deliveredIds.length > 0) {
     console.log(`Filtered out ${finalCombinedResults.length - filteredResults.length} already-delivered products`);
   }
-  
-  return filteredResults;
+
+  // Limit early to reduce processing latency in subsequent operations
+  // Use searchLimit * 3 to provide enough variety while reducing overhead
+  const earlyLimitedResults = filteredResults.slice(0, searchLimit * 3);
+  console.log(`[SOFT SEARCH] Limiting results from ${filteredResults.length} to ${earlyLimitedResults.length} (searchLimit * 3) to reduce latency`);
+
+  return earlyLimitedResults;
 }
 
 /* =========================================================== *\
@@ -5034,11 +5043,12 @@ app.post("/search", async (req, res) => {
           [],
           query,
           cleanedText,
-          req.store.softCategoriesBoost
+          req.store.softCategoriesBoost,
+          searchLimit * 3 // Limit to reduce latency while maintaining quality
         );
         
         const filterExecutionTime = Date.now() - filterStartTime;
-        console.log(`[${requestId}] Filter-only results: ${combinedResults.length} products in ${filterExecutionTime}ms (ALL matching products returned)`);
+        console.log(`[${requestId}] Filter-only results: ${combinedResults.length} products in ${filterExecutionTime}ms (limited to ${searchLimit * 3} for optimal latency)`);
         
         // Set reorderedData to maintain consistent response structure
         reorderedData = combinedResults.slice(0, 100).map((result) => ({ 
@@ -5125,8 +5135,8 @@ app.post("/search", async (req, res) => {
           const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
                       vectorResults.find((d) => d._id.toString() === id);
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-            return { 
-              ...doc, 
+            return {
+              ...doc,
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
               softFilterMatch: false,
               softCategoryMatches: 0,
@@ -5135,7 +5145,8 @@ app.post("/search", async (req, res) => {
               vectorRank: ranks.vectorRank // Store for tier detection
             };
         })
-        .sort((a, b) => b.rrf_score - a.rrf_score);
+        .sort((a, b) => b.rrf_score - a.rrf_score)
+        .slice(0, searchLimit * 3); // Limit early to reduce processing latency while keeping quality
         
       // Log tier 1 text match results for standard search (including near-exact matches)
       const tier1Results = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 8000);
