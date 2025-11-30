@@ -441,9 +441,18 @@ async function getStoreConfigByApiKey(apiKey) {
   let softCategories = "";
   let softCategoriesBoost = null; // Store boost scores for weighted ranking
 
+  // Debug logging to see what's in the database
+  console.log(`[CONFIG] Loading config for ${userDoc.dbName}`);
+  console.log(`[CONFIG] Has softCategoriesBoosted: ${!!userDoc.credentials?.softCategoriesBoosted}`);
+  console.log(`[CONFIG] Has softCategories: ${!!userDoc.credentials?.softCategories}`);
+
   if (userDoc.credentials?.softCategoriesBoosted) {
     // Convert object {category: boostScore} to array sorted by boost score (highest first)
     const boostedObj = userDoc.credentials.softCategoriesBoosted;
+
+    console.log(`[CONFIG] ✅ BOOSTED MODE - Found ${Object.keys(boostedObj).length} boosted categories`);
+    console.log(`[CONFIG] Sample boost scores:`, JSON.stringify(Object.entries(boostedObj).slice(0, 5)));
+
     softCategories = Object.entries(boostedObj)
       .sort((a, b) => b[1] - a[1]) // Sort by boost score descending
       .map(([category, _]) => category);
@@ -451,11 +460,15 @@ async function getStoreConfigByApiKey(apiKey) {
     // Preserve boost scores for weighted ranking in search pipeline
     softCategoriesBoost = boostedObj;
 
-    console.log(`[CONFIG] Using boosted soft categories for ${userDoc.dbName} (${softCategories.length} categories with boost weights)`);
+    console.log(`[CONFIG] 🚀 Using BOOSTED soft categories for ${userDoc.dbName} (${softCategories.length} categories with weighted scores)`);
+    console.log(`[CONFIG] Top boosted categories:`, softCategories.slice(0, 5));
   } else if (userDoc.credentials?.softCategories) {
     // Use original soft categories (already in correct format)
     softCategories = userDoc.credentials.softCategories;
-    console.log(`[CONFIG] Using original soft categories for ${userDoc.dbName} (no boost field)`);
+    const categoryArray = Array.isArray(softCategories) ? softCategories : softCategories.split(',');
+    console.log(`[CONFIG] ⚠️  Using ORIGINAL soft categories for ${userDoc.dbName} (no boost field) - ${categoryArray.length} categories`);
+  } else {
+    console.log(`[CONFIG] ❌ No soft categories found for ${userDoc.dbName}`);
   }
 
   return {
