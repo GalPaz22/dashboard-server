@@ -784,7 +784,7 @@ async function executeOptimizedFilterOnlySearch(
         ...doc,
         rrf_score: 10000 - index + multiCategoryBoost, // High base score with multi-category boost
         softFilterMatch: !!(softFilters && softFilters.softCategory),
-        softCategoryMatches: softCategoryMatches,
+        softCategoryMatches: matchResult.count,
         exactMatchBonus: exactMatchBonus, // Store for sorting
         simpleSearch: true,
         filterOnly: true
@@ -2321,7 +2321,6 @@ function shouldUseOrLogicForCategories(query, categories) {
   
   return orScore > andScore;
 }
-
 // Function to calculate number of soft category matches with optional boost weighting
 // Returns: { count: number, weightedScore: number }
 function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories, boostScores = null) {
@@ -3854,6 +3853,7 @@ app.get("/search/load-more", async (req, res) => {
         
         if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
           // Use soft category search
+          console.log(`[${requestId}] TIER-2 SOFT CATEGORY SEARCH: hardFilters=${JSON.stringify(categoryFilteredHardFilters)}, softFilters=${JSON.stringify(extractedCategories.softCategories)}`);
           categoryFilteredResults = await executeExplicitSoftCategorySearch(
             collection,
             cleanedText,
@@ -3869,6 +3869,19 @@ app.get("/search/load-more", async (req, res) => {
             [],
             req.store.softCategoriesBoost
           );
+
+          // Debug: Check categories of results
+          const categoryCounts = {};
+          categoryFilteredResults.slice(0, 10).forEach(product => {
+            if (product.category) {
+              const cats = Array.isArray(product.category) ? product.category : [product.category];
+              cats.forEach(cat => {
+                categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+              });
+            }
+          });
+          console.log(`[${requestId}] TIER-2 RESULTS: First 10 products category distribution:`, categoryCounts);
+
         } else {
           // Just category filter without soft categories
           const [fuzzyRes, vectorRes] = await Promise.all([
@@ -4670,20 +4683,76 @@ app.post("/search", async (req, res) => {
         query, // We don't have cleanedTextForSearch here yet, so use query
         query,
         initialFilters, // No hard filters yet
-        5, // Limit to a small number for performance
+        10, // Increased limit to get more diverse matches
         false,
         false,
         [],
         earlySoftFilters // Include early soft filters for context
       );
       const preliminaryTextSearchResults = await collection.aggregate(preliminaryTextSearchPipeline).toArray();
-      
-      const highQualityPreliminaryMatches = preliminaryTextSearchResults.filter(doc => {
-        const bonus = getExactMatchBonus(doc.name, query, query);
-        return bonus >= 1000; // Threshold for a strong text match
-      });
-      hasHighTextMatch = highQualityPreliminaryMatches.length > 0;
-      console.log(`[${requestId}] Preliminary text search: ${preliminaryTextSearchResults.length} results, hasHighTextMatch: ${hasHighTextMatch}`);
+
+      // Analyze query structure to determine if text match should override classification
+      const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 1);
+      const queryWordCount = queryWords.length;
+
+      // For single-word queries, any high-quality match forces SIMPLE
+      if (queryWordCount === 1) {
+        const highQualityPreliminaryMatches = preliminaryTextSearchResults.filter(doc => {
+          const bonus = getExactMatchBonus(doc.name, query, query);
+          return bonus >= 1000;
+        });
+        hasHighTextMatch = highQualityPreliminaryMatches.length > 0;
+        console.log(`[${requestId}] Single-word query: hasHighTextMatch=${hasHighTextMatch}`);
+      }
+      // For multi-word queries (2+ words), require more comprehensive matching
+      else if (queryWordCount >= 2) {
+        const highQualityPreliminaryMatches = preliminaryTextSearchResults.filter(doc => {
+          const bonus = getExactMatchBonus(doc.name, query, query);
+          return bonus >= 1000;
+        });
+
+        if (highQualityPreliminaryMatches.length > 0) {
+          // Check if this is a near-exact product name match (high bonus for entire query)
+          const veryHighMatches = highQualityPreliminaryMatches.filter(doc => {
+            const bonus = getExactMatchBonus(doc.name, query, query);
+            return bonus >= 50000; // Very high bonus indicates near-exact match
+          });
+
+          if (veryHighMatches.length > 0) {
+            hasHighTextMatch = true;
+            console.log(`[${requestId}] Multi-word query with near-exact product match: hasHighTextMatch=true`);
+          } else {
+            // Check word coverage - how many query words appear in the matched products
+            let totalWordsMatched = 0;
+            let bestWordCoverage = 0;
+
+            highQualityPreliminaryMatches.forEach(doc => {
+              const productWords = doc.name.toLowerCase().split(/\s+/);
+              const wordsMatched = queryWords.filter(qWord =>
+                productWords.some(pWord => pWord.includes(qWord) || qWord.includes(pWord))
+              ).length;
+              const coverage = wordsMatched / queryWordCount;
+              bestWordCoverage = Math.max(bestWordCoverage, coverage);
+              totalWordsMatched += wordsMatched;
+            });
+
+            const averageCoverage = totalWordsMatched / (highQualityPreliminaryMatches.length * queryWordCount);
+
+            // Only force SIMPLE if most query words are covered OR very high coverage
+            if (bestWordCoverage >= 0.8 || averageCoverage >= 0.6) {
+              hasHighTextMatch = true;
+              console.log(`[${requestId}] Multi-word query with high word coverage (${(bestWordCoverage * 100).toFixed(1)}%): hasHighTextMatch=true`);
+            } else {
+              hasHighTextMatch = false;
+              console.log(`[${requestId}] Multi-word query with low word coverage (${(bestWordCoverage * 100).toFixed(1)}%): keeping COMPLEX classification`);
+            }
+          }
+        } else {
+          hasHighTextMatch = false;
+        }
+      }
+
+      console.log(`[${requestId}] Preliminary text search: ${preliminaryTextSearchResults.length} results, queryWords=${queryWordCount}, hasHighTextMatch: ${hasHighTextMatch}`);
 
     } catch (error) {
       console.warn(`[${requestId}] Error during preliminary text search for high match detection:`, error.message);
