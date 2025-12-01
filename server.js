@@ -3409,7 +3409,13 @@ async function executeExplicitSoftCategorySearch(
     hardFilteredResults = hardFilteredResults.filter(product => {
       // Check category filter
       if (hardFilters.category && hardFilters.category.length > 0) {
-        if (!product.category || !hardFilters.category.includes(product.category)) {
+        if (!product.category) {
+          return false; // Product has no category - exclude it
+        }
+        // Handle both string and array categories
+        const productCategories = Array.isArray(product.category) ? product.category : [product.category];
+        const hasMatch = productCategories.some(cat => hardFilters.category.includes(cat));
+        if (!hasMatch) {
           return false; // Product doesn't match hard category - exclude it
         }
       }
