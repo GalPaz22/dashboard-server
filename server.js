@@ -3393,14 +3393,40 @@ async function executeExplicitSoftCategorySearch(
   ];
 
   console.log(`Total combined results: ${finalCombinedResults.length} (${textMatchesToAdd.length} text matches + ${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
-  
+
+  // FINAL VALIDATION: Ensure ALL results match hard category filters
+  // This is critical for queries like "red wine from portugal" where "red wine" is hard category
+  let hardFilteredResults = finalCombinedResults;
+  if (hardFilters && (hardFilters.category || hardFilters.type)) {
+    const beforeCount = hardFilteredResults.length;
+    hardFilteredResults = hardFilteredResults.filter(product => {
+      // Check category filter
+      if (hardFilters.category && hardFilters.category.length > 0) {
+        if (!product.category || !hardFilters.category.includes(product.category)) {
+          return false; // Product doesn't match hard category - exclude it
+        }
+      }
+      // Check type filter
+      if (hardFilters.type && hardFilters.type.length > 0) {
+        if (!product.type || !hardFilters.type.includes(product.type)) {
+          return false; // Product doesn't match hard type - exclude it
+        }
+      }
+      return true; // Product matches all hard filters
+    });
+    const afterCount = hardFilteredResults.length;
+    if (beforeCount !== afterCount) {
+      console.log(`[HARD FILTER VALIDATION] Filtered out ${beforeCount - afterCount} products that didn't match hard filters (category: ${JSON.stringify(hardFilters.category)}, type: ${JSON.stringify(hardFilters.type)})`);
+    }
+  }
+
   // Filter out already-delivered products
   const filteredResults = deliveredIds && deliveredIds.length > 0
-    ? finalCombinedResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
-    : finalCombinedResults;
+    ? hardFilteredResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
+    : hardFilteredResults;
 
   if (deliveredIds && deliveredIds.length > 0) {
-    console.log(`Filtered out ${finalCombinedResults.length - filteredResults.length} already-delivered products`);
+    console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
 
   // Limit early to reduce processing latency in subsequent operations
@@ -3745,7 +3771,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       price: result.price,
       image: result.image,
       url: result.url,
-      highlight: hasSoftFilters ? !!result.softFilterMatch : false,
+      highlight: (result.exactMatchBonus || 0) >= 20000, // Only highlight high-quality text matches
       type: result.type,
       specialSales: result.specialSales,
       onSale: !!(result.specialSales && Array.isArray(result.specialSales) && result.specialSales.length > 0),
@@ -4328,7 +4354,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           specialSales: product.specialSales,
           onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
           ItemID: product.ItemID,
-          highlight: index === 0, // highlight top vector result
+          highlight: false, // Vector results are semantic matches, not textual
           softFilterMatch: false,
           softCategoryMatches: 0,
           simpleSearch: false,
@@ -5707,9 +5733,9 @@ app.post("/search", async (req, res) => {
         const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
 
         // Highlighting logic for simple queries:
-        // - Simple queries with soft filters: highlight soft filter matches
-        // - Simple queries without soft filters: no highlighting
-        const isHighlighted = hasSoftFilters ? !!r.softFilterMatch : false;
+        // - Only highlight high-quality text matches (exactMatchBonus >= 20000)
+        // - Do NOT highlight soft filter matches or semantic matches
+        const isHighlighted = isHighTextMatch;
 
         return {
           _id: r._id.toString(),
