@@ -583,9 +583,16 @@ function isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText) 
 
 // Enhanced filter-only detection for the main search endpoint
 function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQuery) {
+  // IMPORTANT: Complex queries should NEVER use filter-only path
+  // They require LLM reordering to understand semantic intent
+  if (isComplexQuery) {
+    console.log("[FILTER-ONLY] Complex query detected - skipping filter-only path to enable LLM reordering");
+    return false;
+  }
+
   const hasHardFilters = hardFilters && Object.keys(hardFilters).length > 0;
   const hasSoftFilters = softFilters && softFilters.softCategory && softFilters.softCategory.length > 0;
-  
+
   // Check if this is primarily a filter-based query (high filter coverage)
   const isPrimarilyFilterBased = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
 
