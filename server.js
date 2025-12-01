@@ -3393,14 +3393,40 @@ async function executeExplicitSoftCategorySearch(
   ];
 
   console.log(`Total combined results: ${finalCombinedResults.length} (${textMatchesToAdd.length} text matches + ${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
-  
+
+  // FINAL VALIDATION: Ensure ALL results match hard category filters
+  // This is critical for queries like "red wine from portugal" where "red wine" is hard category
+  let hardFilteredResults = finalCombinedResults;
+  if (hardFilters && (hardFilters.category || hardFilters.type)) {
+    const beforeCount = hardFilteredResults.length;
+    hardFilteredResults = hardFilteredResults.filter(product => {
+      // Check category filter
+      if (hardFilters.category && hardFilters.category.length > 0) {
+        if (!product.category || !hardFilters.category.includes(product.category)) {
+          return false; // Product doesn't match hard category - exclude it
+        }
+      }
+      // Check type filter
+      if (hardFilters.type && hardFilters.type.length > 0) {
+        if (!product.type || !hardFilters.type.includes(product.type)) {
+          return false; // Product doesn't match hard type - exclude it
+        }
+      }
+      return true; // Product matches all hard filters
+    });
+    const afterCount = hardFilteredResults.length;
+    if (beforeCount !== afterCount) {
+      console.log(`[HARD FILTER VALIDATION] Filtered out ${beforeCount - afterCount} products that didn't match hard filters (category: ${JSON.stringify(hardFilters.category)}, type: ${JSON.stringify(hardFilters.type)})`);
+    }
+  }
+
   // Filter out already-delivered products
   const filteredResults = deliveredIds && deliveredIds.length > 0
-    ? finalCombinedResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
-    : finalCombinedResults;
+    ? hardFilteredResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
+    : hardFilteredResults;
 
   if (deliveredIds && deliveredIds.length > 0) {
-    console.log(`Filtered out ${finalCombinedResults.length - filteredResults.length} already-delivered products`);
+    console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
 
   // Limit early to reduce processing latency in subsequent operations
