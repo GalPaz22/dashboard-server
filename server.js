@@ -592,7 +592,7 @@ function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewT
 
   const hasHardFilters = hardFilters && Object.keys(hardFilters).length > 0;
   const hasSoftFilters = softFilters && softFilters.softCategory && softFilters.softCategory.length > 0;
-
+  
   // Check if this is primarily a filter-based query (high filter coverage)
   const isPrimarilyFilterBased = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
 
@@ -769,9 +769,9 @@ async function executeOptimizedFilterOnlySearch(
   limit = 200
 ) {
   console.log("[FILTER-ONLY] Executing optimized filter-only search");
-
+  
   const startTime = Date.now();
-
+  
   try {
     // Use optimized pipeline with user-specified limit to reduce latency
     const pipeline = buildOptimizedFilterOnlyPipeline(hardFilters, softFilters, useOrLogic, limit);
@@ -797,10 +797,10 @@ async function executeOptimizedFilterOnlySearch(
       const matchResult = softFilters && softFilters.softCategory ?
         calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, boostScores) :
         { count: 0, weightedScore: 0 };
-
+      
       // Calculate text match bonus if query is provided
       const exactMatchBonus = query ? getExactMatchBonus(doc.name, query, cleanedText) : 0;
-
+      
       // Base score with exponential boost - use weightedScore to respect boost values
       const multiCategoryBoost = matchResult.weightedScore > 0 ? Math.pow(5, matchResult.weightedScore) * 2000 : 0;
       
@@ -1466,7 +1466,7 @@ async function classifyQueryComplexity(query, context, hasHighTextMatch = false,
         console.log(`[HIGH TEXT MATCH] Forcing SIMPLE classification for query: "${query}"`);
         return true;
       }
-
+      
       // Check circuit breaker - use fallback if AI is unavailable
       if (aiCircuitBreaker.shouldBypassAI()) {
         console.log(`[AI BYPASS] Circuit breaker open, using fallback classification for: "${query}"`);
@@ -1880,7 +1880,7 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     console.log(`[QUERY CLASSIFICATION] ✅ High-quality text match detected (hasHighTextMatch=true, no complex indicators) → SIMPLE query`);
     return true;
   }
-
+  
   // TEXT-BASED CLASSIFICATION ONLY: Always perform text search to check for matches
   // If we find good text matches, it's a simple query (product name)
   // If no good matches, it's complex (descriptive/intent-based)
@@ -2386,10 +2386,10 @@ function shouldUseOrLogicForCategories(query, categories) {
 // Returns: { count: number, weightedScore: number }
 function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories, boostScores = null) {
   if (!productSoftCategories || !querySoftCategories) return { count: 0, weightedScore: 0 };
-
+  
   const productCats = Array.isArray(productSoftCategories) ? productSoftCategories : [productSoftCategories];
   const queryCats = Array.isArray(querySoftCategories) ? querySoftCategories : [querySoftCategories];
-
+  
   const matchedCategories = queryCats.filter(cat => productCats.includes(cat));
   const count = matchedCategories.length;
 
@@ -2407,16 +2407,16 @@ function calculateSoftCategoryMatches(productSoftCategories, querySoftCategories
 // Enhanced RRF calculation that accounts for soft filter boosting and exact matches
 // softCategoryMatches can be a number (backward compatible) or weighted score from boost
 function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, keywordMatchBonus = 0, exactMatchBonus = 0, softCategoryMatches = 0, VECTOR_WEIGHT = 1, FUZZY_WEIGHT = 1, RRF_CONSTANT = 60) {
-  const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) +
+  const baseScore = FUZZY_WEIGHT * (1 / (RRF_CONSTANT + fuzzyRank)) + 
                    VECTOR_WEIGHT * (1 / (RRF_CONSTANT + vectorRank));
-
+  
   // Add soft filter boost directly - the value is controlled at the call site
   const softBoost = softFilterBoost;
-
+  
   // Progressive boosting: uses weighted score if provided (respects boost values)
   // Higher boost scores (like 2 for "french") will rank higher than lower scores (like 1 for "fruity")
   const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 20000 : 0;
-
+  
   // Add keyword match bonus for strong text matches
   // Add MASSIVE exact match bonus to ensure exact matches appear first
   return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
@@ -2513,7 +2513,7 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
         const wordSimilarity = calculateStringSimilarity(queryLower, word);
         // LOWER threshold to 0.75 to catch "פלאם" (4 chars) vs "פלם" (3 chars) - distance 1, length 4 -> 0.75
         // This ensures slight misspellings or variants get the bonus
-        if (wordSimilarity >= 0.75) {
+        if (wordSimilarity >= 0.75) { 
           return 12000; // High bonus for fuzzy word match
         }
       }
@@ -3118,10 +3118,10 @@ function isComplexQuery(query, filters, cleanedHebrewText) {
 \* =========================================================== */
 async function executeExplicitSoftCategorySearch(
   collection,
-  cleanedTextForSearch,
-  query,
-  hardFilters,
-  softFilters,
+  cleanedTextForSearch, 
+  query, 
+  hardFilters, 
+  softFilters, 
   queryEmbedding,
   searchLimit,
   vectorLimit,
@@ -3132,7 +3132,7 @@ async function executeExplicitSoftCategorySearch(
   boostScores = null
 ) {
   console.log("Executing explicit soft category search");
-
+  
   // Use original text for exact match checks, filtered text for search
   const cleanedTextForExactMatch = originalCleanedText || cleanedTextForSearch;
 
@@ -3228,7 +3228,7 @@ async function executeExplicitSoftCategorySearch(
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedTextForExactMatch);
       const matchResult = calculateSoftCategoryMatches(data.doc.softCategory, softFilters.softCategory, boostScores);
-
+      
       // Centralized score calculation - use weightedScore to respect boost values
       const score = calculateEnhancedRRFScore(
         data.fuzzyRank,
@@ -3398,7 +3398,7 @@ async function executeExplicitSoftCategorySearch(
     ...nonSoftCategoryResults,
     ...sweepOnlyProducts
   ];
-
+  
   console.log(`Total combined results: ${finalCombinedResults.length} (${textMatchesToAdd.length} text matches + ${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
 
   // FINAL VALIDATION: Ensure ALL results match hard category filters
@@ -3432,12 +3432,12 @@ async function executeExplicitSoftCategorySearch(
       console.log(`[HARD FILTER VALIDATION] Filtered out ${beforeCount - afterCount} products that didn't match hard filters (category: ${JSON.stringify(hardFilters.category)}, type: ${JSON.stringify(hardFilters.type)})`);
     }
   }
-
+  
   // Filter out already-delivered products
   const filteredResults = deliveredIds && deliveredIds.length > 0
     ? hardFilteredResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
     : hardFilteredResults;
-
+  
   if (deliveredIds && deliveredIds.length > 0) {
     console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
@@ -3967,6 +3967,99 @@ app.get("/search/load-more", async (req, res) => {
             [],
             req.store.softCategoriesBoost
           );
+
+          // 🆕 ENHANCEMENT: Add product embedding similarity search to tier 2
+          // If tier 1 found high-quality textual matches, use their embeddings to find similar products
+          if (extractedCategories.topProductEmbeddings && extractedCategories.topProductEmbeddings.length > 0) {
+            console.log(`[${requestId}] 🧬 TIER-2 ENHANCEMENT: Finding products similar to ${extractedCategories.topProductEmbeddings.length} tier-1 textual matches`);
+            
+            // For each seed product, run ANN search using its embedding
+            const similaritySearches = extractedCategories.topProductEmbeddings.map(async (productEmbed) => {
+              // Build filter for ANN search
+              const annFilter = {
+                $and: [
+                  { stockStatus: "instock" },
+                  // Exclude the seed product itself
+                  { _id: { $ne: productEmbed._id } }
+                ]
+              };
+              
+              // Apply hard category filter if present
+              if (categoryFilteredHardFilters.category) {
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
+                  ? categoryFilteredHardFilters.category 
+                  : [categoryFilteredHardFilters.category];
+                annFilter.$and.push({ category: { $in: categoryArray } });
+              }
+              
+              const pipeline = [
+                {
+                  $vectorSearch: {
+                    index: "vector_index",
+                    path: "embedding",
+                    queryVector: productEmbed.embedding,
+                    numCandidates: Math.max(vectorLimit * 2, 100),
+                    exact: false,
+                    limit: 20, // Top 20 similar per seed
+                    filter: annFilter
+                  }
+                },
+                {
+                  $addFields: {
+                    seedProductId: productEmbed._id,
+                    seedProductName: productEmbed.name,
+                    similaritySource: "product_embedding"
+                  }
+                }
+              ];
+              
+              return collection.aggregate(pipeline).toArray();
+            });
+
+            const allSimilarityResults = await Promise.all(similaritySearches);
+            const flattenedSimilarityResults = allSimilarityResults.flat();
+            
+            console.log(`[${requestId}] 🧬 Found ${flattenedSimilarityResults.length} products via embedding similarity`);
+
+            // Merge similarity results with soft category results
+            const resultMap = new Map();
+            
+            // First pass: Add all soft category results
+            categoryFilteredResults.forEach(product => {
+              resultMap.set(product._id.toString(), {
+                ...product,
+                sources: ['soft_category'],
+                similarityBoost: 0
+              });
+            });
+
+            // Second pass: Add or merge similarity results
+            flattenedSimilarityResults.forEach(product => {
+              const id = product._id.toString();
+              if (resultMap.has(id)) {
+                // Product found via BOTH methods - highest confidence
+                const existing = resultMap.get(id);
+                existing.sources.push('product_similarity');
+                existing.similarityBoost = 5000; // Dual-source boost
+                existing.seedProductName = product.seedProductName;
+              } else {
+                // New product from similarity only
+                resultMap.set(id, {
+                  ...product,
+                  sources: ['product_similarity'],
+                  similarityBoost: 2500, // Similarity-only boost
+                  softFilterMatch: false,
+                  softCategoryMatches: 0
+                });
+              }
+            });
+
+            // Convert back to array
+            categoryFilteredResults = Array.from(resultMap.values());
+            
+            const dualSourceCount = categoryFilteredResults.filter(p => p.sources && p.sources.length > 1).length;
+            console.log(`[${requestId}] 🧬 TIER-2 MERGED: ${categoryFilteredResults.length} total (${dualSourceCount} via both methods)`);
+          }
 
           // Debug: Check categories of results
           const categoryCounts = {};
@@ -5211,8 +5304,8 @@ app.post("/search", async (req, res) => {
           const doc = fuzzyResults.find((d) => d._id.toString() === id) ||
                       vectorResults.find((d) => d._id.toString() === id);
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-            return {
-              ...doc,
+            return { 
+              ...doc, 
               rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
               softFilterMatch: false,
               softCategoryMatches: 0,
@@ -5848,7 +5941,46 @@ app.post("/search", async (req, res) => {
       }
 
       const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
-
+      
+      // 🆕 ENHANCEMENT: Extract product embeddings from high-quality textual matches for tier-2
+      // Find products with very high exactMatchBonus (exact/near-exact product name matches)
+      const highQualityTextMatches = combinedResults
+        .filter(p => (p.exactMatchBonus || 0) >= 50000) // Exact/near-exact matches only
+        .slice(0, 3); // Top 3 textual matches
+      
+      if (highQualityTextMatches.length > 0) {
+        console.log(`[${requestId}] 🧬 Found ${highQualityTextMatches.length} high-quality textual matches (bonus >= 50k)`);
+        console.log(`[${requestId}] 🧬 Products:`, highQualityTextMatches.map(p => ({ 
+          name: p.name, 
+          bonus: p.exactMatchBonus 
+        })));
+        
+        // Fetch full product documents with embeddings from database
+        try {
+          const productIds = highQualityTextMatches.map(p => p._id);
+          const productsWithEmbeddings = await collection.find({
+            _id: { $in: productIds },
+            embedding: { $exists: true, $ne: null }
+          }).toArray();
+          
+          if (productsWithEmbeddings.length > 0) {
+            // Store embeddings in tier-2 token for similarity search
+            extractedFromLLM.topProductEmbeddings = productsWithEmbeddings.map(p => ({
+              _id: p._id,
+              name: p.name,
+              embedding: p.embedding
+            }));
+            console.log(`[${requestId}] 🧬 Extracted ${productsWithEmbeddings.length} embeddings for tier-2 similarity`);
+          } else {
+            console.log(`[${requestId}] 🧬 Warning: No embeddings found for textual matches`);
+          }
+        } catch (embedError) {
+          console.error(`[${requestId}] 🧬 Error fetching embeddings:`, embedError.message);
+        }
+      } else {
+        console.log(`[${requestId}] ℹ️ No high-quality textual matches (bonus >= 50k) - tier-2 will use soft categories only`);
+      }
+      
       // Keep hard categories from tier1 (top 4 LLM products) for tier2 search
       console.log(`[${requestId}] ℹ️ Complex query: Keeping hard categories from tier1 LLM products for tier2 search`);
 
@@ -6468,11 +6600,11 @@ app.post("/test-filter-only-detection", async (req, res) => {
 app.post("/test-multi-category-boosting", async (req, res) => {
   try {
     const { productSoftCategories, querySoftCategories, boostScores } = req.body;
-
+    
     if (!productSoftCategories || !querySoftCategories) {
       return res.status(400).json({ error: "Both productSoftCategories and querySoftCategories are required" });
     }
-
+    
     console.log("=== MULTI-CATEGORY BOOSTING TEST ===");
     console.log("Product soft categories:", JSON.stringify(productSoftCategories));
     console.log("Query soft categories:", JSON.stringify(querySoftCategories));
