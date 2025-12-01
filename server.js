@@ -3745,7 +3745,7 @@ app.get("/search/auto-load-more", async (req, res) => {
       price: result.price,
       image: result.image,
       url: result.url,
-      highlight: hasSoftFilters ? !!result.softFilterMatch : false,
+      highlight: (result.exactMatchBonus || 0) >= 20000, // Only highlight high-quality text matches
       type: result.type,
       specialSales: result.specialSales,
       onSale: !!(result.specialSales && Array.isArray(result.specialSales) && result.specialSales.length > 0),
@@ -4328,7 +4328,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           specialSales: product.specialSales,
           onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
           ItemID: product.ItemID,
-          highlight: index === 0, // highlight top vector result
+          highlight: false, // Vector results are semantic matches, not textual
           softFilterMatch: false,
           softCategoryMatches: 0,
           simpleSearch: false,
@@ -5707,9 +5707,9 @@ app.post("/search", async (req, res) => {
         const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
 
         // Highlighting logic for simple queries:
-        // - Simple queries with soft filters: highlight soft filter matches
-        // - Simple queries without soft filters: no highlighting
-        const isHighlighted = hasSoftFilters ? !!r.softFilterMatch : false;
+        // - Only highlight high-quality text matches (exactMatchBonus >= 20000)
+        // - Do NOT highlight soft filter matches or semantic matches
+        const isHighlighted = isHighTextMatch;
 
         return {
           _id: r._id.toString(),
