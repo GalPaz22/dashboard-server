@@ -4303,7 +4303,54 @@ app.get("/search/load-more", async (req, res) => {
     })).toString('base64') : null;
     
     console.log(`[${requestId}] Returning ${paginatedResults.length} products (${startIndex}-${endIndex} of ${cachedResults.length})`);
-    
+
+    // 🧬 TIER 2 TRACKING: Store tier 2 products for automatic upsell detection
+    if ((isCategoryFiltered || isComplexTier2) && paginatedResults.length > 0) {
+      try {
+        const { dbName } = req.store;
+        const client = await connectToMongoDB(mongodbUri);
+        const db = client.db(dbName);
+        const tier2TrackingCollection = db.collection('tier2_tracking');
+
+        // Extract product names from tier 2 results
+        const tier2ProductNames = paginatedResults.map(p => p.name).filter(Boolean);
+
+        // Store tier 2 products with query for lookup during cart-add
+        const tier2Document = {
+          query: query,
+          tier2_products: tier2ProductNames,
+          timestamp: new Date(),
+          expires_at: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hour TTL
+          request_type: isComplexTier2 ? 'complex-tier2' : 'category-filtered',
+          product_count: tier2ProductNames.length
+        };
+
+        // Upsert to avoid duplicates (update if query exists within time window)
+        await tier2TrackingCollection.updateOne(
+          {
+            query: query,
+            timestamp: { $gte: new Date(Date.now() - 30 * 60 * 1000) } // 30 min window
+          },
+          {
+            $set: tier2Document,
+            $addToSet: { tier2_products: { $each: tier2ProductNames } } // Add new products to existing list
+          },
+          { upsert: true }
+        );
+
+        console.log(`[${requestId}] 🧬 Stored ${tier2ProductNames.length} tier 2 products for query: "${query}"`);
+
+        // Create TTL index if it doesn't exist (runs only once)
+        tier2TrackingCollection.createIndex({ expires_at: 1 }, { expireAfterSeconds: 0 }).catch(err => {
+          console.error(`[${requestId}] Warning: Could not create TTL index on tier2_tracking:`, err.message);
+        });
+
+      } catch (error) {
+        console.error(`[${requestId}] Error storing tier 2 tracking data:`, error.message);
+        // Don't fail the request if tracking storage fails
+      }
+    }
+
     // Return paginated results
     res.json({
       products: paginatedResults,
@@ -6356,28 +6403,41 @@ app.post("/search-to-cart", async (req, res) => {
 
           console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, product_name="${product.name}", in_search_results=${isUpsale}, search_results_count=${searchResultNames.length}`);
 
-          // 🧬 TIER 2 UPSELL TRACKING: Check if product came from tier 2 (embedding-based) results
-          // tier2_results contains product NAMES that were found via embedding similarity
-          if (document.tier2_results && Array.isArray(document.tier2_results)) {
-            const tier2ResultNames = document.tier2_results.filter(Boolean);
-            const isTier2Product = tier2ResultNames.includes(product.name);
+          // 🧬 TIER 2 UPSELL TRACKING: Automatically detect if product came from tier 2
+          try {
+            const tier2TrackingCollection = db.collection('tier2_tracking');
 
-            // A tier 2 upsell is when:
-            // 1. Product is in tier2_results (found via embedding similarity)
-            // 2. Product is NOT in original search_results (not from tier 1 text search)
-            const isTier2Upsell = isTier2Product && !isUpsale;
+            // Look up tier 2 products for this query (within last 24 hours)
+            const tier2Record = await tier2TrackingCollection.findOne({
+              query: document.search_query,
+              timestamp: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+            });
 
-            enhancedDocument.tier2Product = isTier2Product;
-            enhancedDocument.tier2Upsell = isTier2Upsell;
+            if (tier2Record && tier2Record.tier2_products) {
+              const isTier2Product = tier2Record.tier2_products.includes(product.name);
 
-            console.log(`[SEARCH-TO-CART] 🧬 Tier 2 tracking: product_name="${product.name}", in_tier2_results=${isTier2Product}, tier2_upsell=${isTier2Upsell}, tier2_results_count=${tier2ResultNames.length}`);
+              // A tier 2 upsell is when:
+              // 1. Product is in tier2_products (found via embedding similarity)
+              // 2. Product is NOT in original search_results (not from tier 1 text search)
+              const isTier2Upsell = isTier2Product && !isUpsale;
 
-            // Log tier 2 upsell success
-            if (isTier2Upsell) {
-              console.log(`[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "${product.name}" added to cart from embedding similarity results`);
+              enhancedDocument.tier2Product = isTier2Product;
+              enhancedDocument.tier2Upsell = isTier2Upsell;
+
+              console.log(`[SEARCH-TO-CART] 🧬 Tier 2 AUTO-DETECTION: product_name="${product.name}", in_tier2=${isTier2Product}, tier2_upsell=${isTier2Upsell}, tier2_count=${tier2Record.tier2_products.length}`);
+
+              // Log tier 2 upsell success
+              if (isTier2Upsell) {
+                console.log(`[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "${product.name}" added to cart from embedding similarity results (query: "${document.search_query}")`);
+              }
+            } else {
+              // No tier 2 record found for this query
+              enhancedDocument.tier2Product = false;
+              enhancedDocument.tier2Upsell = false;
+              console.log(`[SEARCH-TO-CART] 🧬 No tier 2 record found for query: "${document.search_query}"`);
             }
-          } else {
-            // No tier2_results provided - set to null for clarity
+          } catch (tier2Error) {
+            console.error(`[SEARCH-TO-CART] Error in tier 2 detection:`, tier2Error);
             enhancedDocument.tier2Product = null;
             enhancedDocument.tier2Upsell = null;
           }

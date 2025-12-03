@@ -2,7 +2,12 @@
 
 ## Overview
 
-The Tier 2 Upsell Tracker is a mechanism that identifies and tracks when products from **tier 2 (embedding-based similarity search)** are added to the cart. This provides valuable insights into the effectiveness of the semantic product recommendation system.
+The Tier 2 Upsell Tracker is a **fully automatic server-side mechanism** that identifies and tracks when products from **tier 2 (embedding-based similarity search)** are added to the cart. This provides valuable insights into the effectiveness of the semantic product recommendation system.
+
+**Key Feature:** No client changes required! The system automatically:
+1. Stores tier 2 products when they're returned from `/search/load-more`
+2. Detects tier 2 upsells when products are added to cart
+3. Tracks all tier 2 conversions in the cart collection
 
 ## What is a Tier 2 Upsell?
 
@@ -20,20 +25,27 @@ User searches "יין אדום יבש"
     ↓
 TIER 1: Text search finds exact matches
     ↓
-User scrolls/loads more results
+User scrolls/loads more results (/search/load-more)
     ↓
 TIER 2: Embedding similarity finds related products
     ↓
-User adds a tier 2 product to cart
+🧬 SERVER AUTOMATICALLY STORES tier 2 products in tier2_tracking collection
     ↓
-System marks it as tier2Upsell = true
+User adds a product to cart
+    ↓
+🧬 SERVER AUTOMATICALLY CHECKS if product was in tier 2 for this query
+    ↓
+System marks it as tier2Upsell = true if applicable
     ↓
 Analytics track tier 2 conversion effectiveness
 ```
 
 ### Implementation Details
 
-The tracker is implemented in the `/search-to-cart` endpoint (lines 6359-6383 in `server.js`).
+The tracker is implemented in two places:
+
+1. **Storage** (`/search/load-more` endpoint, lines 4307-4352): Stores tier 2 products in `tier2_tracking` collection
+2. **Detection** (`/search-to-cart` endpoint, lines 6406-6443): Automatically detects tier 2 upsells
 
 #### New Fields in Cart Collection
 
@@ -54,11 +66,34 @@ When a product is added to cart, the following new fields are tracked:
 - `tier2Upsell = false`: Product is in tier 2 but was also in tier 1 (overlap)
 - `tier2Upsell = null`: No tier 2 data provided (unknown)
 
-## Client-Side Integration
+## New Collections
 
-### Request Format
+### `tier2_tracking` Collection
 
-When calling `POST /search-to-cart`, include the `tier2_results` field:
+Stores tier 2 products for automatic detection:
+
+```javascript
+{
+  _id: ObjectId,
+  query: "יין אדום יבש",                    // Search query
+  tier2_products: ["Product D", "Product E", ...], // Array of tier 2 product names
+  timestamp: ISODate("2025-12-03T12:00:00Z"),     // When tier 2 was returned
+  expires_at: ISODate("2025-12-04T12:00:00Z"),    // TTL expiration (24 hours)
+  request_type: "complex-tier2",                   // Type of tier 2 request
+  product_count: 15                                // Number of tier 2 products
+}
+```
+
+**Features:**
+- Automatic TTL expiration (24 hours)
+- Indexed by query for fast lookups
+- Updated when new tier 2 products are returned for same query
+
+## No Client Changes Required!
+
+The system works **automatically** with your existing client code. The server handles all tier 2 tracking behind the scenes.
+
+**Existing request format** (no changes needed):
 
 ```javascript
 {
@@ -69,79 +104,57 @@ When calling `POST /search-to-cart`, include the `tier2_results` field:
     "event_type": "add_to_cart",
     "session_id": "session-xyz",
     "timestamp": "2025-12-03T12:00:00Z",
-
-    // Tier 1 results (original search results)
-    "search_results": ["Product A", "Product B", "Product C"],
-
-    // 🧬 NEW: Tier 2 results (embedding similarity results)
-    "tier2_results": ["Product D", "Product E", "Product F"],
-
-    "searchMetadata": {
-      "query": "יין אדום יבש",
-      "classification": "complex",
-      "llmReorderingUsed": true,
-      // ... other metadata
-    }
+    "search_results": ["Product A", "Product B", "Product C"], // Tier 1 only
+    "searchMetadata": { ... }
   }
 }
 ```
 
-### How to Populate `tier2_results`
-
-The client should track which products were shown from tier 2:
-
-```javascript
-// Example client-side tracking
-let tier1Products = [];  // From initial /search call
-let tier2Products = [];  // From /search/load-more call
-
-// When initial search completes
-searchAPI.search(query).then(response => {
-  tier1Products = response.results.map(p => p.name);
-  displayProducts(response.results);
-});
-
-// When user scrolls and loads more (tier 2 activated)
-searchAPI.loadMore(nextToken).then(response => {
-  // These are tier 2 products (from embedding similarity)
-  tier2Products = response.results.map(p => p.name);
-  displayProducts(response.results);
-});
-
-// When user adds product to cart
-function addToCart(product) {
-  trackingAPI.addToCart({
-    search_query: currentQuery,
-    product_id: product.id,
-    event_type: "add_to_cart",
-    search_results: tier1Products,      // Tier 1 products
-    tier2_results: tier2Products,        // 🧬 Tier 2 products
-    // ... other fields
-  });
-}
-```
+The server automatically:
+1. Looks up if the product was in tier 2 for this query
+2. Sets `tier2Product` and `tier2Upsell` fields
+3. Logs tier 2 upsell detections
 
 ## Example Scenarios
 
 ### Scenario 1: True Tier 2 Upsell ✅
 
+**User Journey:**
+1. User searches "יין אדום"
+2. Tier 1 returns: `["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"]`
+3. User scrolls, loads more
+4. Tier 2 (embedding similarity) returns: `["Dalton Petit Verdot", "Recanati Shiraz", "Tabor Malbec"]`
+5. Server automatically stores tier 2 products in `tier2_tracking` collection
+6. User adds "Dalton Petit Verdot" to cart
+
+**Cart Request** (standard format, no tier 2 data needed):
 ```javascript
-// Request
 {
   "search_query": "יין אדום",
-  "product_id": "12345",
-  "search_results": ["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"],
-  "tier2_results": ["Dalton Petit Verdot", "Recanati Shiraz", "Tabor Malbec"]
+  "product_id": "12345",  // Dalton Petit Verdot
+  "search_results": ["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"]
 }
+```
 
-// If user adds "Dalton Petit Verdot" (product_id: 12345):
-// Result in cart collection:
+**Server automatically:**
+1. Looks up tier2_tracking for query "יין אדום"
+2. Finds "Dalton Petit Verdot" in tier 2 products
+3. Checks it's NOT in tier 1 search_results
+
+**Result in cart collection:**
+```javascript
 {
   "product_id": "12345",
-  "upsale": false,           // Not in original search_results
-  "tier2Product": true,      // Was in tier2_results
+  "upsale": false,           // Not in tier 1 search_results
+  "tier2Product": true,      // ✅ Found in tier2_tracking
   "tier2Upsell": true        // ✅ TRUE TIER 2 UPSELL!
 }
+```
+
+**Console logs:**
+```
+[SEARCH-TO-CART] 🧬 Tier 2 AUTO-DETECTION: product_name="Dalton Petit Verdot", in_tier2=true, tier2_upsell=true, tier2_count=15
+[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "Dalton Petit Verdot" added to cart from embedding similarity results (query: "יין אדום")
 ```
 
 **Analysis**: This product was discovered ONLY through embedding similarity, not text search. This is the value of tier 2!
@@ -150,75 +163,50 @@ function addToCart(product) {
 
 ### Scenario 2: Tier 1 Product (No Tier 2 Involvement)
 
-```javascript
-// Request
-{
-  "search_query": "יין אדום",
-  "product_id": "67890",
-  "search_results": ["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"],
-  "tier2_results": ["Dalton Petit Verdot", "Recanati Shiraz", "Tabor Malbec"]
-}
+**User Journey:**
+1. User searches "יין אדום"
+2. Tier 1 returns: `["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"]`
+3. User immediately adds "Barkan Merlot" to cart (without scrolling/loading more)
 
-// If user adds "Barkan Merlot" (product_id: 67890):
-// Result in cart collection:
+**Result in cart collection:**
+```javascript
 {
   "product_id": "67890",
-  "upsale": true,            // Was in original search_results
-  "tier2Product": false,     // Not in tier2_results
+  "upsale": true,            // Was in tier 1 search_results
+  "tier2Product": false,     // No tier 2 record exists yet
   "tier2Upsell": false       // Not a tier 2 upsell
 }
 ```
 
-**Analysis**: User added a tier 1 product. Tier 2 didn't influence this decision.
+**Console logs:**
+```
+[SEARCH-TO-CART] 🧬 No tier 2 record found for query: "יין אדום"
+```
+
+**Analysis**: User added a tier 1 product before tier 2 was triggered. Standard conversion.
 
 ---
 
 ### Scenario 3: Product in Both Tier 1 AND Tier 2 (Overlap)
 
-```javascript
-// Request
-{
-  "search_query": "יין אדום",
-  "product_id": "11111",
-  "search_results": ["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"],
-  "tier2_results": ["Golan Heights Syrah", "Dalton Petit Verdot", "Recanati Shiraz"]
-}
+**User Journey:**
+1. User searches "יין אדום"
+2. Tier 1 returns: `["Barkan Merlot", "Carmel Cabernet", "Golan Heights Syrah"]`
+3. User loads more
+4. Tier 2 also includes "Golan Heights Syrah" (appeared in both)
+5. User adds "Golan Heights Syrah" to cart
 
-// If user adds "Golan Heights Syrah" (product_id: 11111):
-// Result in cart collection:
+**Result in cart collection:**
+```javascript
 {
   "product_id": "11111",
-  "upsale": true,            // Was in original search_results
-  "tier2Product": true,      // Also in tier2_results
-  "tier2Upsell": false       // Not counted as tier 2 upsell (was already in tier 1)
+  "upsale": true,            // Was in tier 1 search_results
+  "tier2Product": true,      // Also found in tier2_tracking
+  "tier2Upsell": false       // ❌ Not counted as tier 2 upsell (was in tier 1 first)
 }
 ```
 
 **Analysis**: Product appeared in both tiers. We don't count this as a tier 2 upsell since the user saw it in tier 1 first.
-
----
-
-### Scenario 4: No Tier 2 Data Provided
-
-```javascript
-// Request (legacy format without tier2_results)
-{
-  "search_query": "יין אדום",
-  "product_id": "12345",
-  "search_results": ["Barkan Merlot", "Carmel Cabernet"]
-  // No tier2_results provided
-}
-
-// Result in cart collection:
-{
-  "product_id": "12345",
-  "upsale": false,           // Not in search_results
-  "tier2Product": null,      // Unknown (no tier 2 data)
-  "tier2Upsell": null        // Unknown (no tier 2 data)
-}
-```
-
-**Analysis**: Legacy request format. No tier 2 tracking available.
 
 ## Analytics & Monitoring
 
@@ -329,9 +317,31 @@ db.cart.aggregate([
 ## Implementation Checklist
 
 - [x] Add tier 2 tracking fields to cart collection
-- [x] Implement detection logic in /search-to-cart endpoint
-- [x] Add logging for tier 2 upsells
-- [ ] Update client to send tier2_results
+- [x] Create tier2_tracking collection with TTL index
+- [x] Implement automatic storage in /search/load-more endpoint
+- [x] Implement automatic detection logic in /search-to-cart endpoint
+- [x] Add comprehensive logging for tier 2 upsells
+- [x] No client changes required (fully server-side)
 - [ ] Create analytics dashboard for tier 2 metrics
 - [ ] Set up monitoring alerts for tier 2 conversion rates
 - [ ] A/B test tier 2 effectiveness across different query types
+
+## Server Logs to Monitor
+
+When tier 2 is active, you'll see these logs:
+
+**During load-more (tier 2 storage):**
+```
+[load-more-xxxxx] 🧬 Stored 15 tier 2 products for query: "יין אדום יבש"
+```
+
+**During cart-add (tier 2 detection):**
+```
+[SEARCH-TO-CART] 🧬 Tier 2 AUTO-DETECTION: product_name="Dalton Petit Verdot", in_tier2=true, tier2_upsell=true, tier2_count=15
+[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "Dalton Petit Verdot" added to cart from embedding similarity results (query: "יין אדום יבש")
+```
+
+**When no tier 2 record exists:**
+```
+[SEARCH-TO-CART] 🧬 No tier 2 record found for query: "יין אדום"
+```
