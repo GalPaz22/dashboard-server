@@ -6333,7 +6333,7 @@ app.post("/search-to-cart", async (req, res) => {
       try {
         // Get the product name from the products collection using product_id
         const productsCollection = db.collection('products');
-        
+
         // Try to find by ItemID first (most common), then by id, then by _id
         const product = await productsCollection.findOne({
           $or: [
@@ -6344,28 +6344,60 @@ app.post("/search-to-cart", async (req, res) => {
             { _id: document.product_id }
           ]
         });
-        
+
         if (product && product.name) {
           // search_results is an array of product names
-          const searchResultNames = Array.isArray(document.search_results) 
+          const searchResultNames = Array.isArray(document.search_results)
             ? document.search_results.filter(Boolean)
             : [];
-          
+
           const isUpsale = searchResultNames.includes(product.name);
           enhancedDocument.upsale = isUpsale;
-          
+
           console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, product_name="${product.name}", in_search_results=${isUpsale}, search_results_count=${searchResultNames.length}`);
+
+          // 🧬 TIER 2 UPSELL TRACKING: Check if product came from tier 2 (embedding-based) results
+          // tier2_results contains product NAMES that were found via embedding similarity
+          if (document.tier2_results && Array.isArray(document.tier2_results)) {
+            const tier2ResultNames = document.tier2_results.filter(Boolean);
+            const isTier2Product = tier2ResultNames.includes(product.name);
+
+            // A tier 2 upsell is when:
+            // 1. Product is in tier2_results (found via embedding similarity)
+            // 2. Product is NOT in original search_results (not from tier 1 text search)
+            const isTier2Upsell = isTier2Product && !isUpsale;
+
+            enhancedDocument.tier2Product = isTier2Product;
+            enhancedDocument.tier2Upsell = isTier2Upsell;
+
+            console.log(`[SEARCH-TO-CART] 🧬 Tier 2 tracking: product_name="${product.name}", in_tier2_results=${isTier2Product}, tier2_upsell=${isTier2Upsell}, tier2_results_count=${tier2ResultNames.length}`);
+
+            // Log tier 2 upsell success
+            if (isTier2Upsell) {
+              console.log(`[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "${product.name}" added to cart from embedding similarity results`);
+            }
+          } else {
+            // No tier2_results provided - set to null for clarity
+            enhancedDocument.tier2Product = null;
+            enhancedDocument.tier2Upsell = null;
+          }
         } else {
           console.warn(`[SEARCH-TO-CART] Product not found for product_id=${document.product_id}, cannot determine upsale status`);
           enhancedDocument.upsale = null;
+          enhancedDocument.tier2Product = null;
+          enhancedDocument.tier2Upsell = null;
         }
       } catch (error) {
         console.error(`[SEARCH-TO-CART] Error in upsale detection:`, error);
         enhancedDocument.upsale = null;
+        enhancedDocument.tier2Product = null;
+        enhancedDocument.tier2Upsell = null;
       }
     } else {
       // For non-add_to_cart events or when search_results is not provided, upsale is unknown
       enhancedDocument.upsale = null;
+      enhancedDocument.tier2Product = null;
+      enhancedDocument.tier2Upsell = null;
     }
     
     // Add conversion type based on event
