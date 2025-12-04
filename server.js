@@ -122,64 +122,85 @@ const aiCircuitBreaker = {
 // Fallback: Rule-based query classification (simple vs complex)
 
 // Fallback: Rule-based filter extraction
-// Hard-coded category extraction patterns
-// These patterns will be checked BEFORE AI extraction to catch important categories
-// that the model frequently misses
-function extractHardCodedCategories(query) {
+// Dynamic category extraction patterns based on user's category list
+// These patterns are generated from the user's categories and checked alongside AI extraction
+// to catch important categories that the model may miss
+function extractHardCodedCategories(query, categories = '') {
+  // If no categories provided, return null
+  if (!categories || categories.trim() === '') {
+    return null;
+  }
+
   const queryLower = query.toLowerCase().trim();
   const extractedCategories = [];
-  
-  // Define hard-coded category patterns with priority order
-  // Format: { pattern: RegExp, category: string, priority: number }
-  const categoryPatterns = [
-    // Wine categories (יין) - highest priority
-    { pattern: /\bיין\s+אדום\b/, category: 'יין אדום', priority: 10 },
-    { pattern: /\bיין\s+לבן\b/, category: 'יין לבן', priority: 10 },
-    { pattern: /\bיין\s+מבעבע\b/, category: 'יין מבעבע', priority: 10 },
-    { pattern: /\bיין\s+כתום\b/, category: 'יין כתום', priority: 10 },
-    { pattern: /\bיין\s+רוזה\b/, category: 'יין רוזה', priority: 10 },
-    { pattern: /\bred\s+wine\b/, category: 'יין אדום', priority: 10 },
-    { pattern: /\bwhite\s+wine\b/, category: 'יין לבן', priority: 10 },
-    { pattern: /\bsparkling\s+wine\b/, category: 'יין מבעבע', priority: 10 },
-    { pattern: /\borange\s+wine\b/, category: 'יין כתום', priority: 10 },
-    { pattern: /\brose\s+wine\b/, category: 'יין רוזה', priority: 10 },
-    // Generic wine - lower priority (only if no specific wine type was found)
-    { pattern: /\bיין\b/, category: 'יין', priority: 5 },
-    { pattern: /\bwine\b/, category: 'יין', priority: 5 },
-    // Add more categories here as needed
-  ];
-  
-  // Sort patterns by priority (highest first)
-  categoryPatterns.sort((a, b) => b.priority - a.priority);
-  
+
+  // Parse categories from comma-separated string
+  const categoriesList = categories.split(',').map(c => c.trim()).filter(c => c);
+
+  // Generate dynamic category patterns based on user's categories
+  const categoryPatterns = [];
+
+  for (const category of categoriesList) {
+    const categoryLower = category.toLowerCase();
+    const words = categoryLower.split(/\s+/);
+
+    // Calculate priority based on specificity
+    // Multi-word categories = higher priority (more specific)
+    // Single-word categories = lower priority (more generic)
+    const priority = words.length >= 2 ? 10 : 5;
+
+    // Escape special regex characters in the category
+    const escapedCategory = categoryLower.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+    // Create pattern with word boundaries
+    // Replace spaces with \s+ to match any whitespace
+    const patternString = escapedCategory.replace(/\s+/g, '\\s+');
+    const pattern = new RegExp(`\\b${patternString}\\b`, 'i');
+
+    categoryPatterns.push({
+      pattern,
+      category, // Use original casing from user's list
+      priority,
+      wordCount: words.length
+    });
+  }
+
+  // Sort patterns by priority (highest first), then by word count (most words first)
+  categoryPatterns.sort((a, b) => {
+    if (b.priority !== a.priority) {
+      return b.priority - a.priority;
+    }
+    return b.wordCount - a.wordCount;
+  });
+
   // Check each pattern
   for (const { pattern, category, priority } of categoryPatterns) {
     if (pattern.test(queryLower)) {
-      // If we found a high-priority match, add it
+      // If we found a high-priority match (multi-word), add it and stop
       if (priority >= 10) {
         extractedCategories.push(category);
-        console.log(`[HARD-CODED CATEGORY] Extracted "${category}" from query (priority ${priority})`);
-        // For high-priority specific matches, skip generic "יין" pattern
+        console.log(`[DYNAMIC CATEGORY] Extracted "${category}" from query (priority ${priority})`);
+        // For high-priority specific matches, skip generic single-word patterns
         break;
       } else if (extractedCategories.length === 0) {
         // Only add low-priority matches if no high-priority match was found
         extractedCategories.push(category);
-        console.log(`[HARD-CODED CATEGORY] Extracted "${category}" from query (priority ${priority})`);
+        console.log(`[DYNAMIC CATEGORY] Extracted "${category}" from query (priority ${priority})`);
       }
     }
   }
-  
+
   return extractedCategories.length > 0 ? (extractedCategories.length === 1 ? extractedCategories[0] : extractedCategories) : null;
 }
 
-function extractFiltersFallback(query) {
+function extractFiltersFallback(query, categories = '') {
   const queryLower = query.toLowerCase().trim();
   const filters = {};
-  
-  // Extract hard-coded categories first
-  const hardCodedCategory = extractHardCodedCategories(query);
-  if (hardCodedCategory) {
-    filters.category = hardCodedCategory;
+
+  // Extract categories dynamically based on user's category list
+  const dynamicCategory = extractHardCodedCategories(query, categories);
+  if (dynamicCategory) {
+    filters.category = dynamicCategory;
   }
   
   // Extract price information using regex
@@ -2098,7 +2119,7 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
     // Check circuit breaker - use fallback if AI is unavailable
     if (aiCircuitBreaker.shouldBypassAI()) {
       console.log(`[AI BYPASS] Circuit breaker open, using fallback filter extraction for: "${query}"`);
-      return extractFiltersFallback(query);
+      return extractFiltersFallback(query, categories);
     }
     
     const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
@@ -2268,28 +2289,28 @@ ${example}.`;
     filters.type = validateFilter(filters.type, typesList, 'type', false);
     filters.softCategory = validateFilter(filters.softCategory, softCategoriesList, 'softCategory', true);
     
-    // Check for hard-coded categories and prioritize them if AI missed them
-    const hardCodedCategory = extractHardCodedCategories(query);
-    if (hardCodedCategory) {
-      // Validate hard-coded category against available categories
-      const validatedHardCodedCategory = validateFilter(hardCodedCategory, categoriesList, 'hard-coded category', false);
+    // Check for dynamic categories and prioritize them if AI missed them
+    const dynamicCategory = extractHardCodedCategories(query, categories);
+    if (dynamicCategory) {
+      // Validate dynamic category against available categories
+      const validatedDynamicCategory = validateFilter(dynamicCategory, categoriesList, 'dynamic category', false);
       
-      if (validatedHardCodedCategory) {
+      if (validatedDynamicCategory) {
         if (!filters.category) {
-          // AI didn't extract a category, use hard-coded one
-          filters.category = validatedHardCodedCategory;
-          console.log(`[HARD-CODED OVERRIDE] AI missed category, using hard-coded: ${JSON.stringify(validatedHardCodedCategory)}`);
+          // AI didn't extract a category, use dynamically extracted one
+          filters.category = validatedDynamicCategory;
+          console.log(`[DYNAMIC OVERRIDE] AI missed category, using dynamic extraction: ${JSON.stringify(validatedDynamicCategory)}`);
         } else {
-          // AI extracted a category, but let's check if hard-coded is more specific
+          // AI extracted a category, but let's check if dynamic extraction is more specific
           const aiCategory = Array.isArray(filters.category) ? filters.category[0] : filters.category;
-          const hardCategory = Array.isArray(validatedHardCodedCategory) ? validatedHardCodedCategory[0] : validatedHardCodedCategory;
-          
-          // If hard-coded category is more specific (longer string), prefer it
-          if (hardCategory.length > aiCategory.length) {
-            filters.category = validatedHardCodedCategory;
-            console.log(`[HARD-CODED OVERRIDE] Hard-coded category "${hardCategory}" is more specific than AI's "${aiCategory}", using hard-coded`);
+          const dynamicCat = Array.isArray(validatedDynamicCategory) ? validatedDynamicCategory[0] : validatedDynamicCategory;
+
+          // If dynamic category is more specific (longer string), prefer it
+          if (dynamicCat.length > aiCategory.length) {
+            filters.category = validatedDynamicCategory;
+            console.log(`[DYNAMIC OVERRIDE] Dynamic category "${dynamicCat}" is more specific than AI's "${aiCategory}", using dynamic`);
           } else {
-            console.log(`[HARD-CODED CHECK] AI category "${aiCategory}" is acceptable, keeping it over hard-coded "${hardCategory}"`);
+            console.log(`[DYNAMIC CHECK] AI category "${aiCategory}" is acceptable, keeping it over dynamic "${dynamicCat}"`);
           }
         }
       }
