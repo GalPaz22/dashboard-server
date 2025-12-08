@@ -127,7 +127,19 @@ const aiCircuitBreaker = {
 // to catch important categories that the model may miss
 function extractHardCodedCategories(query, categories = '') {
   // If no categories provided, return null
-  if (!categories || categories.trim() === '') {
+  if (!categories) {
+    return null;
+  }
+
+  // Handle both string and array input
+  let categoriesStr = categories;
+  if (Array.isArray(categories)) {
+    categoriesStr = categories.join(',');
+  } else if (typeof categories !== 'string') {
+    return null;
+  }
+
+  if (categoriesStr.trim() === '') {
     return null;
   }
 
@@ -135,7 +147,7 @@ function extractHardCodedCategories(query, categories = '') {
   const extractedCategories = [];
 
   // Parse categories from comma-separated string
-  const categoriesList = categories.split(',').map(c => c.trim()).filter(c => c);
+  const categoriesList = categoriesStr.split(',').map(c => c.trim()).filter(c => c);
 
   // Generate dynamic category patterns based on user's categories
   const categoryPatterns = [];
