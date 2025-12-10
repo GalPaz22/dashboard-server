@@ -6013,6 +6013,7 @@ app.post("/search", async (req, res) => {
         query: query,
         requestId: requestId,
         executionTime: executionTime,
+        isComplex: isComplexQueryResult, // Flag indicating if query is complex (used for cart tracking)
         ...(tierInfo && { tiers: tierInfo }), // Include tier info for simple queries
         ...(extractedCategoriesMetadata && { extractedCategories: extractedCategoriesMetadata }) // Include extracted categories
       }
