@@ -6249,7 +6249,7 @@ app.post("/search-to-cart", async (req, res) => {
     
     // Upsale detection: Check if product was in the search results shown to user
     // search_results contains product NAMES (not IDs) as stored in queries collection
-    if (document.event_type === 'add_to_cart' && document.product_id && document.search_results) {
+    if (document.event_type === 'add_to_cart' && document.product_id) {
       try {
         // Get the product name from the products collection using product_id
         const productsCollection = db.collection('products');
@@ -6266,40 +6266,100 @@ app.post("/search-to-cart", async (req, res) => {
         });
 
         if (product && product.name) {
-          // search_results is an array of product names
-          const searchResultNames = Array.isArray(document.search_results)
-            ? document.search_results.filter(Boolean)
-            : [];
+          // If search_results is not provided, attempt to look it up from recent tracking events
+          let searchResultNames = [];
+          let tier2ResultNames = [];
+          let foundSearchContext = false;
 
-          const isUpsale = searchResultNames.includes(product.name);
-          enhancedDocument.upsale = isUpsale;
+          if (document.search_results && Array.isArray(document.search_results)) {
+            // search_results provided directly
+            searchResultNames = document.search_results.filter(Boolean);
+            foundSearchContext = true;
+            console.log(`[SEARCH-TO-CART] Using provided search_results (${searchResultNames.length} items)`);
+          } else if (document.search_query) {
+            // Try to look up recent search context from tracking_events
+            console.log(`[SEARCH-TO-CART] 🔍 search_results not provided, attempting lookup for search_query="${document.search_query}"`);
 
-          console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, product_name="${product.name}", in_search_results=${isUpsale}, search_results_count=${searchResultNames.length}`);
+            try {
+              const trackingCollection = db.collection('tracking_events');
 
-          // 🧬 TIER 2 UPSELL TRACKING: Check if product came from tier 2 (embedding-based) results
-          // tier2_results contains product NAMES that were found via embedding similarity
-          if (document.tier2_results && Array.isArray(document.tier2_results)) {
-            const tier2ResultNames = document.tier2_results.filter(Boolean);
-            const isTier2Product = tier2ResultNames.includes(product.name);
+              // Look for recent events with the same search_query that have search_results
+              // Use a 1-hour time window
+              const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
 
-            // A tier 2 upsell is when:
-            // 1. Product is in tier2_results (found via embedding similarity)
-            // 2. Product is NOT in original search_results (not from tier 1 text search)
-            const isTier2Upsell = isTier2Product && !isUpsale;
+              const recentSearchEvent = await trackingCollection.findOne({
+                search_query: document.search_query,
+                search_results: { $exists: true, $ne: null },
+                created_at: { $gte: oneHourAgo }
+              }, {
+                sort: { created_at: -1 },
+                projection: { search_results: 1, tier2_results: 1 }
+              });
 
-            enhancedDocument.tier2Product = isTier2Product;
-            enhancedDocument.tier2Upsell = isTier2Upsell;
+              if (recentSearchEvent && recentSearchEvent.search_results) {
+                searchResultNames = Array.isArray(recentSearchEvent.search_results)
+                  ? recentSearchEvent.search_results.filter(Boolean)
+                  : [];
+                foundSearchContext = true;
+                console.log(`[SEARCH-TO-CART] ✅ Found search context from recent event (${searchResultNames.length} items)`);
 
-            console.log(`[SEARCH-TO-CART] 🧬 Tier 2 tracking: product_name="${product.name}", in_tier2_results=${isTier2Product}, tier2_upsell=${isTier2Upsell}, tier2_results_count=${tier2ResultNames.length}`);
+                // Also get tier2_results if available
+                if (recentSearchEvent.tier2_results && Array.isArray(recentSearchEvent.tier2_results)) {
+                  tier2ResultNames = recentSearchEvent.tier2_results.filter(Boolean);
+                  console.log(`[SEARCH-TO-CART] ✅ Found tier2_results from recent event (${tier2ResultNames.length} items)`);
+                }
+              } else {
+                console.log(`[SEARCH-TO-CART] ⚠️ No recent search context found for query="${document.search_query}"`);
+              }
+            } catch (lookupError) {
+              console.error(`[SEARCH-TO-CART] Error looking up search context:`, lookupError);
+            }
+          }
 
-            // Log tier 2 upsell success
-            if (isTier2Upsell) {
-              console.log(`[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "${product.name}" added to cart from embedding similarity results`);
+          if (foundSearchContext) {
+            const isUpsale = searchResultNames.includes(product.name);
+            enhancedDocument.upsale = isUpsale;
+
+            console.log(`[SEARCH-TO-CART] Upsale detection: product_id=${document.product_id}, product_name="${product.name}", in_search_results=${isUpsale}, search_results_count=${searchResultNames.length}`);
+
+            // 🧬 TIER 2 UPSELL TRACKING: Check if product came from tier 2 (embedding-based) results
+            // tier2_results contains product NAMES that were found via embedding similarity
+
+            // First check if tier2_results was provided in the document
+            if (document.tier2_results && Array.isArray(document.tier2_results)) {
+              tier2ResultNames = document.tier2_results.filter(Boolean);
+              console.log(`[SEARCH-TO-CART] Using provided tier2_results (${tier2ResultNames.length} items)`);
+            }
+
+            if (tier2ResultNames.length > 0) {
+              const isTier2Product = tier2ResultNames.includes(product.name);
+
+              // A tier 2 upsell is when:
+              // 1. Product is in tier2_results (found via embedding similarity)
+              // 2. Product is NOT in original search_results (not from tier 1 text search)
+              const isTier2Upsell = isTier2Product && !isUpsale;
+
+              enhancedDocument.tier2Product = isTier2Product;
+              enhancedDocument.tier2Upsell = isTier2Upsell;
+
+              console.log(`[SEARCH-TO-CART] 🧬 Tier 2 tracking: product_name="${product.name}", in_tier2_results=${isTier2Product}, tier2_upsell=${isTier2Upsell}, tier2_results_count=${tier2ResultNames.length}`);
+
+              // Log tier 2 upsell success
+              if (isTier2Upsell) {
+                console.log(`[SEARCH-TO-CART] ✅ TIER 2 UPSELL DETECTED: Product "${product.name}" added to cart from embedding similarity results`);
+              }
+            } else {
+              // No tier2_results available - set to null for clarity
+              enhancedDocument.tier2Product = null;
+              enhancedDocument.tier2Upsell = null;
+              console.log(`[SEARCH-TO-CART] No tier2_results available, setting tier2Product/tier2Upsell to null`);
             }
           } else {
-            // No tier2_results provided - set to null for clarity
+            // Could not find or determine search context
+            enhancedDocument.upsale = null;
             enhancedDocument.tier2Product = null;
             enhancedDocument.tier2Upsell = null;
+            console.log(`[SEARCH-TO-CART] No search context available, setting upsale/tier2 fields to null`);
           }
         } else {
           console.warn(`[SEARCH-TO-CART] Product not found for product_id=${document.product_id}, cannot determine upsale status`);
@@ -6314,7 +6374,7 @@ app.post("/search-to-cart", async (req, res) => {
         enhancedDocument.tier2Upsell = null;
       }
     } else {
-      // For non-add_to_cart events or when search_results is not provided, upsale is unknown
+      // For non-add_to_cart events, upsale is unknown
       enhancedDocument.upsale = null;
       enhancedDocument.tier2Product = null;
       enhancedDocument.tier2Upsell = null;
