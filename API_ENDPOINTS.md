@@ -25,7 +25,27 @@ Main search endpoint with auto-load-more functionality.
 ```json
 {
   "products": [
-    // First 20 products
+    {
+      "_id": "507f1f77bcf86cd799439011",
+      "id": "12345",
+      "name": "Premium Red Wine",
+      "description": "Full-bodied red wine with notes of cherry and oak",
+      "price": 89.90,
+      "image": "https://example.com/images/wine1.jpg",
+      "url": "https://example.com/products/wine1",
+      "ItemID": "WINE001"
+    },
+    {
+      "_id": "507f1f77bcf86cd799439012",
+      "id": "12346",
+      "name": "White Wine Selection",
+      "description": "Crisp white wine with citrus notes",
+      "price": 65.00,
+      "image": "https://example.com/images/wine2.jpg",
+      "url": "https://example.com/products/wine2",
+      "ItemID": "WINE002"
+    }
+    // ... more products (20 total)
   ],
   "pagination": {
     "hasMore": true,
@@ -55,7 +75,17 @@ Automatically loads the second batch of 20 products.
 ```json
 {
   "products": [
-    // Next 20 products
+    {
+      "_id": "507f1f77bcf86cd799439021",
+      "id": "12355",
+      "name": "Sparkling Wine",
+      "description": "Elegant sparkling wine perfect for celebrations",
+      "price": 120.00,
+      "image": "https://example.com/images/wine21.jpg",
+      "url": "https://example.com/products/wine21",
+      "ItemID": "WINE021"
+    }
+    // ... more products (20 total)
   ],
   "pagination": {
     "hasMore": false,
