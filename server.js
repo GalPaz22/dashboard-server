@@ -4708,8 +4708,11 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  const { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
+  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
+
+  // Trim query to avoid classification issues with trailing/leading whitespace
+  query = query ? query.trim() : query;
   
   // Default to legacy mode (array only) for backward compatibility
   // Only use modern format (with pagination) if explicitly requested
