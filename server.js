@@ -2611,12 +2611,12 @@ function levenshteinDistance(str1, str2) {
   return prevRow[len2];
 }
 
-async function logQuery(queryCollection, query, filters, products = []) {
+async function logQuery(queryCollection, query, filters, products = [], isComplex = false) {
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
-  
+
   const deliveredProducts = products.map(p => p.name).filter(Boolean).slice(0, 20);
-  
+
   const queryDocument = {
     query: query,
     timestamp: timestamp,
@@ -2627,7 +2627,8 @@ async function logQuery(queryCollection, query, filters, products = []) {
     type: filters.type || "unknown",
     softCategory: filters.softCategory || "unknown",
     entity: entity.trim(),
-    deliveredProducts: deliveredProducts
+    deliveredProducts: deliveredProducts,
+    isComplex: isComplex
   };
   
   // Check for existing identical query logs within a 30-minute window to prevent duplicates
@@ -4785,14 +4786,10 @@ app.post("/search", async (req, res) => {
       }));
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
-      
-      // Log the query (with empty filters since no filter extraction for SKU search)
-      try {
-        await logQuery(querycollection, query, {}, formattedSKUResults);
-      } catch (logError) {
-        console.error(`[${requestId}] Failed to log SKU query:`, logError.message);
-      }
-      
+
+      // SKU searches are not logged (only complex queries are logged)
+      console.log(`[${requestId}] SKU search - skipping database logging`);
+
       return res.json(formattedSKUResults);
       
     } catch (error) {
@@ -5811,12 +5808,17 @@ app.post("/search", async (req, res) => {
 
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
-    
-    // Log query
-    try {
-      await logQuery(querycollection, query, enhancedFilters, limitedResults);
-    } catch (logError) {
-      console.error(`[${requestId}] Failed to log query:`, logError.message);
+
+    // Log query (only for complex queries)
+    if (isComplexQueryResult) {
+      try {
+        await logQuery(querycollection, query, enhancedFilters, limitedResults, true);
+        console.log(`[${requestId}] Complex query logged to database`);
+      } catch (logError) {
+        console.error(`[${requestId}] Failed to log query:`, logError.message);
+      }
+    } else {
+      console.log(`[${requestId}] Simple query - skipping database logging`);
     }
 
     const executionTime = Date.now() - searchStartTime;
