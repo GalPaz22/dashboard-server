@@ -2134,7 +2134,16 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
       return extractFiltersFallback(query, categories);
     }
     
-    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context is: ${context}.
+    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries for online wine and alcohol shops. The user's context is: ${context}.
+
+DOMAIN KNOWLEDGE: You are working with wine and alcohol e-commerce. You have knowledge of:
+- Wine brands and their characteristics (e.g., "אלאמוס"/"Alamos" → associated with Malbec grape variety and Mendoza region)
+- Grape varieties (Malbec, Cabernet Sauvignon, Chardonnay, Pinot Noir, Sauvignon Blanc, etc.)
+- Wine regions (Bordeaux, Burgundy, Tuscany, Mendoza, Napa Valley, Rioja, etc.)
+- Spirits brands and types (Whisky, Vodka, Gin, Rum, Tequila, etc.)
+- Wine characteristics and styles
+
+When users mention wine or alcohol brand names, USE YOUR KNOWLEDGE to extract relevant soft categories related to that brand (grape varieties, regions, styles) if they exist in the provided soft categories list.
 
 CRITICAL RULE: ALL extracted values MUST exist in the provided lists. NEVER extract values that are not in the lists.
 
@@ -2155,10 +2164,14 @@ Extract the following filters from the query if they exist:
    - The extracted type MUST exist EXACTLY in the provided list
    - You may map synonyms intelligently (e.g., "dry" → "dry" if in list), but the final value MUST be in the list
    - Do not ever make up a type that is not in the list
-6. softCategory - FLEXIBLE MATCHING ALLOWED. Available soft categories: ${softCategories}
-   - Extract contextual preferences (e.g., origins, food pairings, occasions)
+6. softCategory - FLEXIBLE MATCHING ALLOWED with WINE/ALCOHOL DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}
+   - Extract contextual preferences (e.g., origins, grape varieties, food pairings, occasions, regions)
    - You have MORE FLEXIBILITY here - you can intelligently map related terms
-   - Examples: "Toscany" → "Italy" (if Italy is in list), "pasta dish" → "pasta" (if pasta is in list)
+   - USE YOUR WINE KNOWLEDGE: When users mention brand names, extract associated characteristics if they exist in the list
+     * Example: "אלאמוס"/"Alamos" wine brand → extract "malbec" and "mendoza" if in list
+     * Example: "שאטו מרגו"/"Chateau Margaux" → extract "bordeaux" and "cabernet sauvignon" if in list
+     * Example: "בארולו"/"Barolo" → extract "piedmont" and "nebbiolo" if in list
+   - General mapping examples: "Toscany" → "Italy" (if Italy is in list), "pasta dish" → "pasta" (if pasta is in list)
    - Geographic regions can map to countries if the country is in the list
    - Food pairing mentions can map to items in the list
    - Occasion mentions can map to items in the list
@@ -2224,12 +2237,12 @@ ${example}.`;
             softCategory: {
               oneOf: [
                 { type: Type.STRING },
-                { 
+                {
                   type: Type.ARRAY,
                   items: { type: Type.STRING }
                 }
               ],
-              description: `Soft filter - FLEXIBLE MATCHING ALLOWED. Available soft categories: ${softCategories}. You can intelligently map related terms (e.g., regions to countries, food mentions to pairings), but the final extracted value MUST exist in the provided list. Multiple values allowed, separated by comma.`
+              description: `Soft filter - FLEXIBLE MATCHING ALLOWED with WINE/ALCOHOL DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}. Use your wine/alcohol knowledge to extract relevant characteristics when brand names are mentioned (e.g., "Alamos" → "malbec", "mendoza"). You can intelligently map related terms (e.g., regions to countries, food mentions to pairings), but the final extracted value MUST exist in the provided list. Multiple values allowed, separated by comma.`
             }
           }
         }
