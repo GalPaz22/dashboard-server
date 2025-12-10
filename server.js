@@ -4067,8 +4067,112 @@ app.get("/search/load-more", async (req, res) => {
             };
           }).sort((a, b) => b.rrf_score - a.rrf_score);
         }
-        
-        cachedResults = categoryFilteredResults;
+
+        // 🧬 TIER-2 EMBEDDING ENHANCEMENT: Run similarity search if product embeddings available
+        let mergedResults = categoryFilteredResults;
+
+        if (extractedCategories.topProductEmbeddings && extractedCategories.topProductEmbeddings.length > 0) {
+          try {
+            console.log(`[${requestId}] 🧬 TIER-2 ENHANCEMENT: Finding products similar to ${extractedCategories.topProductEmbeddings.length} tier-1 textual matches`);
+
+            // Run ANN similarity search for each seed product embedding
+            const similaritySearches = extractedCategories.topProductEmbeddings.map(async (productEmbed) => {
+              const pipeline = [
+                {
+                  $vectorSearch: {
+                    index: "vector_index",
+                    path: "embedding",
+                    queryVector: productEmbed.embedding, // Use PRODUCT embedding, not query
+                    numCandidates: Math.max(vectorLimit * 2, 100),
+                    exact: false,
+                    limit: 20 // Top 20 similar products per seed
+                  }
+                },
+                {
+                  $match: {
+                    stockStatus: "instock",
+                    // Respect hard category filters
+                    ...(categoryFilteredHardFilters.category && categoryFilteredHardFilters.category.length > 0 && {
+                      category: { $in: categoryFilteredHardFilters.category }
+                    }),
+                    // Exclude the seed product itself
+                    _id: { $ne: productEmbed._id }
+                  }
+                }
+              ];
+
+              return collection.aggregate(pipeline).toArray();
+            });
+
+            // Execute all similarity searches in parallel
+            const similarityResults = await Promise.all(similaritySearches);
+            const flattenedSimilarityResults = similarityResults.flat();
+
+            console.log(`[${requestId}] 🧬 Found ${flattenedSimilarityResults.length} products via embedding similarity`);
+
+            // Merge soft category results with similarity results
+            const resultMap = new Map();
+
+            // Add soft category results first
+            categoryFilteredResults.forEach(product => {
+              resultMap.set(product._id.toString(), {
+                ...product,
+                sources: ['soft_category'],
+                similarityBoost: 0
+              });
+            });
+
+            // Add/merge similarity results
+            flattenedSimilarityResults.forEach(product => {
+              const id = product._id.toString();
+              if (resultMap.has(id)) {
+                // Product found via BOTH methods - highest confidence
+                const existing = resultMap.get(id);
+                existing.sources.push('product_similarity');
+                existing.similarityBoost = 5000; // Dual-source boost
+                // Update rrf_score to include similarity boost
+                existing.rrf_score = (existing.rrf_score || 0) + 5000;
+              } else {
+                // Product found via similarity only
+                resultMap.set(id, {
+                  ...product,
+                  sources: ['product_similarity'],
+                  similarityBoost: 2500, // Similarity-only boost
+                  rrf_score: 2500, // Initial score from similarity
+                  softFilterMatch: false,
+                  softCategoryMatches: 0,
+                  softCategoryExpansion: true
+                });
+              }
+            });
+
+            // Convert back to array and sort by updated scores
+            mergedResults = Array.from(resultMap.values())
+              .sort((a, b) => (b.rrf_score || 0) - (a.rrf_score || 0));
+
+            const dualSourceCount = mergedResults.filter(p => p.sources && p.sources.length > 1).length;
+            console.log(`[${requestId}] 🧬 TIER-2 MERGED: ${mergedResults.length} total products (${dualSourceCount} via both methods)`);
+
+            // Debug: Check categories of merged results
+            const categoryCounts = {};
+            mergedResults.slice(0, 10).forEach(product => {
+              if (product.category) {
+                const cats = Array.isArray(product.category) ? product.category : [product.category];
+                cats.forEach(cat => {
+                  categoryCounts[cat] = (categoryCounts[cat] || 0) + 1;
+                });
+              }
+            });
+            console.log(`[${requestId}] 🧬 TIER-2 MERGED RESULTS: First 10 products category distribution:`, categoryCounts);
+
+          } catch (error) {
+            console.error(`[${requestId}] ❌ Error in tier-2 embedding similarity search:`, error.message);
+            // Fall back to category-filtered results only
+            mergedResults = categoryFilteredResults;
+          }
+        }
+
+        cachedResults = mergedResults;
         console.log(`[${requestId}] Category-filtered search returned ${cachedResults.length} products`);
         
       } catch (error) {
@@ -5899,6 +6003,48 @@ app.post("/search", async (req, res) => {
       }
 
       const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
+
+      // 🧬 TIER-2 EMBEDDING ENHANCEMENT: Extract product embeddings from high-quality textual matches
+      try {
+        // Identify high-quality textual matches from all results (not just top 4)
+        const highQualityMatches = combinedResults.filter(product => {
+          const bonus = product.exactMatchBonus || 0;
+          return bonus >= 50000; // Exact or near-exact product name matches
+        }).slice(0, 3); // Take top 3 high-quality matches
+
+        if (highQualityMatches.length > 0) {
+          console.log(`[${requestId}] 🧬 Found ${highQualityMatches.length} high-quality textual matches (bonus >= 50k)`);
+          console.log(`[${requestId}] 🧬 Products:`, highQualityMatches.map(p => ({
+            name: p.name,
+            bonus: p.exactMatchBonus
+          })));
+
+          // Fetch product embeddings from MongoDB
+          const productIds = highQualityMatches.map(p => p._id);
+          const productsWithEmbeddings = await collection.find({
+            _id: { $in: productIds },
+            embedding: { $exists: true, $ne: null }
+          }).toArray();
+
+          if (productsWithEmbeddings.length > 0) {
+            // Store embeddings in tier-2 token
+            extractedFromLLM.topProductEmbeddings = productsWithEmbeddings.map(p => ({
+              _id: p._id,
+              name: p.name,
+              embedding: p.embedding
+            }));
+
+            console.log(`[${requestId}] 🧬 Extracted ${extractedFromLLM.topProductEmbeddings.length} embeddings for tier-2 similarity search`);
+          } else {
+            console.log(`[${requestId}] ⚠️ No embeddings found for high-quality matches`);
+          }
+        } else {
+          console.log(`[${requestId}] ℹ️ No high-quality textual matches found (bonus >= 50k) - tier-2 will use soft categories only`);
+        }
+      } catch (error) {
+        console.error(`[${requestId}] ❌ Error extracting product embeddings for tier-2:`, error.message);
+        // Continue without embeddings - tier-2 will use soft categories only
+      }
 
       // Keep hard categories from tier1 (top 4 LLM products) for tier2 search
       console.log(`[${requestId}] ℹ️ Complex query: Keeping hard categories from tier1 LLM products for tier2 search`);
