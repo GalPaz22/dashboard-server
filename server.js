@@ -2521,7 +2521,7 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     }
   }
 
-  // Multi-word partial matches
+  // Multi-word partial matches - require almost full textual match
   if (queryWords.length > 1) {
     let matchedWords = 0;
     for (const word of queryWords) {
@@ -2529,13 +2529,20 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
         matchedWords++;
       }
     }
-    // If 70% or more of query words are found
-    if (matchedWords >= Math.ceil(queryWords.length * 0.7)) {
+
+    const matchPercentage = matchedWords / queryWords.length;
+
+    // If 85% or more of query words are found (almost full match)
+    if (matchPercentage >= 0.85) {
       return 15000;
     }
-    // If at least 2 words match in a multi-word query
-    if (matchedWords >= 2) {
+    // If 75-84% of query words are found (high partial match)
+    if (matchPercentage >= 0.75) {
       return 12000;
+    }
+    // Below 75% match is not considered high-quality - give low/no bonus
+    if (matchPercentage >= 0.6) {
+      return 500; // Low bonus, won't trigger "high-quality exact text match"
     }
   }
 
