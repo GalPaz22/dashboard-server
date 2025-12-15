@@ -1929,9 +1929,39 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
 
       // If query is very short (1-2 words) and has decent matches, likely simple
       if (queryWords.length <= 2) {
-        if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5)) {
-          console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
-        return true;
+        // For 2-word queries, we need to verify text match quality to avoid false positives
+        if (queryWords.length === 2) {
+          // Calculate word match percentage
+          const productNameLower = topResult.name.toLowerCase();
+          let matchedWords = 0;
+          for (const word of queryWords) {
+            if (word.length > 1 && productNameLower.includes(word)) {
+              matchedWords++;
+            }
+          }
+          const matchPercentage = matchedWords / queryWords.length;
+
+          // Require at least 75% word match (both words for 2-word query) OR very high vector score
+          if (exactMatchBonus >= 5000) {
+            // Good text match always wins
+            console.log(`[QUERY CLASSIFICATION] ✅ 2-word query with good text match: "${topResult.name}" (bonus: ${exactMatchBonus}, word coverage: ${(matchPercentage * 100).toFixed(0)}%) → SIMPLE query`);
+            return true;
+          } else if (matchPercentage >= 0.75 && topResult.score > 2.5) {
+            // Good word coverage + decent vector score
+            console.log(`[QUERY CLASSIFICATION] ✅ 2-word query with good word coverage: "${topResult.name}" (${(matchPercentage * 100).toFixed(0)}% words matched, score: ${topResult.score}) → SIMPLE query`);
+            return true;
+          } else if (topResult.score > 6.0) {
+            // Extremely high vector score can override poor text match
+            console.log(`[QUERY CLASSIFICATION] ✅ 2-word query with exceptional vector score: "${topResult.name}" (score: ${topResult.score}, word coverage: ${(matchPercentage * 100).toFixed(0)}%) → SIMPLE query`);
+            return true;
+          }
+          // Otherwise, fall through - not enough evidence for SIMPLE classification
+        } else {
+          // Single-word query - keep original logic
+          if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5)) {
+            console.log(`[QUERY CLASSIFICATION] ✅ Single-word query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
+            return true;
+          }
         }
       }
 
@@ -1943,8 +1973,28 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
 
       // Fuzzy matches only for very short, high-scoring queries
       if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}) → SIMPLE query`);
-        return true;
+        // For 2-word queries, still require word match quality even with high vector score
+        if (queryWords.length === 2) {
+          const productNameLower = topResult.name.toLowerCase();
+          let matchedWords = 0;
+          for (const word of queryWords) {
+            if (word.length > 1 && productNameLower.includes(word)) {
+              matchedWords++;
+            }
+          }
+          const matchPercentage = matchedWords / queryWords.length;
+
+          // Even with high vector score, require at least 75% word match for 2-word queries
+          if (matchPercentage >= 0.75) {
+            console.log(`[QUERY CLASSIFICATION] ✅ 2-word query with excellent fuzzy match: "${topResult.name}" (score: ${topResult.score}, word coverage: ${(matchPercentage * 100).toFixed(0)}%) → SIMPLE query`);
+            return true;
+          }
+          // If word coverage is poor, don't classify as SIMPLE even with high vector score (< 6.0)
+        } else {
+          // Single-word query - high vector score is enough
+          console.log(`[QUERY CLASSIFICATION] ✅ Single-word query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}) → SIMPLE query`);
+          return true;
+        }
       }
     }
 
