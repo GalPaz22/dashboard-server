@@ -73,6 +73,23 @@ async function initializeRedis() {
 initializeRedis();
 
 /* =========================================================== *\
+   DEFAULT FILTER EXTRACTION PROMPTS
+\* =========================================================== */
+
+// Default prompt for alcohol/beverages industry
+// This is used when no custom classifyPrompt is provided by the user
+const DEFAULT_CLASSIFY_PROMPT = `You are an expert at extracting structured data from e-commerce search queries for online wine and alcohol shops.
+
+DOMAIN KNOWLEDGE: You are working with wine and alcohol e-commerce. You have knowledge of:
+- Wine brands and their characteristics (e.g., "אלאמוס"/"Alamos" → associated with Malbec grape variety and Mendoza region)
+- Grape varieties (Malbec, Cabernet Sauvignon, Chardonnay, Pinot Noir, Sauvignon Blanc, etc.)
+- Wine regions (Bordeaux, Burgundy, Tuscany, Mendoza, Napa Valley, Rioja, etc.)
+- Spirits brands and types (Whisky, Vodka, Gin, Rum, Tequila, etc.)
+- Wine characteristics and styles
+
+When users mention wine or alcohol brand names, USE YOUR KNOWLEDGE to extract relevant soft categories related to that brand (grape varieties, regions, styles) if they exist in the provided soft categories list.`;
+
+/* =========================================================== *\
    AI CIRCUIT BREAKER & FALLBACK SYSTEM
 \* =========================================================== */
 
@@ -515,7 +532,8 @@ async function getStoreConfigByApiKey(apiKey) {
     syncMode: userDoc.syncMode || "text",
     explain: userDoc.explain || false,
     limit: userDoc.limit || 25,
-    context: userDoc.context || "wine store" // Search limit from user config, default to 25
+    context: userDoc.context || "wine store", // Search limit from user config, default to 25
+    classifyPrompt: userDoc.classifyPrompt || null // Custom industry-specific classification prompt
   };
 }
 
@@ -2119,9 +2137,9 @@ async function getQueryEmbedding(cleanedText) {
   }, 604800);
 }
 
-async function extractFiltersFromQueryEnhanced(query, categories, types, softCategories, example, context) {
-  const cacheKey = generateCacheKey('filters', query, categories, types, softCategories, example, context);
-  
+async function extractFiltersFromQueryEnhanced(query, categories, types, softCategories, example, context, classifyPrompt = null) {
+  const cacheKey = generateCacheKey('filters', query, categories, types, softCategories, example, context, classifyPrompt);
+
   return withCache(cacheKey, async () => {
   try {
     // Check circuit breaker - use fallback if AI is unavailable
@@ -2129,17 +2147,11 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
       console.log(`[AI BYPASS] Circuit breaker open, using fallback filter extraction for: "${query}"`);
       return extractFiltersFallback(query, categories);
     }
-    
-    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries for online wine and alcohol shops. The user's context is: ${context}.
 
-DOMAIN KNOWLEDGE: You are working with wine and alcohol e-commerce. You have knowledge of:
-- Wine brands and their characteristics (e.g., "אלאמוס"/"Alamos" → associated with Malbec grape variety and Mendoza region)
-- Grape varieties (Malbec, Cabernet Sauvignon, Chardonnay, Pinot Noir, Sauvignon Blanc, etc.)
-- Wine regions (Bordeaux, Burgundy, Tuscany, Mendoza, Napa Valley, Rioja, etc.)
-- Spirits brands and types (Whisky, Vodka, Gin, Rum, Tequila, etc.)
-- Wine characteristics and styles
+    // Use custom industry prompt if provided, otherwise use default alcohol/beverages prompt
+    const industryKnowledge = classifyPrompt || DEFAULT_CLASSIFY_PROMPT;
 
-When users mention wine or alcohol brand names, USE YOUR KNOWLEDGE to extract relevant soft categories related to that brand (grape varieties, regions, styles) if they exist in the provided soft categories list.
+    const systemInstruction = `${industryKnowledge} The user's context is: ${context}.
 
 CRITICAL RULE: ALL extracted values MUST exist in the provided lists. NEVER extract values that are not in the lists.
 
@@ -4718,7 +4730,7 @@ app.post("/search", async (req, res) => {
   });
 
   let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
-  const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
+  const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit, classifyPrompt } = req.store;
 
   // Trim query to avoid classification issues with trailing/leading whitespace
   query = query ? query.trim() : query;
@@ -4752,7 +4764,7 @@ app.post("/search", async (req, res) => {
     if (translatedQuery) {
       const queryForExtraction = translatedQuery || query;
       const earlyEnhancedFilters = categories
-        ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context)
+        ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context, classifyPrompt)
         : {};
       earlySoftFilters = {
         softCategory: earlyEnhancedFilters.softCategory
@@ -4941,7 +4953,7 @@ app.post("/search", async (req, res) => {
     // Use translated query primarily since categories are likely in Hebrew
     const queryForExtraction = translatedQuery || query;
     const enhancedFilters = categories
-      ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context)
+      ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context, classifyPrompt)
       : {};
 
     // Store original extracted values before clearing (for debugging/logging)

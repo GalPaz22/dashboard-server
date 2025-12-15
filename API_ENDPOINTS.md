@@ -21,6 +21,8 @@ Main search endpoint with auto-load-more functionality.
 }
 ```
 
+**Note:** The search behavior is customized per API key through user configuration in MongoDB.
+
 **Response:**
 ```json
 {
@@ -220,6 +222,84 @@ X-API-Key: semantix_688736e523c0352ad78525fe_1753691812345
 - `/cache/clear`
 - `/cache/warm`
 - `/cache/key/:key`
+
+---
+
+## ⚙️ **User Configuration (MongoDB)**
+
+Each API key is associated with a user document in MongoDB that contains configuration settings. These settings customize the search behavior for your specific industry and use case.
+
+### **Configuration Fields**
+
+The user document in the `users` collection supports the following fields:
+
+```json
+{
+  "apiKey": "semantix_688736e523c0352ad78525fe_1753691812345",
+  "dbName": "your_database_name",
+  "collections": {
+    "products": "products",
+    "queries": "queries"
+  },
+  "credentials": {
+    "categories": "category1,category2,category3",
+    "type": "type1,type2,type3",
+    "softCategories": "attr1,attr2,attr3",
+    "softCategoriesBoosted": {
+      "attr1": 2.0,
+      "attr2": 1.5,
+      "attr3": 1.0
+    }
+  },
+  "context": "wine store",
+  "classifyPrompt": "Custom industry-specific prompt for filter extraction (optional)",
+  "syncMode": "text",
+  "explain": false,
+  "limit": 25
+}
+```
+
+### **Industry-Specific Filter Extraction with `classifyPrompt`**
+
+The `classifyPrompt` field allows you to customize the AI-powered filter extraction system for your specific industry:
+
+**Default Behavior (Alcohol/Beverages):**
+- If `classifyPrompt` is **not set** or is `null`, the system uses the default prompt optimized for wine and alcohol e-commerce
+- The default prompt includes domain knowledge about wine brands, grape varieties, regions, spirits, and wine characteristics
+
+**Custom Industry Prompts:**
+- Set `classifyPrompt` in your user document to customize filter extraction for other industries
+- The prompt should describe your industry's domain knowledge and product characteristics
+- Example for fashion industry:
+  ```json
+  {
+    "classifyPrompt": "You are an expert at extracting structured data from e-commerce search queries for online fashion stores. You have knowledge of: fashion brands, clothing types, materials, styles, seasons, occasions, and color patterns."
+  }
+  ```
+- Example for electronics:
+  ```json
+  {
+    "classifyPrompt": "You are an expert at extracting structured data from e-commerce search queries for electronics stores. You have knowledge of: device brands, specifications, compatibility, technology standards, and use cases."
+  }
+  ```
+
+**How to Set `classifyPrompt`:**
+
+Update your user document in MongoDB:
+```javascript
+db.users.updateOne(
+  { apiKey: "your-api-key" },
+  { $set: { classifyPrompt: "Your custom industry prompt here" } }
+)
+```
+
+Or remove it to use the default alcohol/beverages prompt:
+```javascript
+db.users.updateOne(
+  { apiKey: "your-api-key" },
+  { $unset: { classifyPrompt: "" } }
+)
+```
 
 ---
 
