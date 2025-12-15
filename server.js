@@ -1834,95 +1834,21 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     return false;
   }
 
-  // FIRST: Check for complex indicators BEFORE allowing hasHighTextMatch override
-  // This ensures descriptive/contextual queries remain COMPLEX even with partial text matches
   const queryWords = query.toLowerCase().split(/\s+/);
 
-  // Multi-character complex indicators (reliable matching)
-  const multiCharIndicators = [
-    // Hebrew prepositions and connectors (multi-char only to avoid false positives)
-    'עבור', 'על', 'של', 'עם', 'ללא', 'בלי', 'אל', 'עד', 'או',
-
-    // Wine-specific complex terms (Hebrew)
-    'גפנים', 'בוגרות', 'בציר', 'מיושן', 'מאוחסן', 'יקב', 'כרם', 'טרואר',
-    'אלון', 'צרפתי', 'אמריקאי', 'בלגי', 'כבישה', 'תסיסה', 'יישון',
-
-    // Usage/pairing terms (Hebrew)
-    'לעל', 'האש', 'עוף', 'דגים', 'בשר', 'גבינות', 'פסטה', 'סלט', 'מרק',
-    'קינוח', 'חג', 'שבת', 'ארוחת', 'ערב', 'צהריים', 'בוקר',
-
-    // Seasonal/contextual terms (Hebrew)
-    'חורף', 'קיץ', 'אביב', 'סתיו', 'קר', 'חם', 'חמים', 'קרים', 'טריים',
-
-    // Taste descriptors (Hebrew)
-    'יבש', 'חריף', 'מתוק', 'קל', 'כבד', 'מלא', 'פירותי', 'פרחוני', 'עשבי',
-    'ווניל', 'שוקולד', 'עץ', 'בל', 'חלק', 'מחוספס', 'מאוזן', 'הרמוני',
-
-    // Quality/price terms (Hebrew)
-    'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד', 'נדיר', 'יוקרתי',
-    'במחיר', 'שווה', 'משתלם',
-
-    // English terms (for mixed queries)
-    'vintage', 'reserve', 'grand', 'premium', 'organic', 'biodynamic',
-    'single', 'estate', 'vineyard', 'barrel', 'aged', 'matured'
-  ];
-
-  // Single-letter prefixes (ל, ב, מ) - check only at word start for known patterns
-  const singleLetterPrefixes = ['ל', 'ב', 'מ'];
-
-  // Check for multi-character complex indicators
-  // For short indicators (2-3 chars), require exact word match to avoid false positives
-  // For longer indicators (4+ chars), allow substring matching
-  const hasMultiCharIndicators = queryWords.some(word =>
-    multiCharIndicators.some(indicator => {
-      if (indicator.length <= 3) {
-        // Short indicators: require exact match
-        return word === indicator;
-      } else {
-        // Longer indicators: allow substring matching
-        return word.includes(indicator) || indicator.includes(word);
-      }
-    })
-  );
-
-  // Check for single-letter prefixes at the start of words that form known patterns
-  const hasPrefixPattern = queryWords.some(word => {
-    if (word.length <= 2) return false; // Too short to be a prefix + meaningful word
-    for (const prefix of singleLetterPrefixes) {
-      if (word.startsWith(prefix)) {
-        const remainder = word.substring(1);
-        // Check if remainder matches any known complex indicator (contextual term)
-        if (multiCharIndicators.some(ind => remainder.includes(ind) || ind.includes(remainder))) {
-          return true;
-        }
-      }
-    }
-    return false;
-  });
-
-  const hasComplexIndicators = hasMultiCharIndicators || hasPrefixPattern;
-
-  // If query has complex indicators and is longer than 2 words, it's COMPLEX regardless of text matches
-  if (hasComplexIndicators && queryWords.length >= 2) {
-    console.log(`[QUERY CLASSIFICATION] 🔴 COMPLEX indicators detected (${queryWords.length} words with context) → COMPLEX query (overriding hasHighTextMatch=${hasHighTextMatch})`);
-    return false;
-  }
-
-  // PRIORITY: If high text match is present AND no complex indicators, force simple classification
+  // PRIORITY #1: Check if hasHighTextMatch flag is set (pre-validated high-quality match)
   if (hasHighTextMatch) {
-    console.log(`[QUERY CLASSIFICATION] ✅ High-quality text match detected (hasHighTextMatch=true, no complex indicators) → SIMPLE query`);
+    console.log(`[QUERY CLASSIFICATION] ✅ High-quality text match detected (hasHighTextMatch=true) → SIMPLE query (${queryWords.length} words)`);
     return true;
   }
-  
-  // TEXT-BASED CLASSIFICATION ONLY: Always perform text search to check for matches
-  // If we find good text matches, it's a simple query (product name)
-  // If no good matches, it's complex (descriptive/intent-based)
-  // NO AI CLASSIFICATION USED
+
+  // PRIORITY #2: TEXT-BASED CLASSIFICATION - Perform database search to find text matches
+  // Good text matches = SIMPLE query (product name), regardless of word count or complex indicators
   try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName || process.env.MONGODB_DB_NAME);
     const collection = db.collection("products");
-    
+
     // Perform a quick text search with a small limit across multiple fields
     const quickTextSearchPipeline = [
       {
@@ -1986,26 +1912,21 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
         }
       }
     ];
-    
+
     const quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
 
-    // If query is very long (>4 words), likely complex regardless of matches
-    if (queryWords.length > 4) {
-      console.log(`[QUERY CLASSIFICATION] 🔴 Very long query (${queryWords.length} words) → COMPLEX query`);
-      return false;
-    }
-    
     if (quickResults.length > 0) {
       // Calculate text match quality
       const topResult = quickResults[0];
       const exactMatchBonus = getExactMatchBonus(topResult.name, query, query);
-      
+
       // If we have a high-quality exact text match, it's definitely a simple query (product name)
+      // This applies REGARDLESS of word count or complex indicators
       if (exactMatchBonus >= 1000) {
-        console.log(`[QUERY CLASSIFICATION] ✅ High-quality exact text match: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
+        console.log(`[QUERY CLASSIFICATION] ✅ High-quality exact text match: "${topResult.name}" (bonus: ${exactMatchBonus}, ${queryWords.length} words) → SIMPLE query`);
         return true;
       }
-      
+
       // If query is very short (1-2 words) and has decent matches, likely simple
       if (queryWords.length <= 2) {
         if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5)) {
@@ -2026,17 +1947,92 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
         return true;
       }
     }
-    
-    // No good text matches found → COMPLEX query (descriptive/intent-based)
-    console.log(`[QUERY CLASSIFICATION] ❌ No strong text matches found (${quickResults.length} results) → COMPLEX query`);
-    return false;
-    
+
   } catch (error) {
     console.error('[QUERY CLASSIFICATION] Text search failed:', error.message);
-    // If text search fails, default to COMPLEX to be safe (will use LLM reordering)
-    console.log('[QUERY CLASSIFICATION] ⚠️ Text search error, defaulting to COMPLEX query');
+    // If text search fails, continue to complex indicator check below
+  }
+
+  // PRIORITY #3: Only if NO good text match was found, check for complex indicators
+  // Multi-character complex indicators (reliable matching)
+  const multiCharIndicators = [
+    // Hebrew prepositions and connectors (multi-char only to avoid false positives)
+    'עבור', 'על', 'של', 'עם', 'ללא', 'בלי', 'אל', 'עד', 'או',
+
+    // Wine-specific complex terms (Hebrew)
+    'גפנים', 'בוגרות', 'בציר', 'מיישן', 'מאוחסן', 'יקב', 'כרם', 'טרואר',
+    'אלון', 'צרפתי', 'אמריקאי', 'בלגי', 'כבישה', 'תסיסה', 'יישון',
+
+    // Usage/pairing terms (Hebrew)
+    'לעל', 'האש', 'עוף', 'דגים', 'בשר', 'גבינות', 'פסטה', 'סלט', 'מרק',
+    'קינוח', 'חג', 'שבת', 'ארוחת', 'ערב', 'צהריים', 'בוקר',
+
+    // Seasonal/contextual terms (Hebrew)
+    'חורף', 'קיץ', 'אביב', 'סתיו', 'קר', 'חם', 'חמים', 'קרים', 'טריים',
+
+    // Taste descriptors (Hebrew)
+    'יבש', 'חריף', 'מתוק', 'קל', 'כבד', 'מלא', 'פירותי', 'פרחוני', 'עשבי',
+    'ווניל', 'שוקולד', 'עץ', 'בל', 'חלק', 'מחוספס', 'מאוזן', 'הרמוני',
+
+    // Quality/price terms (Hebrew)
+    'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד', 'נדיר', 'יוקרתי',
+    'במחיר', 'שווה', 'משתלם',
+
+    // English terms (for mixed queries)
+    'vintage', 'reserve', 'grand', 'premium', 'organic', 'biodynamic',
+    'single', 'estate', 'vineyard', 'barrel', 'aged', 'matured'
+  ];
+
+  // Single-letter prefixes (ל, ב, מ) - check only at word start for known patterns
+  const singleLetterPrefixes = ['ל', 'ב', 'מ'];
+
+  // Check for multi-character complex indicators
+  // For short indicators (2-3 chars), require exact word match to avoid false positives
+  // For longer indicators (4+ chars), allow substring matching
+  const hasMultiCharIndicators = queryWords.some(word =>
+    multiCharIndicators.some(indicator => {
+      if (indicator.length <= 3) {
+        // Short indicators: require exact match
+        return word === indicator;
+      } else {
+        // Longer indicators: allow substring matching
+        return word.includes(indicator) || indicator.includes(word);
+      }
+    })
+  );
+
+  // Check for single-letter prefixes at the start of words that form known patterns
+  const hasPrefixPattern = queryWords.some(word => {
+    if (word.length <= 2) return false; // Too short to be a prefix + meaningful word
+    for (const prefix of singleLetterPrefixes) {
+      if (word.startsWith(prefix)) {
+        const remainder = word.substring(1);
+        // Check if remainder matches any known complex indicator (contextual term)
+        if (multiCharIndicators.some(ind => remainder.includes(ind) || ind.includes(remainder))) {
+          return true;
+        }
+      }
+    }
+    return false;
+  });
+
+  const hasComplexIndicators = hasMultiCharIndicators || hasPrefixPattern;
+
+  // If query has complex indicators or is very long, it's COMPLEX
+  if (hasComplexIndicators && queryWords.length >= 2) {
+    console.log(`[QUERY CLASSIFICATION] 🔴 COMPLEX indicators detected (${queryWords.length} words with contextual terms) → COMPLEX query`);
     return false;
   }
+
+  // Very long queries without text matches are likely complex/descriptive
+  if (queryWords.length > 4) {
+    console.log(`[QUERY CLASSIFICATION] 🔴 Very long query (${queryWords.length} words) with no strong text match → COMPLEX query`);
+    return false;
+  }
+
+  // No good text matches found and no clear complex indicators → default to COMPLEX to be safe
+  console.log(`[QUERY CLASSIFICATION] ❌ No strong text matches found (${queryWords.length} words) → COMPLEX query`);
+  return false;
 }
 
 function removeWineFromQuery(translatedQuery, noWord) {
