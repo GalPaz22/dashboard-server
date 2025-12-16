@@ -2484,21 +2484,41 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     return 90000; // Very high boost (was 45000)
   }
   
-  // Product name contains full query
+  // Product name contains full query - with positional scoring
   if (productNameLower.includes(queryLower)) {
+    // HIGHER bonus if query appears at the START of product name
+    // This makes "עגבניות טריות" rank higher than "רוטב עגבניות"
+    if (productNameLower.startsWith(queryLower + ' ') ||
+        productNameLower === queryLower ||
+        productNameLower.startsWith(queryLower)) {
+      return 65000; // Query at beginning → higher priority
+    }
+    // Query appears later in the product name
     return 60000; // High boost for text matches (was 30000)
   }
-  
-  // Product name contains cleaned query
+
+  // Product name contains cleaned query - with positional scoring
   if (cleanedQueryLower && productNameLower.includes(cleanedQueryLower)) {
+    // Higher bonus if cleaned query at start
+    if (productNameLower.startsWith(cleanedQueryLower + ' ') ||
+        productNameLower === cleanedQueryLower ||
+        productNameLower.startsWith(cleanedQueryLower)) {
+      return 55000; // Cleaned query at beginning
+    }
     return 50000; // (was 25000)
   }
   
-  // Multi-word phrase match
+  // Multi-word phrase match - with positional scoring
   const queryWords = queryLower.split(/\s+/);
   if (queryWords.length > 1) {
     const queryPhrase = queryWords.join(' ');
     if (productNameLower.includes(queryPhrase)) {
+      // Higher bonus if phrase at start
+      if (productNameLower.startsWith(queryPhrase + ' ') ||
+          productNameLower === queryPhrase ||
+          productNameLower.startsWith(queryPhrase)) {
+        return 45000; // Phrase at beginning
+      }
       return 40000; // (was 20000)
     }
   }
