@@ -1929,7 +1929,9 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
 
       // If query is very short (1-2 words) and has decent matches, likely simple
       if (queryWords.length <= 2) {
-        if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5)) {
+        // REQUIRE BOTH: high Atlas score AND reasonable word coverage (bonus >= 500 means 60%+ words match)
+        // This prevents abbreviated/partial queries like "עוגה ללג" from being classified as SIMPLE
+        if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5 && exactMatchBonus >= 500)) {
           console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
         return true;
         }
@@ -1942,8 +1944,9 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
       }
 
       // Fuzzy matches only for very short, high-scoring queries
-      if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}) → SIMPLE query`);
+      // Also require word coverage to avoid false positives on abbreviations
+      if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5 && exactMatchBonus >= 500) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}, bonus: ${exactMatchBonus}) → SIMPLE query`);
         return true;
       }
     }
@@ -2130,16 +2133,14 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
       return extractFiltersFallback(query, categories);
     }
     
-    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries for online wine and alcohol shops. The user's context is: ${context}.
+    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context/domain is: ${context || 'online wine and alcohol shop'}.
 
-DOMAIN KNOWLEDGE: You are working with wine and alcohol e-commerce. You have knowledge of:
-- Wine brands and their characteristics (e.g., "אלאמוס"/"Alamos" → associated with Malbec grape variety and Mendoza region)
-- Grape varieties (Malbec, Cabernet Sauvignon, Chardonnay, Pinot Noir, Sauvignon Blanc, etc.)
-- Wine regions (Bordeaux, Burgundy, Tuscany, Mendoza, Napa Valley, Rioja, etc.)
-- Spirits brands and types (Whisky, Vodka, Gin, Rum, Tequila, etc.)
-- Wine characteristics and styles
+DOMAIN KNOWLEDGE: You should use your knowledge of the domain specified in the context above. For example:
+- If working with wine/alcohol: wine brands, grape varieties, regions (Bordeaux, Tuscany, Mendoza, etc.), spirits types (Whisky, Vodka, Gin, etc.)
+- If working with food/bakery: dietary restrictions (gluten-free, vegan, kosher, etc.), ingredients, cuisine types, meal occasions
+- If working with other domains: apply relevant domain expertise from your knowledge base
 
-When users mention wine or alcohol brand names, USE YOUR KNOWLEDGE to extract relevant soft categories related to that brand (grape varieties, regions, styles) if they exist in the provided soft categories list.
+When users mention brand names or domain-specific terms, USE YOUR KNOWLEDGE to extract relevant soft categories related to that term if they exist in the provided soft categories list.
 
 CRITICAL RULE: ALL extracted values MUST exist in the provided lists. NEVER extract values that are not in the lists.
 
