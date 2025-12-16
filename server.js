@@ -2523,6 +2523,25 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     }
   }
 
+  // HIGH-SIMILARITY MATCHES AT START - Catches singular/plural variants (עגבניה/עגבניות)
+  // Check if product starts with a word very similar to the query
+  if (queryWords.length === 1 && queryWords[0].length >= 3) {
+    const queryWord = queryWords[0];
+    const productWords = productNameLower.split(/\s+/);
+
+    // Check first word of product name
+    if (productWords.length > 0 && productWords[0].length >= 3) {
+      const firstWord = productWords[0];
+      const similarity = calculateStringSimilarity(queryWord, firstWord);
+
+      // High similarity (70%+) at start of product name gets near-exact match bonus
+      // This handles: עגבניות ↔ עגבניה (71.4% similarity)
+      if (similarity >= 0.70) {
+        return 63000; // Very high bonus for similar word at start
+      }
+    }
+  }
+
   // NEAR EXACT MATCHES - More forgiving matching for partial/high similarity matches
   // Single word query with high similarity
   if (queryWords.length === 1) {
