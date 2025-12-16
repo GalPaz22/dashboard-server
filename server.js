@@ -515,7 +515,8 @@ async function getStoreConfigByApiKey(apiKey) {
     syncMode: userDoc.syncMode || "text",
     explain: userDoc.explain || false,
     limit: userDoc.limit || 25,
-    context: userDoc.context || "wine store" // Search limit from user config, default to 25
+    context: userDoc.context || "wine store", // Search limit from user config, default to 25
+    enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false // Toggle for category extraction on simple queries (default: false)
   };
 }
 
@@ -5951,12 +5952,58 @@ app.post("/search", async (req, res) => {
       }
     } else if (hasMore) {
       // Simple queries: Only create token if there are more results
+      // Check if category extraction is enabled for simple queries
+      let extractedForSimple = extractedCategoriesMetadata;
+
+      if (store.enableSimpleCategoryExtraction && limitedResults.length > 0) {
+        console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH CATEGORY EXTRACTION ENABLED - Preparing tier-2 token`);
+
+        // Get the top 4 products for category extraction (similar to complex query logic)
+        const top4Products = limitedResults.slice(0, 4);
+        console.log(`[${requestId}] Analyzing TOP 4 products for category extraction (simple query mode)`);
+        console.log(`[${requestId}] Top 4 product names:`, top4Products.map(p => p.name));
+
+        const extractedFromTop4 = extractCategoriesFromProducts(top4Products);
+
+        // Merge with initial query filters if present
+        if (enhancedFilters) {
+          if (enhancedFilters.category) {
+            console.log(`[${requestId}] ℹ️ Simple query: Restoring initial hard category "${enhancedFilters.category}" as priority`);
+            extractedFromTop4.hardCategories.push(enhancedFilters.category);
+          }
+
+          if (enhancedFilters.softCategory) {
+            const initialSoftCats = Array.isArray(enhancedFilters.softCategory)
+              ? enhancedFilters.softCategory
+              : [enhancedFilters.softCategory];
+
+            console.log(`[${requestId}] ℹ️ Simple query: Merging initial soft categories [${initialSoftCats.join(', ')}] with priority`);
+
+            const llmSoftCats = extractedFromTop4.softCategories || [];
+            const uniqueLlmSoftCats = llmSoftCats.filter(cat => !initialSoftCats.includes(cat));
+
+            extractedFromTop4.softCategories = [...initialSoftCats, ...uniqueLlmSoftCats];
+          }
+        }
+
+        extractedForSimple = extractedFromTop4;
+
+        console.log(`[${requestId}] ✅ Simple query: Created tier-2 load-more token with categories from TOP 4 products`);
+        console.log(`[${requestId}] 📊 Extracted categories (from 4 products): hard=${extractedFromTop4.hardCategories?.length || 0}, soft=${extractedFromTop4.softCategories?.length || 0}`);
+        if (extractedFromTop4.hardCategories?.length > 0) {
+          console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromTop4.hardCategories)}`);
+        }
+        if (extractedFromTop4.softCategories?.length > 0) {
+          console.log(`[${requestId}]    🎯 Soft: ${JSON.stringify(extractedFromTop4.softCategories)}`);
+        }
+      }
+
       nextToken = Buffer.from(JSON.stringify({
         query,
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
-        extractedCategories: extractedCategoriesMetadata // Include extracted categories for load-more
+        extractedCategories: extractedForSimple // Include extracted categories for load-more
       })).toString('base64');
     }
     
