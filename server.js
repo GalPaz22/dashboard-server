@@ -119,6 +119,170 @@ const aiCircuitBreaker = {
   }
 };
 
+/* =========================================================== *\
+   INJECTION PROTECTION & QUERY SANITIZATION
+\* =========================================================== */
+
+/**
+ * Detects and blocks SQL Injection, NoSQL Injection, and malicious query patterns
+ * @param {string} query - The user search query to validate
+ * @param {string} requestId - Request ID for logging
+ * @returns {Object} { isValid: boolean, reason: string|null, sanitizedQuery: string }
+ */
+function validateAndSanitizeQuery(query, requestId = 'unknown') {
+  // Return early for null/undefined queries
+  if (query === null || query === undefined) {
+    return { isValid: true, reason: null, sanitizedQuery: query };
+  }
+
+  // Convert to string and trim
+  const queryStr = String(query).trim();
+
+  // Check query length (prevent extremely long queries)
+  const MAX_QUERY_LENGTH = 500;
+  if (queryStr.length > MAX_QUERY_LENGTH) {
+    console.warn(`[${requestId}] [SECURITY] Query too long: ${queryStr.length} characters (max: ${MAX_QUERY_LENGTH})`);
+    return {
+      isValid: false,
+      reason: 'Query too long',
+      sanitizedQuery: null
+    };
+  }
+
+  // Empty queries are allowed
+  if (queryStr.length === 0) {
+    return { isValid: true, reason: null, sanitizedQuery: queryStr };
+  }
+
+  // SQL Injection patterns - Common attack vectors
+  const sqlInjectionPatterns = [
+    // Time-based blind SQL injection
+    /waitfor\s+delay/i,
+    /sleep\s*\(/i,
+    /benchmark\s*\(/i,
+    /pg_sleep\s*\(/i,
+
+    // UNION-based SQL injection
+    /union\s+(all\s+)?select/i,
+
+    // Stacked queries
+    /;\s*(drop|delete|insert|update|alter|create|exec|execute)\s+/i,
+
+    // Comment-based injection
+    /--\s*$/,
+    /\/\*.*\*\//,
+    /;\s*--/,
+
+    // SQL commands that should never appear in search queries
+    /\b(drop|truncate|alter|create)\s+(table|database|index|view)/i,
+    /\bexec(ute)?\s*\(/i,
+    /\bxp_cmdshell\b/i,
+    /\bsp_executesql\b/i,
+
+    // Boolean-based blind SQL injection
+    /\b(and|or)\s+\d+\s*=\s*\d+/i,
+    /\'\s*(and|or)\s+\'/i,
+
+    // Other dangerous patterns
+    /\binto\s+outfile\b/i,
+    /\bload_file\s*\(/i,
+  ];
+
+  // NoSQL Injection patterns - MongoDB specific
+  const noSqlInjectionPatterns = [
+    // MongoDB operators that should not appear in search strings
+    /\$where\b/i,
+    /\$function\b/i,
+    /\$accumulator\b/i,
+    /\$expr\b/i,
+
+    // JavaScript execution attempts
+    /\bthis\.\w+/,  // 'this.password' etc in $where
+    /\breturn\s+/i,
+
+    // Regex injection patterns
+    /\{\s*\$regex\s*:/i,
+    /\{\s*\$ne\s*:/i,
+    /\{\s*\$gt\s*:/i,
+    /\{\s*\$gte\s*:/i,
+    /\{\s*\$lt\s*:/i,
+    /\{\s*\$lte\s*:/i,
+  ];
+
+  // Script injection / XSS patterns
+  const scriptInjectionPatterns = [
+    /<script[^>]*>.*?<\/script>/i,
+    /javascript:/i,
+    /onerror\s*=/i,
+    /onload\s*=/i,
+    /<iframe/i,
+  ];
+
+  // Check SQL injection patterns
+  for (const pattern of sqlInjectionPatterns) {
+    if (pattern.test(queryStr)) {
+      const matched = queryStr.match(pattern);
+      console.error(`[${requestId}] [SECURITY ALERT] SQL Injection attempt detected!`);
+      console.error(`[${requestId}] [SECURITY ALERT] Pattern: ${pattern}`);
+      console.error(`[${requestId}] [SECURITY ALERT] Matched: "${matched?.[0]}"`);
+      console.error(`[${requestId}] [SECURITY ALERT] Full query: "${queryStr}"`);
+
+      return {
+        isValid: false,
+        reason: 'Potential SQL injection detected',
+        sanitizedQuery: null,
+        attackType: 'SQL_INJECTION',
+        matchedPattern: matched?.[0]
+      };
+    }
+  }
+
+  // Check NoSQL injection patterns
+  for (const pattern of noSqlInjectionPatterns) {
+    if (pattern.test(queryStr)) {
+      const matched = queryStr.match(pattern);
+      console.error(`[${requestId}] [SECURITY ALERT] NoSQL Injection attempt detected!`);
+      console.error(`[${requestId}] [SECURITY ALERT] Pattern: ${pattern}`);
+      console.error(`[${requestId}] [SECURITY ALERT] Matched: "${matched?.[0]}"`);
+      console.error(`[${requestId}] [SECURITY ALERT] Full query: "${queryStr}"`);
+
+      return {
+        isValid: false,
+        reason: 'Potential NoSQL injection detected',
+        sanitizedQuery: null,
+        attackType: 'NOSQL_INJECTION',
+        matchedPattern: matched?.[0]
+      };
+    }
+  }
+
+  // Check script injection patterns
+  for (const pattern of scriptInjectionPatterns) {
+    if (pattern.test(queryStr)) {
+      const matched = queryStr.match(pattern);
+      console.error(`[${requestId}] [SECURITY ALERT] Script injection attempt detected!`);
+      console.error(`[${requestId}] [SECURITY ALERT] Pattern: ${pattern}`);
+      console.error(`[${requestId}] [SECURITY ALERT] Matched: "${matched?.[0]}"`);
+      console.error(`[${requestId}] [SECURITY ALERT] Full query: "${queryStr}"`);
+
+      return {
+        isValid: false,
+        reason: 'Potential script injection detected',
+        sanitizedQuery: null,
+        attackType: 'SCRIPT_INJECTION',
+        matchedPattern: matched?.[0]
+      };
+    }
+  }
+
+  // Query passed all validation checks
+  return {
+    isValid: true,
+    reason: null,
+    sanitizedQuery: queryStr
+  };
+}
+
 // Fallback: Rule-based query classification (simple vs complex)
 
 // Fallback: Rule-based filter extraction
@@ -4770,7 +4934,20 @@ app.post("/search", async (req, res) => {
 
   // Trim query to avoid classification issues with trailing/leading whitespace
   query = query ? query.trim() : query;
-  
+
+  // SECURITY: Validate and sanitize query to prevent SQL/NoSQL injection attacks
+  const validationResult = validateAndSanitizeQuery(query, requestId);
+  if (!validationResult.isValid) {
+    console.error(`[${requestId}] [SECURITY] Blocked malicious query`);
+    return res.status(400).json({
+      error: 'Invalid search query',
+      message: validationResult.reason,
+      details: 'Your search query contains potentially malicious patterns and has been blocked for security reasons.'
+    });
+  }
+  // Use sanitized query for all subsequent operations
+  query = validationResult.sanitizedQuery;
+
   // Default to legacy mode (array only) for backward compatibility
   // Only use modern format (with pagination) if explicitly requested
   const isModernMode = modern === true || modern === 'true';
@@ -6303,7 +6480,21 @@ app.post("/search-to-cart", async (req, res) => {
     if (!document || !document.search_query || !document.event_type) {
       return res.status(400).json({ error: "Missing required fields: search_query and event_type" });
     }
-    
+
+    // SECURITY: Validate search_query to prevent SQL/NoSQL injection attacks
+    const requestId = Math.random().toString(36).substr(2, 9);
+    const validationResult = validateAndSanitizeQuery(document.search_query, requestId);
+    if (!validationResult.isValid) {
+      console.error(`[${requestId}] [SECURITY] Blocked malicious query in search-to-cart`);
+      return res.status(400).json({
+        error: 'Invalid search query',
+        message: validationResult.reason,
+        details: 'Your search query contains potentially malicious patterns and has been blocked for security reasons.'
+      });
+    }
+    // Use sanitized query
+    document.search_query = validationResult.sanitizedQuery;
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     
@@ -7654,9 +7845,9 @@ app.post("/active-users-search", async (req, res) => {
     }
     
     const { dbName } = store;
-    const { 
-      customer_segment, 
-      price_sensitivity, 
+    const {
+      customer_segment,
+      price_sensitivity,
       min_purchases,
       max_purchases,
       min_spent,
@@ -7665,11 +7856,42 @@ app.post("/active-users-search", async (req, res) => {
       search_count_min,
       view_count_min
     } = req.body;
-    
+
+    // SECURITY: Validate that parameters are primitive values to prevent NoSQL injection
+    const requestId = Math.random().toString(36).substr(2, 9);
+    const params = { customer_segment, price_sensitivity, min_purchases, max_purchases,
+                     min_spent, max_spent, is_logged_in, search_count_min, view_count_min };
+
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null) {
+        // Reject objects and arrays (potential NoSQL injection)
+        if (typeof value === 'object') {
+          console.error(`[${requestId}] [SECURITY] Rejected object/array in parameter: ${key}`);
+          return res.status(400).json({
+            error: 'Invalid parameter type',
+            message: `Parameter "${key}" must be a primitive value (string, number, or boolean)`,
+            details: 'Object and array parameters are not allowed for security reasons.'
+          });
+        }
+        // Validate string parameters for injection patterns
+        if (typeof value === 'string') {
+          const validationResult = validateAndSanitizeQuery(value, requestId);
+          if (!validationResult.isValid) {
+            console.error(`[${requestId}] [SECURITY] Blocked malicious value in parameter: ${key}`);
+            return res.status(400).json({
+              error: 'Invalid parameter value',
+              message: validationResult.reason,
+              details: 'Your parameter contains potentially malicious patterns and has been blocked for security reasons.'
+            });
+          }
+        }
+      }
+    }
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const usersCollection = db.collection('active_users');
-    
+
     // Build query
     const query = {};
     
