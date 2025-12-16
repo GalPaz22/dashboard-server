@@ -2523,8 +2523,72 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     }
   }
 
+  // HEBREW PLURAL FORMS - Detect common plural suffixes (ים-, ות-)
+  // This ensures תפוחים ranks higher than תפוחי אדמה when searching for תפוח
+  if (queryWords.length === 1 && queryWords[0].length >= 3) {
+    const queryWord = queryWords[0];
+    const productWords = productNameLower.split(/\s+/);
+
+    if (productWords.length > 0 && productWords[0].length >= 3) {
+      const firstWord = productWords[0];
+
+      // Helper: Convert Hebrew final letters to regular form
+      const finalToRegular = {
+        'ם': 'מ', 'ן': 'נ', 'ץ': 'צ', 'ף': 'פ', 'ך': 'כ'
+      };
+
+      function normalizeFinalLetter(word) {
+        if (word.length === 0) return word;
+        const lastChar = word[word.length - 1];
+        if (finalToRegular[lastChar]) {
+          return word.slice(0, -1) + finalToRegular[lastChar];
+        }
+        return word;
+      }
+
+      // Pattern 1: Direct suffix addition (תפוח → תפוחים)
+      if (firstWord === queryWord + 'ים' || firstWord === queryWord + 'ות') {
+        if (productWords.length === 1) {
+          return 64000; // Standalone plural form - very high priority
+        }
+        return 63500; // Plural + descriptors
+      }
+
+      // Pattern 1b: With final letter normalization (מלפפון → מלפפונים)
+      const normalizedQuery = normalizeFinalLetter(queryWord);
+      if (firstWord === normalizedQuery + 'ים' || firstWord === normalizedQuery + 'ות') {
+        if (productWords.length === 1) {
+          return 64000; // Standalone plural form
+        }
+        return 63500; // Plural + descriptors
+      }
+
+      // Pattern 2: Replace final ה with ות (בננה → בננות, עגבניה → עגבניות)
+      if (queryWord.endsWith('ה') && queryWord.length >= 4) {
+        const stem = queryWord.slice(0, -1); // Remove ה
+        if (firstWord === stem + 'ות') {
+          if (productWords.length === 1) {
+            return 64000; // Standalone plural form
+          }
+          return 63500; // Plural + descriptors
+        }
+      }
+
+      // Pattern 3: Replace final י with ים (rare but possible)
+      if (queryWord.endsWith('י') && queryWord.length >= 4) {
+        const stem = queryWord.slice(0, -1); // Remove י
+        if (firstWord === stem + 'ים') {
+          if (productWords.length === 1) {
+            return 64000; // Standalone plural form
+          }
+          return 63500; // Plural + descriptors
+        }
+      }
+    }
+  }
+
   // HIGH-SIMILARITY MATCHES AT START - Catches singular/plural variants (עגבניה/עגבניות)
-  // Check if product starts with a word very similar to the query
+  // Also catches construct state forms like תפוחי (in תפוחי אדמה)
   if (queryWords.length === 1 && queryWords[0].length >= 3) {
     const queryWord = queryWords[0];
     const productWords = productNameLower.split(/\s+/);
@@ -2536,7 +2600,13 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
 
       // High similarity (70%+) at start of product name gets near-exact match bonus
       // This handles: עגבניות ↔ עגבניה (71.4% similarity)
+      // And construct forms: תפוחי אדמה when searching תפוח (80% but multi-word)
       if (similarity >= 0.70) {
+        // Penalize multi-word construct phrases slightly
+        // תפוחי אדמה is 2 words (construct + noun) - lower priority than standalone
+        if (productWords.length >= 2) {
+          return 62000; // Construct state with compound meaning (lower priority)
+        }
         return 63000; // Very high bonus for similar word at start
       }
     }
