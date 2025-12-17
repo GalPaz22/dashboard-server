@@ -6071,7 +6071,7 @@ app.post("/search", async (req, res) => {
       // Check if category extraction is enabled for simple queries
       let extractedForSimple = extractedCategoriesMetadata;
 
-      if (store.enableSimpleCategoryExtraction && limitedResults.length > 0) {
+      if (req.store.enableSimpleCategoryExtraction && limitedResults.length > 0) {
         console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH CATEGORY EXTRACTION ENABLED - Preparing tier-2 token`);
 
         // Get the top 4 products for category extraction (similar to complex query logic)
