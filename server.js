@@ -1900,7 +1900,7 @@ async function checkFieldMatches(query, dbName = null) {
   }
 }
 
-async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null, hasHighTextMatch) {
+async function isSimpleProductNameQuery(query, filters, categories, types, softCategories, context, dbName = null, hasHighTextMatch, preliminaryResults = null) {
   if (filters && Object.keys(filters).length > 0) {
     return false;
   }
@@ -1913,118 +1913,127 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     return true;
   }
 
-  // PRIORITY #2: TEXT-BASED CLASSIFICATION - Perform database search to find text matches
+  // PRIORITY #2: TEXT-BASED CLASSIFICATION - Use preliminary results if available to avoid duplicate DB query
   // Good text matches = SIMPLE query (product name), regardless of word count or complex indicators
-  try {
-    const client = await connectToMongoDB(mongodbUri);
-    const db = client.db(dbName || process.env.MONGODB_DB_NAME);
-    const collection = db.collection("products");
+  let quickResults = preliminaryResults;
 
-    // Perform a quick text search with a small limit across multiple fields
-    const quickTextSearchPipeline = [
-      {
-        $search: {
-          index: "default",
-          compound: {
-            should: [
-              {
-          text: {
-            query: query,
-                  path: "name",
-            fuzzy: {
-              maxEdits: 1,
-              prefixLength: 2
-            }
-                }
-              },
-              {
-                text: {
-                  query: query,
-                  path: "description",
-                  fuzzy: {
-                    maxEdits: 1,
-                    prefixLength: 3
-          }
-        }
-      },
-      {
-                text: {
-                  query: query,
-                  path: "category",
-                  fuzzy: {
-                    maxEdits: 1,
-                    prefixLength: 2
-                  }
-                }
-              },
-              {
-                text: {
-                  query: query,
-                  path: "softCategory",
-                  fuzzy: {
-                    maxEdits: 1,
-                    prefixLength: 2
-                  }
-                }
+  // Only perform database search if we don't have preliminary results
+  if (!quickResults || quickResults.length === 0) {
+    try {
+      const client = await connectToMongoDB(mongodbUri);
+      const db = client.db(dbName || process.env.MONGODB_DB_NAME);
+      const collection = db.collection("products");
+
+      // Perform a quick text search with a small limit across multiple fields
+      const quickTextSearchPipeline = [
+        {
+          $search: {
+            index: "default",
+            compound: {
+              should: [
+                {
+            text: {
+              query: query,
+                    path: "name",
+              fuzzy: {
+                maxEdits: 1,
+                prefixLength: 2
               }
-            ]
+                  }
+                },
+                {
+                  text: {
+                    query: query,
+                    path: "description",
+                    fuzzy: {
+                      maxEdits: 1,
+                      prefixLength: 3
+            }
+          }
+        },
+        {
+                  text: {
+                    query: query,
+                    path: "category",
+                    fuzzy: {
+                      maxEdits: 1,
+                      prefixLength: 2
+                    }
+                  }
+                },
+                {
+                  text: {
+                    query: query,
+                    path: "softCategory",
+                    fuzzy: {
+                      maxEdits: 1,
+                      prefixLength: 2
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        {
+          $limit: 15 // Increased limit to get more diverse matches
+        },
+        {
+          $project: {
+            name: 1,
+            category: 1,
+            softCategory: 1,
+            score: { $meta: "searchScore" }
           }
         }
-      },
-      {
-        $limit: 15 // Increased limit to get more diverse matches
-      },
-      {
-        $project: {
-          name: 1,
-          category: 1,
-          softCategory: 1,
-          score: { $meta: "searchScore" }
-        }
-      }
-    ];
+      ];
 
-    const quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
+      quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
 
-    if (quickResults.length > 0) {
-      // Calculate text match quality
-      const topResult = quickResults[0];
-      const exactMatchBonus = getExactMatchBonus(topResult.name, query, query);
+    } catch (error) {
+      console.error('[QUERY CLASSIFICATION] Text search failed:', error.message);
+      quickResults = [];
+      // If text search fails, continue to complex indicator check below
+    }
+  } else {
+    console.log(`[QUERY CLASSIFICATION] ⚡ Reusing preliminary search results (${quickResults.length} results) - skipping duplicate DB query`);
+  }
 
-      // If we have a high-quality exact text match, it's definitely a simple query (product name)
-      // This applies REGARDLESS of word count or complex indicators
-      if (exactMatchBonus >= 1000) {
-        console.log(`[QUERY CLASSIFICATION] ✅ High-quality exact text match: "${topResult.name}" (bonus: ${exactMatchBonus}, ${queryWords.length} words) → SIMPLE query`);
-        return true;
-      }
+  // Analyze quick results if we have any (from preliminary or fresh search)
+  if (quickResults && quickResults.length > 0) {
+    // Calculate text match quality
+    const topResult = quickResults[0];
+    const exactMatchBonus = getExactMatchBonus(topResult.name, query, query);
 
-      // If query is very short (1-2 words) and has decent matches, likely simple
-      if (queryWords.length <= 2) {
-        // REQUIRE BOTH: high Atlas score AND reasonable word coverage (bonus >= 500 means 60%+ words match)
-        // This prevents abbreviated/partial queries like "עוגה ללג" from being classified as SIMPLE
-        if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5 && exactMatchBonus >= 500)) {
-          console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
-        return true;
-        }
-      }
+    // If we have a high-quality exact text match, it's definitely a simple query (product name)
+    // This applies REGARDLESS of word count or complex indicators
+    if (exactMatchBonus >= 1000) {
+      console.log(`[QUERY CLASSIFICATION] ✅ High-quality exact text match: "${topResult.name}" (bonus: ${exactMatchBonus}, ${queryWords.length} words) → SIMPLE query`);
+      return true;
+    }
 
-      // For longer queries, be more strict - require strong exact matches only
-      if (queryWords.length === 3 && exactMatchBonus >= 10000) {
-        console.log(`[QUERY CLASSIFICATION] ✅ 3-word query with strong match: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
-        return true;
-      }
-
-      // Fuzzy matches only for very short, high-scoring queries
-      // Also require word coverage to avoid false positives on abbreviations
-      if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5 && exactMatchBonus >= 500) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}, bonus: ${exactMatchBonus}) → SIMPLE query`);
-        return true;
+    // If query is very short (1-2 words) and has decent matches, likely simple
+    if (queryWords.length <= 2) {
+      // REQUIRE BOTH: high Atlas score AND reasonable word coverage (bonus >= 500 means 60%+ words match)
+      // This prevents abbreviated/partial queries like "עוגה ללג" from being classified as SIMPLE
+      if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5 && exactMatchBonus >= 500)) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
+      return true;
       }
     }
 
-  } catch (error) {
-    console.error('[QUERY CLASSIFICATION] Text search failed:', error.message);
-    // If text search fails, continue to complex indicator check below
+    // For longer queries, be more strict - require strong exact matches only
+    if (queryWords.length === 3 && exactMatchBonus >= 10000) {
+      console.log(`[QUERY CLASSIFICATION] ✅ 3-word query with strong match: "${topResult.name}" (bonus: ${exactMatchBonus}) → SIMPLE query`);
+      return true;
+    }
+
+    // Fuzzy matches only for very short, high-scoring queries
+    // Also require word coverage to avoid false positives on abbreviations
+    if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5 && exactMatchBonus >= 500) {
+      console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}, bonus: ${exactMatchBonus}) → SIMPLE query`);
+      return true;
+    }
   }
 
   // PRIORITY #3: Only if NO good text match was found, check for complex indicators
@@ -5023,7 +5032,7 @@ app.post("/search", async (req, res) => {
       // Continue with hasHighTextMatch = false if there's an error
     }
 
-    let isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName, hasHighTextMatch);
+    let isSimpleResult = await isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName, hasHighTextMatch, preliminaryTextSearchResults);
     let isComplexQueryResult = !isSimpleResult;
 
     console.log(`[${requestId}] ═══════════════════════════════════════════════════════`);
