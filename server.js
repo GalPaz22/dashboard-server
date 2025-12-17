@@ -434,15 +434,77 @@ function getMongoClient() {
     cachedClient = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
       useUnifiedTopology: true,
+      // Connection pool optimization for better performance
+      maxPoolSize: 50, // Increased from default 100 for better resource utilization
+      minPoolSize: 10, // Keep minimum connections alive for faster queries
+      maxIdleTimeMS: 30000, // Close idle connections after 30 seconds
+      // Performance optimizations
+      connectTimeoutMS: 10000, // 10 second connection timeout
+      serverSelectionTimeoutMS: 5000, // 5 second server selection timeout
+      // Compression for faster data transfer over network
+      compressors: ['snappy', 'zlib'],
+      // Read preference for better performance on replica sets
+      readPreference: 'primaryPreferred'
     });
     cachedPromise = cachedClient.connect();
   }
   return cachedPromise;
 }
 
+// ===== DATABASE INDEX OPTIMIZATION =====
+// Creates indexes on frequently queried fields for faster simple queries
+async function ensureIndexes(dbName, collectionName) {
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+    const queriesCollection = db.collection("queries");
+
+    console.log(`[INDEX] Creating indexes for ${dbName}.${collectionName}...`);
+
+    // Create indexes in parallel for faster setup
+    await Promise.all([
+      // Products collection indexes
+      collection.createIndex({ ItemID: 1 }, { background: true, name: 'idx_itemid' }),
+      collection.createIndex({ sku: 1 }, { background: true, name: 'idx_sku' }),
+      collection.createIndex({ id: 1 }, { background: true, name: 'idx_id' }),
+      collection.createIndex({ barcode: 1 }, { background: true, name: 'idx_barcode' }),
+      collection.createIndex({ name: 1 }, { background: true, name: 'idx_name' }),
+      collection.createIndex({ stockStatus: 1 }, { background: true, name: 'idx_stockstatus' }),
+      collection.createIndex({ type: 1 }, { background: true, name: 'idx_type' }),
+      collection.createIndex({ category: 1 }, { background: true, name: 'idx_category' }),
+      collection.createIndex({ softCategory: 1 }, { background: true, name: 'idx_softcategory' }),
+      // Compound indexes for common filter combinations
+      collection.createIndex({ category: 1, type: 1 }, { background: true, name: 'idx_category_type' }),
+      collection.createIndex({ softCategory: 1, stockStatus: 1 }, { background: true, name: 'idx_softcat_stock' }),
+      collection.createIndex({ stockStatus: 1, type: 1 }, { background: true, name: 'idx_stock_type' }),
+      // Queries collection indexes
+      queriesCollection.createIndex({ timestamp: -1 }, { background: true, name: 'idx_timestamp' }),
+      queriesCollection.createIndex({ query: 1 }, { background: true, name: 'idx_query' })
+    ]);
+
+    console.log(`[INDEX] ✅ All indexes created successfully for ${dbName}.${collectionName}`);
+  } catch (error) {
+    // Don't fail if indexes already exist or if there's a minor error
+    console.warn(`[INDEX] Warning during index creation: ${error.message}`);
+  }
+}
+
+// Cache to track which collections have had indexes created
+const indexedCollections = new Set();
+
+// Ensure indexes exist for a collection (called lazily on first use)
+async function ensureIndexesOnce(dbName, collectionName) {
+  const key = `${dbName}.${collectionName}`;
+  if (!indexedCollections.has(key)) {
+    await ensureIndexes(dbName, collectionName);
+    indexedCollections.add(key);
+  }
+}
+
 // POST /queries endpoint
 app.post("/queries", async (req, res) => {
-  const { dbName } = req.body;
+  const { dbName, limit = 100 } = req.body;
   if (!dbName) {
     return res.status(400).json({ error: "dbName parameter is required in the request body" });
   }
@@ -450,7 +512,15 @@ app.post("/queries", async (req, res) => {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const queriesCollection = db.collection("queries");
-    const queries = await queriesCollection.find({}).toArray();
+
+    // Optimized: limit results, sort by timestamp (uses index), project only needed fields
+    const queries = await queriesCollection
+      .find({})
+      .sort({ timestamp: -1 }) // Most recent first, uses idx_timestamp index
+      .limit(parseInt(limit, 10))
+      .project({ _id: 1, query: 1, filters: 1, timestamp: 1, results: 1 }) // Only return necessary fields
+      .toArray();
+
     return res.status(200).json({ queries });
   } catch (error) {
     console.error("Error fetching queries:", error);
@@ -4335,8 +4405,11 @@ app.get("/search/load-more", async (req, res) => {
 
 app.get("/autocomplete", async (req, res) => {
   const { query } = req.query;
-  const { dbName } = req.store;
+  const { dbName, products: collectionName } = req.store;
   try {
+    // Ensure indexes exist for optimal query performance
+    await ensureIndexesOnce(dbName, collectionName || "products");
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection1 = db.collection("products");
@@ -4791,6 +4864,9 @@ app.post("/search", async (req, res) => {
       error: "Either apiKey **or** (dbName & collectionName) must be provided",
     });
   }
+
+  // Ensure indexes exist for optimal query performance (runs once per collection)
+  await ensureIndexesOnce(dbName, collectionName);
 
   // Early extraction of soft filters for progressive loading phases
   // This prevents "Cannot access 'enhancedFilters' before initialization" error
@@ -6188,15 +6264,36 @@ app.post("/search", async (req, res) => {
 \* =========================================================== */
 
 app.get("/products", async (req, res) => {
-  const { dbName, collectionName, limit = 10 } = req.query;
+  const { dbName, collectionName, limit = 10, skip = 0 } = req.query;
   if (!dbName || !collectionName) {
     return res.status(400).json({ error: "Database name and collection name are required" });
   }
   try {
+    // Ensure indexes exist for this collection
+    await ensureIndexesOnce(dbName, collectionName);
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
-    const products = await collection.find().limit(Number(limit)).toArray();
+
+    // Optimized: Use projection to fetch only needed fields, add pagination with skip
+    const products = await collection
+      .find({}, {
+        projection: {
+          _id: 1,
+          id: 1,
+          name: 1,
+          description: 1,
+          price: 1,
+          image: 1,
+          url: 1,
+          ItemID: 1
+        }
+      })
+      .skip(Number(skip))
+      .limit(Number(limit))
+      .toArray();
+
     const results = products.map((product) => ({
       _id: product._id.toString(),
       id: product.id,
