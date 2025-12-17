@@ -2016,8 +2016,9 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     if (queryWords.length <= 2) {
       // REQUIRE BOTH: high Atlas score AND reasonable word coverage (bonus >= 500 means 60%+ words match)
       // This prevents abbreviated/partial queries like "עוגה ללג" from being classified as SIMPLE
-      if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && topResult.score > 2.5 && exactMatchBonus >= 500)) {
-        console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${topResult.score}) → SIMPLE query`);
+      const score = topResult.score || 0; // Handle undefined score gracefully
+      if (exactMatchBonus >= 5000 || (quickResults.length >= 1 && score > 2.5 && exactMatchBonus >= 500)) {
+        console.log(`[QUERY CLASSIFICATION] ✅ Short query with good matches: "${topResult.name}" (bonus: ${exactMatchBonus}, score: ${score}) → SIMPLE query`);
       return true;
       }
     }
@@ -2030,8 +2031,9 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
 
     // Fuzzy matches only for very short, high-scoring queries
     // Also require word coverage to avoid false positives on abbreviations
-    if (queryWords.length <= 2 && quickResults.length >= 1 && topResult.score > 3.5 && exactMatchBonus >= 500) {
-      console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${topResult.score}, bonus: ${exactMatchBonus}) → SIMPLE query`);
+    const score = topResult.score || 0; // Handle undefined score gracefully
+    if (queryWords.length <= 2 && quickResults.length >= 1 && score > 3.5 && exactMatchBonus >= 500) {
+      console.log(`[QUERY CLASSIFICATION] ✅ Very short query with excellent fuzzy match: "${topResult.name}" (atlas_score: ${score}, bonus: ${exactMatchBonus}) → SIMPLE query`);
       return true;
     }
   }
@@ -4951,6 +4953,7 @@ app.post("/search", async (req, res) => {
 
     const initialFilters = {};
     let hasHighTextMatch = false;
+    let preliminaryTextSearchResults = []; // Initialize outside try block to avoid ReferenceError
     try {
       const preliminaryTextSearchPipeline = buildStandardSearchPipeline(
         query, // We don't have cleanedTextForSearch here yet, so use query
@@ -4962,7 +4965,19 @@ app.post("/search", async (req, res) => {
         [],
         earlySoftFilters // Include early soft filters for context
       );
-      const preliminaryTextSearchResults = await collection.aggregate(preliminaryTextSearchPipeline).toArray();
+
+      // Add score projection for reuse in classification
+      preliminaryTextSearchPipeline.push({
+        $project: {
+          name: 1,
+          category: 1,
+          softCategory: 1,
+          description: 1,
+          score: { $meta: "searchScore" }
+        }
+      });
+
+      preliminaryTextSearchResults = await collection.aggregate(preliminaryTextSearchPipeline).toArray();
 
       // Analyze query structure to determine if text match should override classification
       const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 1);
