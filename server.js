@@ -5603,6 +5603,15 @@ app.post("/search", async (req, res) => {
               });
 
               combinedResults = excellentMatches.slice(0, searchLimit);
+
+              // Set metadata for client tier info (CRITICAL for response structure)
+              extractedCategoriesMetadata = {
+                hardCategories: [],
+                softCategories: [],
+                textMatchCount: combinedResults.length,
+                categoryFiltered: true // Mark as two-step search
+              };
+
               console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search`);
             } else {
               // Continue with Step 2: Extract categories from high-quality text matches
