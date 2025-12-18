@@ -460,6 +460,17 @@ async function ensureIndexes(dbName, collectionName) {
     const collection = db.collection(collectionName);
     const queriesCollection = db.collection("queries");
 
+    // Event and tracking collections
+    const checkoutEventsCollection = db.collection("checkout_events");
+    const cartCollection = db.collection("cart");
+    const trackingEventsCollection = db.collection("tracking_events");
+    const userProfilesCollection = db.collection("user_profiles");
+
+    // User and complexity collections
+    const activeUsersCollection = db.collection("active_users");
+    const queryComplexityFeedbackCollection = db.collection("query_complexity_feedback");
+    const queryComplexityLearnedCollection = db.collection("query_complexity_learned");
+
     console.log(`[INDEX] Creating indexes for ${dbName}.${collectionName}...`);
 
     // Create indexes in parallel for faster setup
@@ -480,7 +491,75 @@ async function ensureIndexes(dbName, collectionName) {
       collection.createIndex({ stockStatus: 1, type: 1 }, { background: true, name: 'idx_stock_type' }),
       // Queries collection indexes
       queriesCollection.createIndex({ timestamp: -1 }, { background: true, name: 'idx_timestamp' }),
-      queriesCollection.createIndex({ query: 1 }, { background: true, name: 'idx_query' })
+      queriesCollection.createIndex({ query: 1 }, { background: true, name: 'idx_query' }),
+
+      // ===== EVENT COLLECTIONS INDEXES (Fix for Query Targeting Alert) =====
+      // These indexes fix the critical query targeting issue where event lookups
+      // were performing full collection scans, causing 1000+ scanned/returned ratio
+
+      // Checkout events - compound index for duplicate detection query
+      checkoutEventsCollection.createIndex(
+        { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 },
+        { background: true, name: 'idx_checkout_dedup' }
+      ),
+      checkoutEventsCollection.createIndex(
+        { timestamp: -1 },
+        { background: true, name: 'idx_checkout_timestamp' }
+      ),
+      checkoutEventsCollection.createIndex(
+        { product_id: 1 },
+        { background: true, name: 'idx_checkout_product' }
+      ),
+
+      // Cart events - compound index for duplicate detection query
+      cartCollection.createIndex(
+        { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 },
+        { background: true, name: 'idx_cart_dedup' }
+      ),
+      cartCollection.createIndex(
+        { timestamp: -1 },
+        { background: true, name: 'idx_cart_timestamp' }
+      ),
+      cartCollection.createIndex(
+        { product_id: 1 },
+        { background: true, name: 'idx_cart_product' }
+      ),
+
+      // Tracking events - timestamp index for time-based queries
+      trackingEventsCollection.createIndex(
+        { timestamp: -1 },
+        { background: true, name: 'idx_tracking_timestamp' }
+      ),
+
+      // User profiles - compound index for duplicate detection query
+      userProfilesCollection.createIndex(
+        { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 },
+        { background: true, name: 'idx_userprofile_dedup' }
+      ),
+      userProfilesCollection.createIndex(
+        { timestamp: -1 },
+        { background: true, name: 'idx_userprofile_timestamp' }
+      ),
+
+      // ===== USER COLLECTIONS INDEXES =====
+      // Active users - visitor_id is queried frequently for user profile lookups
+      activeUsersCollection.createIndex(
+        { visitor_id: 1 },
+        { background: true, name: 'idx_visitor_id' }
+      ),
+
+      // ===== QUERY COMPLEXITY INDEXES =====
+      // Query complexity feedback - for ML learning and feedback storage
+      queryComplexityFeedbackCollection.createIndex(
+        { query: 1, timestamp: -1 },
+        { background: true, name: 'idx_complexity_feedback' }
+      ),
+
+      // Query complexity learned - for fast lookup of learned patterns
+      queryComplexityLearnedCollection.createIndex(
+        { query: 1 },
+        { background: true, name: 'idx_complexity_learned' }
+      )
     ]);
 
     console.log(`[INDEX] ✅ All indexes created successfully for ${dbName}.${collectionName}`);
@@ -7888,11 +7967,44 @@ app.delete("/active-users/:visitor_id", async (req, res) => {
    SERVER STARTUP
 \* =========================================================== */
 
+// ===== CREATE INDEXES FOR USERS DATABASE =====
+// This function creates indexes for the users database (separate from product databases)
+async function ensureUsersDbIndexes() {
+  try {
+    const client = await getMongoClient();
+    const usersDb = client.db("users");
+    const usersCollection = usersDb.collection("users");
+
+    console.log(`[INDEX] Creating indexes for users database...`);
+
+    // Create index on apiKey field for authentication lookups
+    // This fixes the query targeting issue where API key lookups performed full collection scans
+    await usersCollection.createIndex(
+      { apiKey: 1 },
+      { background: true, name: 'idx_apikey', unique: true }
+    );
+
+    console.log(`[INDEX] ✅ Users database indexes created successfully`);
+  } catch (error) {
+    // Don't fail if indexes already exist
+    console.warn(`[INDEX] Warning during users database index creation: ${error.message}`);
+  }
+}
+
 const PORT = process.env.PORT || 8000;
 const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
-  
+
+  // Create indexes for users database on startup
+  setTimeout(async () => {
+    try {
+      await ensureUsersDbIndexes();
+    } catch (error) {
+      console.error('Users database index creation failed:', error);
+    }
+  }, 1000);
+
   // Warm cache on startup
   setTimeout(async () => {
     try {
