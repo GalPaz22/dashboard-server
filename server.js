@@ -489,6 +489,20 @@ async function ensureIndexes(dbName, collectionName) {
       collection.createIndex({ category: 1, type: 1 }, { background: true, name: 'idx_category_type' }),
       collection.createIndex({ softCategory: 1, stockStatus: 1 }, { background: true, name: 'idx_softcat_stock' }),
       collection.createIndex({ stockStatus: 1, type: 1 }, { background: true, name: 'idx_stock_type' }),
+
+      // Advanced compound indexes for multi-filter queries (Performance Optimization)
+      collection.createIndex(
+        { type: 1, softCategory: 1, stockStatus: 1 },
+        { background: true, name: 'idx_type_softcat_stock' }
+      ),
+      collection.createIndex(
+        { category: 1, softCategory: 1, stockStatus: 1 },
+        { background: true, name: 'idx_cat_softcat_stock' }
+      ),
+      collection.createIndex(
+        { softCategory: 1, price: 1 },
+        { background: true, name: 'idx_softcat_price' }
+      ),
       // Queries collection indexes
       queriesCollection.createIndex({ timestamp: -1 }, { background: true, name: 'idx_timestamp' }),
       queriesCollection.createIndex({ query: 1 }, { background: true, name: 'idx_query' }),
