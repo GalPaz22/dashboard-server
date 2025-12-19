@@ -5734,16 +5734,27 @@ app.post("/search", async (req, res) => {
 
                 console.log(`[${requestId}] 🎯 Two-step search completed successfully`);
               } else {
-                console.log(`[${requestId}] ⚠️ Category-filtered search returned no results, keeping original approach`);
-                // Fall back to original combined results
+                console.log(`[${requestId}] ⚠️ Category-filtered search returned no results, falling back to high-quality text matches`);
+                // Fall back to high-quality text matches
+                combinedResults = highQualityTextMatches.slice(0, searchLimit);
+                highQualityTextMatches.forEach(match => {
+                  match.highTextMatch = true;
+                });
                 extractedCategoriesMetadata = null;
               }
             } else {
-              console.log(`[${requestId}] No categories extracted, using original search results`);
+              console.log(`[${requestId}] No categories extracted, falling back to high-quality text matches`);
+              // Fall back to high-quality text matches
+              combinedResults = highQualityTextMatches.slice(0, searchLimit);
+              highQualityTextMatches.forEach(match => {
+                match.highTextMatch = true;
+              });
             }
             } // Close else block for early exit optimization
           } else {
-            console.log(`[${requestId}] No high-quality text matches found, using original search`);
+            console.log(`[${requestId}] No high-quality text matches found (bonus < 1000), falling back to text search results`);
+            // Fall back to all text search results (even with lower bonuses)
+            combinedResults = textResultsWithBonuses.slice(0, searchLimit);
           }
         } catch (error) {
           console.error(`[${requestId}] Error in two-step search:`, error.message);
