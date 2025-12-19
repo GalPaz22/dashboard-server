@@ -454,6 +454,8 @@ function getMongoClient() {
 // ===== DATABASE INDEX OPTIMIZATION =====
 // Creates indexes on frequently queried fields for faster simple queries
 async function ensureIndexes(dbName, collectionName) {
+  const indexErrors = [];
+
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
@@ -473,113 +475,91 @@ async function ensureIndexes(dbName, collectionName) {
 
     console.log(`[INDEX] Creating indexes for ${dbName}.${collectionName}...`);
 
-    // Create indexes in parallel for faster setup
-    await Promise.all([
+    // Create indexes sequentially with better error handling
+    // Note: Removed deprecated 'background: true' option (deprecated in MongoDB 4.2+, removed in 5.0+)
+    const indexes = [
       // Products collection indexes
-      collection.createIndex({ ItemID: 1 }, { background: true, name: 'idx_itemid' }),
-      collection.createIndex({ sku: 1 }, { background: true, name: 'idx_sku' }),
-      collection.createIndex({ id: 1 }, { background: true, name: 'idx_id' }),
-      collection.createIndex({ barcode: 1 }, { background: true, name: 'idx_barcode' }),
-      collection.createIndex({ name: 1 }, { background: true, name: 'idx_name' }),
-      collection.createIndex({ stockStatus: 1 }, { background: true, name: 'idx_stockstatus' }),
-      collection.createIndex({ type: 1 }, { background: true, name: 'idx_type' }),
-      collection.createIndex({ category: 1 }, { background: true, name: 'idx_category' }),
-      collection.createIndex({ softCategory: 1 }, { background: true, name: 'idx_softcategory' }),
+      { collection, spec: { ItemID: 1 }, options: { name: 'idx_itemid' } },
+      { collection, spec: { sku: 1 }, options: { name: 'idx_sku' } },
+      { collection, spec: { id: 1 }, options: { name: 'idx_id' } },
+      { collection, spec: { barcode: 1 }, options: { name: 'idx_barcode' } },
+      { collection, spec: { name: 1 }, options: { name: 'idx_name' } },
+      { collection, spec: { stockStatus: 1 }, options: { name: 'idx_stockstatus' } },
+      { collection, spec: { type: 1 }, options: { name: 'idx_type' } },
+      { collection, spec: { category: 1 }, options: { name: 'idx_category' } },
+      { collection, spec: { softCategory: 1 }, options: { name: 'idx_softcategory' } },
+
       // Compound indexes for common filter combinations
-      collection.createIndex({ category: 1, type: 1 }, { background: true, name: 'idx_category_type' }),
-      collection.createIndex({ softCategory: 1, stockStatus: 1 }, { background: true, name: 'idx_softcat_stock' }),
-      collection.createIndex({ stockStatus: 1, type: 1 }, { background: true, name: 'idx_stock_type' }),
+      { collection, spec: { category: 1, type: 1 }, options: { name: 'idx_category_type' } },
+      { collection, spec: { softCategory: 1, stockStatus: 1 }, options: { name: 'idx_softcat_stock' } },
+      { collection, spec: { stockStatus: 1, type: 1 }, options: { name: 'idx_stock_type' } },
 
       // Advanced compound indexes for multi-filter queries (Performance Optimization)
-      collection.createIndex(
-        { type: 1, softCategory: 1, stockStatus: 1 },
-        { background: true, name: 'idx_type_softcat_stock' }
-      ),
-      collection.createIndex(
-        { category: 1, softCategory: 1, stockStatus: 1 },
-        { background: true, name: 'idx_cat_softcat_stock' }
-      ),
-      collection.createIndex(
-        { softCategory: 1, price: 1 },
-        { background: true, name: 'idx_softcat_price' }
-      ),
+      { collection, spec: { type: 1, softCategory: 1, stockStatus: 1 }, options: { name: 'idx_type_softcat_stock' } },
+      { collection, spec: { category: 1, softCategory: 1, stockStatus: 1 }, options: { name: 'idx_cat_softcat_stock' } },
+      { collection, spec: { softCategory: 1, price: 1 }, options: { name: 'idx_softcat_price' } },
+
       // Queries collection indexes
-      queriesCollection.createIndex({ timestamp: -1 }, { background: true, name: 'idx_timestamp' }),
-      queriesCollection.createIndex({ query: 1 }, { background: true, name: 'idx_query' }),
+      { collection: queriesCollection, spec: { timestamp: -1 }, options: { name: 'idx_timestamp' } },
+      { collection: queriesCollection, spec: { query: 1 }, options: { name: 'idx_query' } },
 
       // ===== EVENT COLLECTIONS INDEXES (Fix for Query Targeting Alert) =====
       // These indexes fix the critical query targeting issue where event lookups
       // were performing full collection scans, causing 1000+ scanned/returned ratio
 
       // Checkout events - compound index for duplicate detection query
-      checkoutEventsCollection.createIndex(
-        { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 },
-        { background: true, name: 'idx_checkout_dedup' }
-      ),
-      checkoutEventsCollection.createIndex(
-        { timestamp: -1 },
-        { background: true, name: 'idx_checkout_timestamp' }
-      ),
-      checkoutEventsCollection.createIndex(
-        { product_id: 1 },
-        { background: true, name: 'idx_checkout_product' }
-      ),
+      { collection: checkoutEventsCollection, spec: { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 }, options: { name: 'idx_checkout_dedup' } },
+      { collection: checkoutEventsCollection, spec: { timestamp: -1 }, options: { name: 'idx_checkout_timestamp' } },
+      { collection: checkoutEventsCollection, spec: { product_id: 1 }, options: { name: 'idx_checkout_product' } },
 
       // Cart events - compound index for duplicate detection query
-      cartCollection.createIndex(
-        { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 },
-        { background: true, name: 'idx_cart_dedup' }
-      ),
-      cartCollection.createIndex(
-        { timestamp: -1 },
-        { background: true, name: 'idx_cart_timestamp' }
-      ),
-      cartCollection.createIndex(
-        { product_id: 1 },
-        { background: true, name: 'idx_cart_product' }
-      ),
+      { collection: cartCollection, spec: { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 }, options: { name: 'idx_cart_dedup' } },
+      { collection: cartCollection, spec: { timestamp: -1 }, options: { name: 'idx_cart_timestamp' } },
+      { collection: cartCollection, spec: { product_id: 1 }, options: { name: 'idx_cart_product' } },
 
       // Tracking events - timestamp index for time-based queries
-      trackingEventsCollection.createIndex(
-        { timestamp: -1 },
-        { background: true, name: 'idx_tracking_timestamp' }
-      ),
+      { collection: trackingEventsCollection, spec: { timestamp: -1 }, options: { name: 'idx_tracking_timestamp' } },
 
       // User profiles - compound index for duplicate detection query
-      userProfilesCollection.createIndex(
-        { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 },
-        { background: true, name: 'idx_userprofile_dedup' }
-      ),
-      userProfilesCollection.createIndex(
-        { timestamp: -1 },
-        { background: true, name: 'idx_userprofile_timestamp' }
-      ),
+      { collection: userProfilesCollection, spec: { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 }, options: { name: 'idx_userprofile_dedup' } },
+      { collection: userProfilesCollection, spec: { timestamp: -1 }, options: { name: 'idx_userprofile_timestamp' } },
 
       // ===== USER COLLECTIONS INDEXES =====
       // Active users - visitor_id is queried frequently for user profile lookups
-      activeUsersCollection.createIndex(
-        { visitor_id: 1 },
-        { background: true, name: 'idx_visitor_id' }
-      ),
+      { collection: activeUsersCollection, spec: { visitor_id: 1 }, options: { name: 'idx_visitor_id' } },
 
       // ===== QUERY COMPLEXITY INDEXES =====
       // Query complexity feedback - for ML learning and feedback storage
-      queryComplexityFeedbackCollection.createIndex(
-        { query: 1, timestamp: -1 },
-        { background: true, name: 'idx_complexity_feedback' }
-      ),
+      { collection: queryComplexityFeedbackCollection, spec: { query: 1, timestamp: -1 }, options: { name: 'idx_complexity_feedback' } },
 
       // Query complexity learned - for fast lookup of learned patterns
-      queryComplexityLearnedCollection.createIndex(
-        { query: 1 },
-        { background: true, name: 'idx_complexity_learned' }
-      )
-    ]);
+      { collection: queryComplexityLearnedCollection, spec: { query: 1 }, options: { name: 'idx_complexity_learned' } }
+    ];
 
-    console.log(`[INDEX] ✅ All indexes created successfully for ${dbName}.${collectionName}`);
+    // Create indexes with individual error handling
+    for (const { collection: coll, spec, options } of indexes) {
+      try {
+        await coll.createIndex(spec, options);
+        console.log(`[INDEX] ✓ Created ${options.name}`);
+      } catch (error) {
+        // Index already exists is OK (code 85 or 86)
+        if (error.code === 85 || error.code === 86 || error.message.includes('already exists')) {
+          console.log(`[INDEX] ✓ ${options.name} already exists`);
+        } else {
+          indexErrors.push({ name: options.name, error: error.message, code: error.code });
+          console.error(`[INDEX] ✗ Failed to create ${options.name}: ${error.message}`);
+        }
+      }
+    }
+
+    if (indexErrors.length === 0) {
+      console.log(`[INDEX] ✅ All indexes verified successfully for ${dbName}.${collectionName}`);
+    } else {
+      console.error(`[INDEX] ⚠️  ${indexErrors.length} indexes failed to create:`, indexErrors);
+    }
   } catch (error) {
-    // Don't fail if indexes already exist or if there's a minor error
-    console.warn(`[INDEX] Warning during index creation: ${error.message}`);
+    console.error(`[INDEX] ❌ Critical error during index creation: ${error.message}`);
+    throw error;
   }
 }
 
@@ -8026,15 +8006,27 @@ async function ensureUsersDbIndexes() {
 
     // Create index on apiKey field for authentication lookups
     // This fixes the query targeting issue where API key lookups performed full collection scans
-    await usersCollection.createIndex(
-      { apiKey: 1 },
-      { background: true, name: 'idx_apikey', unique: true }
-    );
+    // Note: Removed deprecated 'background: true' option (deprecated in MongoDB 4.2+, removed in 5.0+)
+    try {
+      await usersCollection.createIndex(
+        { apiKey: 1 },
+        { name: 'idx_apikey', unique: true }
+      );
+      console.log(`[INDEX] ✓ Created idx_apikey (unique)`);
+    } catch (error) {
+      // Index already exists is OK
+      if (error.code === 85 || error.code === 86 || error.message.includes('already exists')) {
+        console.log(`[INDEX] ✓ idx_apikey already exists`);
+      } else {
+        console.error(`[INDEX] ✗ Failed to create idx_apikey: ${error.message}`);
+        throw error;
+      }
+    }
 
-    console.log(`[INDEX] ✅ Users database indexes created successfully`);
+    console.log(`[INDEX] ✅ Users database indexes verified successfully`);
   } catch (error) {
-    // Don't fail if indexes already exist
-    console.warn(`[INDEX] Warning during users database index creation: ${error.message}`);
+    console.error(`[INDEX] ❌ Users database index creation failed: ${error.message}`);
+    throw error;
   }
 }
 
