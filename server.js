@@ -3384,7 +3384,7 @@ async function executeExplicitSoftCategorySearch(
   // FIRST: Find high-quality text matches that should be included regardless of soft categories
   let highQualityTextMatches = [];
   try {
-    const textSearchPipeline = buildStandardSearchPipeline(cleanedTextForSearch, query, hardFilters, Math.max(searchLimit, 50), useOrLogic, isImageModeWithSoftCategories);
+    const textSearchPipeline = buildStandardSearchPipeline(cleanedTextForSearch, query, hardFilters, Math.max(searchLimit, 100), useOrLogic, isImageModeWithSoftCategories);
     const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
 
     const textResultsWithBonuses = textSearchResults.map(doc => {
@@ -4550,7 +4550,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, {}, categories, types);
 
     // Do pure text search
-    const textSearchLimit = Math.max(searchLimit, 50);
+    const textSearchLimit = Math.max(searchLimit, 100);
     const textSearchPipeline = buildStandardSearchPipeline(
       cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
     );
@@ -5513,13 +5513,13 @@ app.post("/search", async (req, res) => {
           let textSearchResults;
 
           if (preliminaryTextSearchResults && preliminaryTextSearchResults.length > 0) {
-            // Reuse preliminary results (already fetched with limit 50)
+            // Reuse preliminary results (already fetched with limit 100)
             textSearchResults = preliminaryTextSearchResults;
             console.log(`[${requestId}] Step 1: ⚡ REUSING preliminary search results (${textSearchResults.length} products) - SKIPPING duplicate DB query`);
           } else {
             // Fallback: Perform fresh search if preliminary results unavailable
             console.log(`[${requestId}] Step 1: Performing fresh text search (preliminary results unavailable)...`);
-            const textSearchLimit = Math.max(searchLimit, 50);
+            const textSearchLimit = Math.max(searchLimit, 100);
 
             const textSearchPipeline = buildStandardSearchPipeline(
               cleanedTextForSearch, query, {}, textSearchLimit, false, syncMode === 'image', []
