@@ -5033,13 +5033,22 @@ app.post("/search", async (req, res) => {
         earlySoftFilters // Include early soft filters for context
       );
 
-      // Add score projection for reuse in classification
+      // Add score projection for reuse in classification AND two-step search
+      // CRITICAL: Must include ALL fields needed by two-step search to avoid missing data
       preliminaryTextSearchPipeline.push({
         $project: {
+          id: 1,
           name: 1,
+          description: 1,
+          price: 1,
+          image: 1,
+          url: 1,
+          type: 1,
+          specialSales: 1,
+          ItemID: 1,
           category: 1,
           softCategory: 1,
-          description: 1,
+          stockStatus: 1,
           score: { $meta: "searchScore" }
         }
       });
