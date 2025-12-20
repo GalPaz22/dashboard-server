@@ -6995,17 +6995,23 @@ app.get("/query-complexity-analytics", async (req, res) => {
     const db = client.db(dbName);
     const queryComplexityCollection = db.collection('query_complexity_feedback');
     const cartCollection = db.collection('cart');
-    
+    const checkoutCollection = db.collection('checkout_events');
+
     const daysAgo = new Date();
     daysAgo.setDate(daysAgo.getDate() - parseInt(days));
-    
+
     // Get complexity feedback data
     const feedbackData = await queryComplexityCollection.find({
       timestamp: { $gte: daysAgo }
     }).sort({ timestamp: -1 }).limit(parseInt(limit)).toArray();
-    
-    // Get conversion data
+
+    // Get conversion data from cart (add to cart events)
     const conversionData = await cartCollection.find({
+      timestamp: { $gte: daysAgo.toISOString() }
+    }).toArray();
+
+    // Get checkout events (checkout initiated and completed)
+    const checkoutData = await checkoutCollection.find({
       timestamp: { $gte: daysAgo.toISOString() }
     }).toArray();
     
@@ -7015,26 +7021,30 @@ app.get("/query-complexity-analytics", async (req, res) => {
       manualCorrections: feedbackData.filter(f => f.is_correction).length,
       conversionBasedFeedback: feedbackData.filter(f => f.feedback_type === 'conversion_based').length,
       manualTagging: feedbackData.filter(f => f.feedback_type === 'manual_tagging').length,
-      
+
       classificationAccuracy: {
         total: feedbackData.length,
         correct: feedbackData.filter(f => !f.is_correction).length,
         incorrect: feedbackData.filter(f => f.is_correction).length,
-        accuracyRate: feedbackData.length > 0 ? 
+        accuracyRate: feedbackData.length > 0 ?
           (feedbackData.filter(f => !f.is_correction).length / feedbackData.length * 100).toFixed(1) + '%' : 'N/A'
       },
-      
+
       complexityDistribution: {
         simpleQueries: feedbackData.filter(f => f.original_classification === 'simple').length,
         complexQueries: feedbackData.filter(f => f.original_classification === 'complex').length
       },
-      
+
       conversionPatterns: {
-        totalConversions: conversionData.length,
+        totalConversions: conversionData.length + checkoutData.length,
+        totalCartEvents: conversionData.length,
+        totalCheckoutEvents: checkoutData.length,
+        checkoutInitiated: checkoutData.filter(c => c.event_type === 'checkout_initiated').length,
+        checkoutCompleted: checkoutData.filter(c => c.event_type === 'checkout_completed').length,
         simpleQueryConversions: feedbackData.filter(f => f.feedback_type === 'conversion_based' && f.original_classification === 'simple').length,
         complexQueryConversions: feedbackData.filter(f => f.feedback_type === 'conversion_based' && f.original_classification === 'complex').length
       },
-      
+
       recentFeedback: feedbackData.slice(0, 10).map(f => ({
         query: f.query,
         originalClassification: f.original_classification,
@@ -7043,7 +7053,40 @@ app.get("/query-complexity-analytics", async (req, res) => {
         feedbackType: f.feedback_type,
         timestamp: f.timestamp,
         reason: f.reason
-      }))
+      })),
+
+      // Add to cart events with their associated queries
+      recentCartEvents: conversionData
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, parseInt(limit))
+        .map(c => ({
+          query: c.search_query,
+          productId: c.product_id,
+          timestamp: c.timestamp,
+          eventType: c.event_type,
+          searchResults: c.search_results,
+          upsale: c.upsale,
+          tier2Product: c.tier2Product,
+          tier2Upsell: c.tier2Upsell,
+          sessionId: c.session_id
+        })),
+
+      // Checkout events with their associated queries
+      recentCheckoutEvents: checkoutData
+        .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))
+        .slice(0, parseInt(limit))
+        .map(c => ({
+          query: c.search_query,
+          productId: c.product_id,
+          timestamp: c.timestamp,
+          eventType: c.event_type,
+          conversionType: c.conversion_type,
+          funnelStage: c.funnel_stage,
+          cartTotal: c.cart_total,
+          cartCount: c.cart_count,
+          orderId: c.order_id,
+          sessionId: c.session_id
+        }))
     };
     
     res.json(analytics);
