@@ -2614,6 +2614,43 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
   return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
 }
 
+// Hebrew stemming function to normalize singular/plural forms
+// Handles common Hebrew suffixes to find the root form
+function stemHebrew(word) {
+  if (!word || word.length < 3) return word;
+
+  const trimmed = word.trim();
+
+  // Common Hebrew plural and singular suffixes
+  // IMPORTANT: Order by length (longest first) to match specific patterns before general ones
+  const suffixes = [
+    'ייה',  // -iyyah (feminine singular with double yod, e.g., עגבנייה)
+    'יות',  // -iyyot (feminine plural, e.g., some plural forms)
+    'ות',   // -ot (feminine plural, e.g., עגבניות after removing י)
+    'ים',   // -im (masculine plural)
+    'יה',   // -iyah (feminine singular)
+    'ה',    // -ah (feminine singular)
+    'ת',    // -et/-at (feminine)
+    'י',    // -i (possessive/adjective)
+  ];
+
+  // Try to remove suffixes to find the stem
+  // Use minimum stem length of 2 to avoid over-stemming
+  for (const suffix of suffixes) {
+    if (trimmed.endsWith(suffix) && trimmed.length > suffix.length + 1) {
+      return trimmed.slice(0, -suffix.length);
+    }
+  }
+
+  return trimmed;
+}
+
+// Normalize Hebrew text by stemming each word
+function normalizeHebrew(text) {
+  if (!text) return '';
+  return text.split(/\s+/).map(word => stemHebrew(word)).join(' ');
+}
+
 // Function to detect exact text matches
 // Returns much higher bonuses to ensure text matches rank above soft category matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
@@ -2632,7 +2669,40 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
   if (cleanedQueryLower && productNameLower === cleanedQueryLower) {
     return 90000; // Very high boost (was 45000)
   }
-  
+
+  // HEBREW STEMMED MATCH - Handles singular/plural forms (עגבניות ↔ עגבנייה)
+  // Check if query and product name match after Hebrew stemming
+  const stemmedQuery = normalizeHebrew(queryLower);
+  const stemmedProductName = normalizeHebrew(productNameLower);
+
+  // Exact match after stemming - treat as near-exact match
+  if (stemmedQuery && stemmedProductName === stemmedQuery) {
+    return 95000; // Very high boost for stemmed exact match
+  }
+
+  // Check if product name starts with stemmed query (for multi-word products)
+  const stemmedProductWords = stemmedProductName.split(/\s+/);
+  const stemmedQueryWords = stemmedQuery.split(/\s+/);
+
+  if (stemmedQueryWords.length === 1 && stemmedProductWords.length > 0) {
+    // Single-word query: check if first word of product matches stemmed query
+    if (stemmedProductWords[0] === stemmedQueryWords[0]) {
+      return 93000; // Very high boost for stemmed first-word match
+    }
+  } else if (stemmedQueryWords.length > 1) {
+    // Multi-word query: check if product starts with all stemmed query words
+    let allMatch = true;
+    for (let i = 0; i < stemmedQueryWords.length && i < stemmedProductWords.length; i++) {
+      if (stemmedProductWords[i] !== stemmedQueryWords[i]) {
+        allMatch = false;
+        break;
+      }
+    }
+    if (allMatch) {
+      return 93000; // Very high boost for stemmed multi-word match at start
+    }
+  }
+
   // Product name contains full query - with positional scoring
   if (productNameLower.includes(queryLower)) {
     // HIGHER bonus if query appears at the START of product name
