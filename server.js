@@ -5083,9 +5083,9 @@ app.post("/search", async (req, res) => {
   const isModernMode = modern === true || modern === 'true';
   const isLegacyMode = !isModernMode;
   
-  // Use limit from user config (via API key), fallback to 25 if invalid
-  const parsedLimit = userLimit ? parseInt(userLimit, 10) : 25;
-  const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 25;
+  // Use limit from user config (via API key), fallback to 5 if invalid
+  const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
+  const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
   const vectorLimit = searchLimit; // Keep them the same for balanced RRF
   
   console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (from user config: ${userLimit || 'default'})`);
