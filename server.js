@@ -1252,9 +1252,17 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
 
     console.log(`[TEXT SEARCH] Building compound search with ${filterClauses.length} filter clauses and text queries for: name, description, category, softCategory`);
 
-    // Generate Hebrew variations for better singular/plural matching
-    const hebrewVariations = generateHebrewQueryVariations(cleanedHebrewText || query);
-    console.log(`[HEBREW STEMMING] Generated ${hebrewVariations.length} variations for query "${cleanedHebrewText || query}": ${hebrewVariations.join(', ')}`);
+    // Generate Hebrew variations from the ORIGINAL query (not the translation)
+    // This ensures we get proper Hebrew variations even if cleanedHebrewText is English
+    const originalQuery = query; // Always use the original query for variations
+    const isOriginalQueryHebrew = isHebrew(originalQuery);
+    const hebrewVariations = isOriginalQueryHebrew ? generateHebrewQueryVariations(originalQuery) : [];
+
+    if (isOriginalQueryHebrew) {
+      console.log(`[HEBREW STEMMING] Generated ${hebrewVariations.length} variations for Hebrew query "${originalQuery}": ${hebrewVariations.join(', ')}`);
+    } else {
+      console.log(`[HEBREW STEMMING] Skipping variations (non-Hebrew query: "${originalQuery}")`);
+    }
 
     // Build should clauses for text search
     const shouldClauses = [
