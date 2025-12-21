@@ -1252,107 +1252,132 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
 
     console.log(`[TEXT SEARCH] Building compound search with ${filterClauses.length} filter clauses and text queries for: name, description, category, softCategory`);
 
+    // Generate Hebrew variations for better singular/plural matching
+    const hebrewVariations = generateHebrewQueryVariations(cleanedHebrewText || query);
+    console.log(`[HEBREW STEMMING] Generated ${hebrewVariations.length} variations for query "${cleanedHebrewText || query}": ${hebrewVariations.join(', ')}`);
+
+    // Build should clauses for text search
+    const shouldClauses = [
+      {
+        text: {
+          query: query,
+          path: "name",
+          score: { boost: { value: 100 * textBoostMultiplier } }
+        }
+      },
+      {
+        text: {
+          query: cleanedHebrewText,
+          path: "name",
+          score: { boost: { value: 50 * textBoostMultiplier } }
+        }
+      },
+    ];
+
+    // Add search clauses for each Hebrew variation with high boost
+    // This ensures that searching for "עגבני" also finds "עגבניות" and "עגבנייה"
+    hebrewVariations.forEach(variation => {
+      if (variation && variation !== query && variation !== cleanedHebrewText) {
+        shouldClauses.push({
+          text: {
+            query: variation,
+            path: "name",
+            score: { boost: { value: 80 * textBoostMultiplier } } // High boost for stemmed variations
+          }
+        });
+      }
+    });
+
+    // Add remaining search clauses
+    shouldClauses.push(
+      {
+        text: {
+          query: cleanedHebrewText,
+          path: "name",
+          fuzzy: {
+            maxEdits: 2,
+            prefixLength: 2,
+            maxExpansions: 50,
+          },
+          score: { boost: { value: 10 * textBoostMultiplier } }
+        }
+      },
+      {
+        text: {
+          query: cleanedHebrewText,
+          path: "description",
+          fuzzy: {
+            maxEdits: 2,
+            prefixLength: 3,
+            maxExpansions: 50,
+          },
+          score: { boost: { value: 3 * textBoostMultiplier } }
+        }
+      },
+      {
+        text: {
+          query: cleanedHebrewText,
+          path: "category",
+          fuzzy: {
+            maxEdits: 1,
+            prefixLength: 2,
+            maxExpansions: 10,
+          },
+          score: { boost: { value: 2 * textBoostMultiplier } }
+        }
+      },
+      {
+        text: {
+          query: cleanedHebrewText,
+          path: "softCategory",
+          fuzzy: {
+            maxEdits: 1,
+            prefixLength: 2,
+            maxExpansions: 10,
+          },
+          score: { boost: { value: 1.5 * textBoostMultiplier } }
+        }
+      },
+      {
+        autocomplete: {
+          query: cleanedHebrewText,
+          path: "name",
+          fuzzy: {
+            maxEdits: 2,
+            prefixLength: 3
+          },
+          score: { boost: { value: 5 * textBoostMultiplier } }
+        }
+      },
+      {
+        autocomplete: {
+          query: cleanedHebrewText,
+          path: "category",
+          fuzzy: {
+            maxEdits: 1,
+            prefixLength: 2
+          },
+          score: { boost: { value: 1 * textBoostMultiplier } }
+        }
+      },
+      {
+        autocomplete: {
+          query: cleanedHebrewText,
+          path: "softCategory",
+          fuzzy: {
+            maxEdits: 1,
+            prefixLength: 2
+          },
+          score: { boost: { value: 0.8 * textBoostMultiplier } }
+        }
+      }
+    );
+
     const searchStage = {
       $search: {
         index: "default",
         compound: {
-          should: [
-            {
-              text: {
-                query: query,
-                path: "name",
-                score: { boost: { value: 100 * textBoostMultiplier } }
-              }
-            },
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "name",
-                score: { boost: { value: 50 * textBoostMultiplier } }
-              }
-            },
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "name",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 2,
-                  maxExpansions: 50,
-                },
-                score: { boost: { value: 10 * textBoostMultiplier } }
-              }
-            },
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "description",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
-                },
-                score: { boost: { value: 3 * textBoostMultiplier } }
-              }
-            },
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "category",
-                fuzzy: {
-                  maxEdits: 1,
-                  prefixLength: 2,
-                  maxExpansions: 10,
-                },
-                score: { boost: { value: 2 * textBoostMultiplier } }
-              }
-            },
-            {
-              text: {
-                query: cleanedHebrewText,
-                path: "softCategory",
-                fuzzy: {
-                  maxEdits: 1,
-                  prefixLength: 2,
-                  maxExpansions: 10,
-                },
-                score: { boost: { value: 1.5 * textBoostMultiplier } }
-              }
-            },
-            {
-              autocomplete: {
-                query: cleanedHebrewText,
-                path: "name",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3
-                },
-                score: { boost: { value: 5 * textBoostMultiplier } }
-              }
-            },
-            {
-              autocomplete: {
-                query: cleanedHebrewText,
-                path: "category",
-                fuzzy: {
-                  maxEdits: 1,
-                  prefixLength: 2
-                },
-                score: { boost: { value: 1 * textBoostMultiplier } }
-              }
-            },
-            {
-              autocomplete: {
-                query: cleanedHebrewText,
-                path: "softCategory",
-                fuzzy: {
-                  maxEdits: 1,
-                  prefixLength: 2
-                },
-                score: { boost: { value: 0.8 * textBoostMultiplier } }
-              }
-            }
-          ],
+          should: shouldClauses,
           filter: filterClauses
         }
       }
@@ -2649,6 +2674,59 @@ function stemHebrew(word) {
 function normalizeHebrew(text) {
   if (!text) return '';
   return text.split(/\s+/).map(word => stemHebrew(word)).join(' ');
+}
+
+// Generate Hebrew word variations from a stem or word
+// This helps search find all singular/plural forms
+function generateHebrewVariations(word) {
+  if (!word || word.length < 2) return [word];
+
+  const variations = new Set([word]); // Always include the original word
+
+  // Get the stem
+  const stem = stemHebrew(word);
+  variations.add(stem);
+
+  // If the word is already stemmed (ends without common suffixes), generate variations
+  // Common patterns to generate from a stem:
+  const suffixesToAdd = [
+    'ות',    // feminine plural (e.g., עגבני → עגבניות)
+    'ייה',   // feminine singular with double yod (e.g., עגבני → עגבנייה)
+    'ים',    // masculine plural (e.g., תפוח → תפוחים)
+    'ה',     // feminine singular (e.g., בנן → בננה)
+    'יות',   // feminine plural alt
+    'יה',    // feminine singular alt
+  ];
+
+  // Generate variations from the stem
+  suffixesToAdd.forEach(suffix => {
+    variations.add(stem + suffix);
+  });
+
+  // If original word has a suffix, also try stem + different suffixes
+  if (stem !== word) {
+    suffixesToAdd.forEach(suffix => {
+      variations.add(stem + suffix);
+    });
+  }
+
+  return Array.from(variations);
+}
+
+// Generate variations for a full text query (multi-word support)
+function generateHebrewQueryVariations(text) {
+  if (!text) return [text];
+
+  const words = text.split(/\s+/);
+
+  // For single word queries, generate all variations
+  if (words.length === 1) {
+    return generateHebrewVariations(words[0]);
+  }
+
+  // For multi-word queries, return the original text and stemmed version
+  // (generating all combinations would be too many)
+  return [text, normalizeHebrew(text)];
 }
 
 // Function to detect exact text matches
