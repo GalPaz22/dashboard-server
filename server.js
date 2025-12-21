@@ -5337,6 +5337,10 @@ app.post("/search", async (req, res) => {
         if (hasHard && hasSoft) {
            console.log(`[${requestId}] 🛡️  SIMPLE QUERY WITH MIXED FILTERS: Keeping category "${originalCategory}" because other filters also exist (e.g. soft/price)`);
            // Do NOT clear category
+        } else if (req.store.enableSimpleCategoryExtraction) {
+           // If enableSimpleCategoryExtraction is ON, keep all extracted filters for simple queries
+           console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH enableSimpleCategoryExtraction: Keeping all filters (category="${originalCategory}", softCategory="${enhancedFilters.softCategory}")`);
+           // Do NOT clear filters - user explicitly wants category extraction on simple queries
         } else {
             // Clear category for simple text-based searches - rely on text matching
             // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
@@ -5344,7 +5348,7 @@ app.post("/search", async (req, res) => {
               console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - simple queries use text matching only`);
               enhancedFilters.category = undefined;
             }
-            
+
             // Always clear price filters for simple queries (prices need explicit intent)
             enhancedFilters.price = undefined;
             enhancedFilters.minPrice = undefined;
