@@ -4691,6 +4691,8 @@ app.get("/autocomplete", async (req, res) => {
 // Handle Phase 1: Text matches only for progressive loading
 async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, softCategories, dbName, collectionName, searchLimit, enableSimpleCategoryExtraction) {
   try {
+    console.log(`[${requestId}] 🎯 handleTextMatchesOnlyPhase called with enableSimpleCategoryExtraction=${enableSimpleCategoryExtraction}`);
+
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
@@ -4709,9 +4711,13 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       } else {
         console.log(`[${requestId}] 🎯 No categories extracted from query`);
       }
+    } else {
+      console.log(`[${requestId}] 🎯 Category extraction SKIPPED: enableSimpleCategoryExtraction=${enableSimpleCategoryExtraction}, categories=${!!categories}`);
     }
 
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, extractedFilters, categories, types);
+
+    console.log(`[${requestId}] 🎯 Building search pipeline with filters:`, JSON.stringify(extractedFilters));
 
     // Do text search with extracted filters if available
     const textSearchLimit = Math.max(searchLimit, 100);
