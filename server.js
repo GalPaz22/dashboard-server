@@ -490,14 +490,9 @@ async function ensureIndexes(dbName, collectionName) {
       { collection, spec: { softCategory: 1 }, options: { name: 'idx_softcategory' } },
 
       // Compound indexes for common filter combinations
-      { collection, spec: { category: 1, type: 1 }, options: { name: 'idx_category_type' } },
-      { collection, spec: { softCategory: 1, stockStatus: 1 }, options: { name: 'idx_softcat_stock' } },
-      { collection, spec: { stockStatus: 1, type: 1 }, options: { name: 'idx_stock_type' } },
-
-      // Advanced compound indexes for multi-filter queries (Performance Optimization)
-      { collection, spec: { type: 1, softCategory: 1, stockStatus: 1 }, options: { name: 'idx_type_softcat_stock' } },
-      { collection, spec: { category: 1, softCategory: 1, stockStatus: 1 }, options: { name: 'idx_cat_softcat_stock' } },
-      { collection, spec: { softCategory: 1, price: 1 }, options: { name: 'idx_softcat_price' } },
+      // NOTE: Cannot create compound indexes on multiple array fields (category, softCategory, type are all arrays)
+      // MongoDB error: "cannot index parallel arrays"
+      { collection, spec: { stockStatus: 1, price: 1 }, options: { name: 'idx_stock_price' } },
 
       // Queries collection indexes
       { collection: queriesCollection, spec: { timestamp: -1 }, options: { name: 'idx_timestamp' } },
@@ -5244,7 +5239,7 @@ app.post("/search", async (req, res) => {
         false,
         false,
         [],
-        earlySoftFilters // Include early soft filters for context
+        {} // CRITICAL FIX: Don't use soft filters for classification - we need to find ALL text matches regardless of filters
       );
 
       // Add score projection for reuse in classification AND two-step search
