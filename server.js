@@ -4689,7 +4689,7 @@ app.get("/autocomplete", async (req, res) => {
 \* =========================================================== */
 
 // Handle Phase 1: Text matches only for progressive loading
-async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, softCategories, dbName, collectionName, searchLimit) {
+async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, softCategories, dbName, collectionName, searchLimit, enableSimpleCategoryExtraction) {
   try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
@@ -4697,12 +4697,26 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     const translatedQuery = await translateQuery(query, context);
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
-    const cleanedTextForSearch = removeHardFilterWords(cleanedText, {}, categories, types);
 
-    // Do pure text search
+    // Extract category filters from query if enableSimpleCategoryExtraction is ON
+    let extractedFilters = {};
+    if (enableSimpleCategoryExtraction && categories) {
+      console.log(`[${requestId}] 🎯 enableSimpleCategoryExtraction is ON - extracting categories from query: "${query}"`);
+      extractedFilters = await extractFiltersFromQueryEnhanced(translatedQuery || query, categories, types, softCategories, false, context);
+
+      if (extractedFilters.category || extractedFilters.softCategory) {
+        console.log(`[${requestId}] 🎯 SIMPLE QUERY CATEGORY EXTRACTION: category="${extractedFilters.category || 'none'}", softCategory="${extractedFilters.softCategory || 'none'}"`);
+      } else {
+        console.log(`[${requestId}] 🎯 No categories extracted from query`);
+      }
+    }
+
+    const cleanedTextForSearch = removeHardFilterWords(cleanedText, extractedFilters, categories, types);
+
+    // Do text search with extracted filters if available
     const textSearchLimit = Math.max(searchLimit, 100);
     const textSearchPipeline = buildStandardSearchPipeline(
-      cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
+      cleanedTextForSearch, query, extractedFilters, textSearchLimit, false, false, []
     );
 
     // Add project to ensure we get categories
@@ -5291,7 +5305,7 @@ app.post("/search", async (req, res) => {
     if (phase === 'text-matches-only' && isSimpleResult) {
       console.log(`[${requestId}] 🚀 Phase 1: Returning text matches only`);
       // No need to format - handleTextMatchesOnlyPhase returns raw products
-      return await handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, finalSoftCategories, dbName, collectionName, searchLimit);
+      return await handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, finalSoftCategories, dbName, collectionName, searchLimit, req.store.enableSimpleCategoryExtraction);
     }
 
     if (phase === 'category-filtered' && extractedCategories && isSimpleResult) {
