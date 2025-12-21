@@ -4859,6 +4859,27 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     console.log(`[${requestId}] Phase 1: Extracted ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
 
+    // Create category filter token for Phase 2 if categories were extracted
+    const extractedCategoriesMetadata = (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0)
+      ? {
+          hardCategories: hardCategoriesArray,
+          softCategories: softCategoriesArray,
+          categoryFiltered: false // Not yet filtered, this enables Phase 2
+        }
+      : null;
+
+    const categoryFilterToken = extractedCategoriesMetadata
+      ? Buffer.from(JSON.stringify({
+          query,
+          filters: extractedFilters,
+          extractedCategories: extractedCategoriesMetadata,
+          timestamp: Date.now(),
+          type: 'category-filtered'
+        })).toString('base64')
+      : null;
+
+    console.log(`[${requestId}] 🎯 Created categoryFilterToken: ${categoryFilterToken ? 'YES' : 'NO'} (hardCats: ${hardCategoriesArray.length}, softCats: ${softCategoriesArray.length})`);
+
     // Return text matches immediately
     const response = highQualityTextMatches.slice(0, searchLimit).map(product => ({
       _id: product._id.toString(),
@@ -4892,7 +4913,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         autoLoadMore: false,
         secondBatchToken: null,
         hasCategoryFiltering: (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0),
-        categoryFilterToken: null
+        categoryFilterToken: categoryFilterToken
       },
       metadata: {
         query: query,
