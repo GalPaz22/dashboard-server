@@ -4999,7 +4999,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
         categoryFilteredHardFilters,
         softCategoriesArray,
         queryEmbedding,
-        searchLimit, // OPTIMIZATION: Reduced from searchLimit * 2 for faster tier 2 queries
+        10, // OPTIMIZATION: Fixed at 10 results for faster tier 2 queries (down from searchLimit * 2)
         searchLimit,
         true, // useOrLogic
         false,
@@ -5871,7 +5871,7 @@ app.post("/search", async (req, res) => {
                   categoryFilteredHardFilters,
                   { softCategory: softCategoriesArray },
                   queryEmbedding,
-                  searchLimit, // OPTIMIZATION: Reduced from searchLimit * 2 for faster tier 2 queries
+                  10, // OPTIMIZATION: Fixed at 10 results for faster tier 2 queries (down from searchLimit * 2)
                   vectorLimit,
                   true, // useOrLogic
                   false,
