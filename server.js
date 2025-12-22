@@ -5629,8 +5629,8 @@ app.post("/search", async (req, res) => {
     }
 
     // Continue with standard search logic only if filter-only wasn't used successfully
-    // PERFORMANCE: Skip for simple queries - they use two-step search below (line ~5730)
-    if (((!shouldUseFilterOnly || combinedResults.length === 0) && isComplexQueryResult)) {
+    // PERFORMANCE: Skip standard search for simple queries - they use two-step search below (line ~5732)
+    if ((!shouldUseFilterOnly || combinedResults.length === 0) && isComplexQueryResult) {
       if (hasSoftFilters) {
         console.log(`[${requestId}] Executing explicit soft category search`, softFilters.softCategory);
         
