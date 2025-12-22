@@ -5461,10 +5461,18 @@ app.post("/search", async (req, res) => {
     // Create a version of cleanedText with hard filter words removed for vector/fuzzy search
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, hardFilters, categories, types);
     console.log(`[${requestId}] Original text: "${cleanedText}" -> Search text: "${cleanedTextForSearch}"`);
-    
-    const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
-    if (!queryEmbedding) {
+
+    // PERFORMANCE OPTIMIZATION: Only generate embeddings for complex queries
+    // Simple queries rely on text matching and don't need expensive embedding generation
+    let queryEmbedding = null;
+    if (isComplexQueryResult) {
+      console.log(`[${requestId}] 🔄 Generating embedding for COMPLEX query (100-300ms)...`);
+      queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
+      if (!queryEmbedding) {
         return res.status(500).json({ error: "Error generating query embedding" });
+      }
+    } else {
+      console.log(`[${requestId}] ⚡ SKIPPING embedding for SIMPLE query - text matching only (saves 100-300ms)`);
     }
 
     // Log extracted filters BEFORE they might be cleared for simple queries
@@ -5621,7 +5629,8 @@ app.post("/search", async (req, res) => {
     }
 
     // Continue with standard search logic only if filter-only wasn't used successfully
-    if (!shouldUseFilterOnly || combinedResults.length === 0) {
+    // PERFORMANCE: Skip for simple queries - they use two-step search below (line ~5730)
+    if (((!shouldUseFilterOnly || combinedResults.length === 0) && isComplexQueryResult)) {
       if (hasSoftFilters) {
         console.log(`[${requestId}] Executing explicit soft category search`, softFilters.softCategory);
         
@@ -5862,8 +5871,8 @@ app.post("/search", async (req, res) => {
               // Get full category-filtered results
               let categoryFilteredResults;
 
-              if (softCategoriesArray.length > 0) {
-                // Use soft category search
+              if (softCategoriesArray.length > 0 && queryEmbedding) {
+                // Use soft category search (only if we have embeddings for complex queries)
                 categoryFilteredResults = await executeExplicitSoftCategorySearch(
                   collection,
                   cleanedText,
@@ -5880,38 +5889,24 @@ app.post("/search", async (req, res) => {
                   req.store.softCategoriesBoost
                 );
               } else {
-                // Category filter only
-                const searchPromises = [
-                  collection.aggregate(buildStandardSearchPipeline(
-                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
-                  )).toArray(),
-                  collection.aggregate(buildStandardVectorSearchPipeline(
-                    queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
-                  )).toArray()
-                ];
+                // PERFORMANCE OPTIMIZATION: For simple queries, skip vector search entirely
+                // Only do text-based fuzzy search with category filters
+                console.log(`[${requestId}] ⚡ Simple query category filtering: TEXT SEARCH ONLY (no vector search)`);
 
-                const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
+                const fuzzyRes = await collection.aggregate(buildStandardSearchPipeline(
+                  cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
+                )).toArray();
 
-                const docRanks = new Map();
-                fuzzyRes.forEach((doc, index) => {
-                  docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity });
-                });
-                vectorRes.forEach((doc, index) => {
-                  const existing = docRanks.get(doc._id.toString()) || { fuzzyRank: Infinity, vectorRank: Infinity };
-                  docRanks.set(doc._id.toString(), { ...existing, vectorRank: index });
-                });
-
-                categoryFilteredResults = Array.from(docRanks.entries()).map(([id, ranks]) => {
-                  const doc = fuzzyRes.find((d) => d._id.toString() === id) || vectorRes.find((d) => d._id.toString() === id);
+                categoryFilteredResults = fuzzyRes.map((doc, index) => {
                   const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
                   return {
                     ...doc,
-                    rrf_score: calculateEnhancedRRFScore(ranks.fuzzyRank, ranks.vectorRank, 0, 0, exactMatchBonus, 0),
+                    rrf_score: calculateEnhancedRRFScore(index, Infinity, 0, 0, exactMatchBonus, 0),
                     softFilterMatch: false,
                     softCategoryMatches: 0,
                     exactMatchBonus: exactMatchBonus,
-                    fuzzyRank: ranks.fuzzyRank,
-                    vectorRank: ranks.vectorRank
+                    fuzzyRank: index,
+                    vectorRank: Infinity
                   };
                 }).sort((a, b) => b.rrf_score - a.rrf_score);
               }
