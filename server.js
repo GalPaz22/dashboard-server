@@ -5586,7 +5586,7 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] Cleaned query for fuzzy search:`, cleanedHebrewText);
 
     let extractedCategoriesMetadata = null; // Store extracted categories for progressive loading
-    let reorderedData;
+    let reorderedData = []; // Initialize to empty array to prevent undefined errors
     let llmReorderingSuccessful = false;
       
     // ULTRA-FAST PATH: Filter-only queries (optimized for speed and completeness)
