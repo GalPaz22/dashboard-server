@@ -5675,13 +5675,13 @@ app.post("/search", async (req, res) => {
         });
       }
     }
-
-      // TWO-STEP SEARCH FOR SIMPLE QUERIES
-      // Step 1: Pure text search to find strong matches
-      // Step 2: Extract categories and do category-filtered search
-    // CRITICAL: This must be OUTSIDE the complex query block above
-      if (isSimpleResult && !shouldUseFilterOnly) {
-        console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
+    
+    // TWO-STEP SEARCH FOR SIMPLE QUERIES
+    // Step 1: Pure text search to find strong matches
+    // Step 2: Extract categories and do category-filtered search
+    // CRITICAL: This must be OUTSIDE the complex query block above (line 5583)
+    if (isSimpleResult && !shouldUseFilterOnly) {
+      console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
 
         try {
           // OPTIMIZATION: Reuse preliminary search results instead of querying again
