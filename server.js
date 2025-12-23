@@ -451,125 +451,6 @@ function getMongoClient() {
   return cachedPromise;
 }
 
-// ===== DATABASE INDEX OPTIMIZATION =====
-// Creates indexes on frequently queried fields for faster simple queries
-async function ensureIndexes(dbName, collectionName) {
-  const indexErrors = [];
-
-  try {
-    const client = await getMongoClient();
-    const db = client.db(dbName);
-    const collection = db.collection(collectionName);
-    const queriesCollection = db.collection("queries");
-
-    // Event and tracking collections
-    const checkoutEventsCollection = db.collection("checkout_events");
-    const cartCollection = db.collection("cart");
-    const trackingEventsCollection = db.collection("tracking_events");
-    const userProfilesCollection = db.collection("user_profiles");
-
-    // User and complexity collections
-    const activeUsersCollection = db.collection("active_users");
-    const queryComplexityFeedbackCollection = db.collection("query_complexity_feedback");
-    const queryComplexityLearnedCollection = db.collection("query_complexity_learned");
-
-    console.log(`[INDEX] Creating indexes for ${dbName}.${collectionName}...`);
-
-    // Create indexes sequentially with better error handling
-    // Note: Removed deprecated 'background: true' option (deprecated in MongoDB 4.2+, removed in 5.0+)
-    const indexes = [
-      // Products collection indexes
-      { collection, spec: { ItemID: 1 }, options: { name: 'idx_itemid' } },
-      { collection, spec: { sku: 1 }, options: { name: 'idx_sku' } },
-      { collection, spec: { id: 1 }, options: { name: 'idx_id' } },
-      { collection, spec: { barcode: 1 }, options: { name: 'idx_barcode' } },
-      { collection, spec: { name: 1 }, options: { name: 'idx_name' } },
-      { collection, spec: { stockStatus: 1 }, options: { name: 'idx_stockstatus' } },
-      { collection, spec: { type: 1 }, options: { name: 'idx_type' } },
-      { collection, spec: { category: 1 }, options: { name: 'idx_category' } },
-      { collection, spec: { softCategory: 1 }, options: { name: 'idx_softcategory' } },
-
-      // Compound indexes for common filter combinations
-      // NOTE: Cannot create compound indexes on multiple array fields (category, softCategory, type are all arrays)
-      // MongoDB error: "cannot index parallel arrays"
-      { collection, spec: { stockStatus: 1, price: 1 }, options: { name: 'idx_stock_price' } },
-
-      // Queries collection indexes
-      { collection: queriesCollection, spec: { timestamp: -1 }, options: { name: 'idx_timestamp' } },
-      { collection: queriesCollection, spec: { query: 1 }, options: { name: 'idx_query' } },
-
-      // ===== EVENT COLLECTIONS INDEXES (Fix for Query Targeting Alert) =====
-      // These indexes fix the critical query targeting issue where event lookups
-      // were performing full collection scans, causing 1000+ scanned/returned ratio
-
-      // Checkout events - compound index for duplicate detection query
-      { collection: checkoutEventsCollection, spec: { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 }, options: { name: 'idx_checkout_dedup' } },
-      { collection: checkoutEventsCollection, spec: { timestamp: -1 }, options: { name: 'idx_checkout_timestamp' } },
-      { collection: checkoutEventsCollection, spec: { product_id: 1 }, options: { name: 'idx_checkout_product' } },
-
-      // Cart events - compound index for duplicate detection query
-      { collection: cartCollection, spec: { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 }, options: { name: 'idx_cart_dedup' } },
-      { collection: cartCollection, spec: { timestamp: -1 }, options: { name: 'idx_cart_timestamp' } },
-      { collection: cartCollection, spec: { product_id: 1 }, options: { name: 'idx_cart_product' } },
-
-      // Tracking events - timestamp index for time-based queries
-      { collection: trackingEventsCollection, spec: { timestamp: -1 }, options: { name: 'idx_tracking_timestamp' } },
-
-      // User profiles - compound index for duplicate detection query
-      { collection: userProfilesCollection, spec: { search_query: 1, event_type: 1, product_id: 1, timestamp: 1 }, options: { name: 'idx_userprofile_dedup' } },
-      { collection: userProfilesCollection, spec: { timestamp: -1 }, options: { name: 'idx_userprofile_timestamp' } },
-
-      // ===== USER COLLECTIONS INDEXES =====
-      // Active users - visitor_id is queried frequently for user profile lookups
-      { collection: activeUsersCollection, spec: { visitor_id: 1 }, options: { name: 'idx_visitor_id' } },
-
-      // ===== QUERY COMPLEXITY INDEXES =====
-      // Query complexity feedback - for ML learning and feedback storage
-      { collection: queryComplexityFeedbackCollection, spec: { query: 1, timestamp: -1 }, options: { name: 'idx_complexity_feedback' } },
-
-      // Query complexity learned - for fast lookup of learned patterns
-      { collection: queryComplexityLearnedCollection, spec: { query: 1 }, options: { name: 'idx_complexity_learned' } }
-    ];
-
-    // Create indexes with individual error handling
-    for (const { collection: coll, spec, options } of indexes) {
-      try {
-        await coll.createIndex(spec, options);
-        console.log(`[INDEX] ✓ Created ${options.name}`);
-      } catch (error) {
-        // Index already exists is OK (code 85 or 86)
-        if (error.code === 85 || error.code === 86 || error.message.includes('already exists')) {
-          console.log(`[INDEX] ✓ ${options.name} already exists`);
-        } else {
-          indexErrors.push({ name: options.name, error: error.message, code: error.code });
-          console.error(`[INDEX] ✗ Failed to create ${options.name}: ${error.message}`);
-        }
-      }
-    }
-
-    if (indexErrors.length === 0) {
-      console.log(`[INDEX] ✅ All indexes verified successfully for ${dbName}.${collectionName}`);
-    } else {
-      console.error(`[INDEX] ⚠️  ${indexErrors.length} indexes failed to create:`, indexErrors);
-    }
-  } catch (error) {
-    console.error(`[INDEX] ❌ Critical error during index creation: ${error.message}`);
-    throw error;
-  }
-}
-
-// Cache to track which collections have had indexes created
-const indexedCollections = new Set();
-
-// Ensure indexes exist for a collection (called lazily on first use)
-async function ensureIndexesOnce(dbName, collectionName) {
-  const key = `${dbName}.${collectionName}`;
-  if (!indexedCollections.has(key)) {
-    await ensureIndexes(dbName, collectionName);
-    indexedCollections.add(key);
-  }
-}
-
 // POST /queries endpoint
 app.post("/queries", async (req, res) => {
   const { dbName } = req.body;
@@ -4670,9 +4551,6 @@ app.get("/autocomplete", async (req, res) => {
   const { query } = req.query;
   const { dbName, products: collectionName } = req.store;
   try {
-    // Ensure indexes exist for optimal query performance
-    await ensureIndexesOnce(dbName, collectionName || "products");
-
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection1 = db.collection("products");
@@ -5147,9 +5025,6 @@ app.post("/search", async (req, res) => {
       error: "Either apiKey **or** (dbName & collectionName) must be provided",
     });
   }
-
-  // Ensure indexes exist for optimal query performance (runs once per collection)
-  await ensureIndexesOnce(dbName, collectionName);
 
   // Early extraction of soft filters for progressive loading phases
   // This prevents "Cannot access 'enhancedFilters' before initialization" error
@@ -6674,9 +6549,6 @@ app.get("/products", async (req, res) => {
     return res.status(400).json({ error: "Database name and collection name are required" });
   }
   try {
-    // Ensure indexes exist for this collection
-    await ensureIndexesOnce(dbName, collectionName);
-
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
@@ -8312,55 +8184,10 @@ app.delete("/active-users/:visitor_id", async (req, res) => {
    SERVER STARTUP
 \* =========================================================== */
 
-// ===== CREATE INDEXES FOR USERS DATABASE =====
-// This function creates indexes for the users database (separate from product databases)
-async function ensureUsersDbIndexes() {
-  try {
-    const client = await getMongoClient();
-    const usersDb = client.db("users");
-    const usersCollection = usersDb.collection("users");
-
-    console.log(`[INDEX] Creating indexes for users database...`);
-
-    // Create index on apiKey field for authentication lookups
-    // This fixes the query targeting issue where API key lookups performed full collection scans
-    // Note: Removed deprecated 'background: true' option (deprecated in MongoDB 4.2+, removed in 5.0+)
-    try {
-      await usersCollection.createIndex(
-        { apiKey: 1 },
-        { name: 'idx_apikey', unique: true }
-      );
-      console.log(`[INDEX] ✓ Created idx_apikey (unique)`);
-    } catch (error) {
-      // Index already exists is OK
-      if (error.code === 85 || error.code === 86 || error.message.includes('already exists')) {
-        console.log(`[INDEX] ✓ idx_apikey already exists`);
-      } else {
-        console.error(`[INDEX] ✗ Failed to create idx_apikey: ${error.message}`);
-        throw error;
-      }
-    }
-
-    console.log(`[INDEX] ✅ Users database indexes verified successfully`);
-  } catch (error) {
-    console.error(`[INDEX] ❌ Users database index creation failed: ${error.message}`);
-    throw error;
-  }
-}
-
 const PORT = process.env.PORT || 8000;
 const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
-
-  // Create indexes for users database on startup
-  setTimeout(async () => {
-    try {
-      await ensureUsersDbIndexes();
-    } catch (error) {
-      console.error('Users database index creation failed:', error);
-    }
-  }, 1000);
 
   // Warm cache on startup
   setTimeout(async () => {
