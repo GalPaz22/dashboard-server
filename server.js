@@ -4216,13 +4216,11 @@ app.get("/search/load-more", async (req, res) => {
     
     let cachedResults = null;
     
-    // HANDLE CATEGORY-FILTERED REQUEST OR COMPLEX TIER-2 (both use category filtering)
-    if ((isCategoryFiltered || isComplexTier2) && extractedCategories) {
-      if (isComplexTier2) {
-        console.log(`[${requestId}] 📋 Categories from LLM-selected products:`);
-      } else {
-        console.log(`[${requestId}] Running category-filtered search with:`);
-      }
+    // HANDLE CATEGORY-FILTERED REQUEST (direct Tier 2 access)
+    // NOTE: isComplexTier2 is NOT included here because it needs to first load
+    // original results from Redis, then append Tier 2 results in the next block.
+    if (isCategoryFiltered && extractedCategories) {
+      console.log(`[${requestId}] Running category-filtered search with:`);
       console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
       console.log(`[${requestId}]   • Soft categories: ${extractedCategories.softCategories ? JSON.stringify(extractedCategories.softCategories) : 'none'}`);
       
@@ -4507,6 +4505,99 @@ app.get("/search/load-more", async (req, res) => {
             [], // No exclusion since we're loading more
             req.store.softCategoriesBoost
           );
+
+          // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
+          // If tier 1 found high-quality textual matches, use their embeddings to find similar products
+          if (extractedCategories.topProductEmbeddings && extractedCategories.topProductEmbeddings.length > 0) {
+            console.log(`[${requestId}] 🧬 TIER-2 ENHANCEMENT: Finding products similar to ${extractedCategories.topProductEmbeddings.length} tier-1 textual matches`);
+            
+            // For each seed product, run ANN search using its embedding
+            const similaritySearches = extractedCategories.topProductEmbeddings.map(async (productEmbed) => {
+              // Build filter for ANN search
+              const annFilter = {
+                $and: [
+                  { stockStatus: "instock" },
+                  // Exclude the seed product itself
+                  { _id: { $ne: productEmbed._id } }
+                ]
+              };
+              
+              // Apply hard category filter if present
+              if (categoryFilteredHardFilters.category) {
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
+                  ? categoryFilteredHardFilters.category 
+                  : [categoryFilteredHardFilters.category];
+                annFilter.$and.push({ category: { $in: categoryArray } });
+              }
+              
+              const pipeline = [
+                {
+                  $vectorSearch: {
+                    index: "vector_index",
+                    path: "embedding",
+                    queryVector: productEmbed.embedding,
+                    numCandidates: Math.max(vectorLimit * 2, 100),
+                    exact: false,
+                    limit: 20, // Top 20 similar per seed
+                    filter: annFilter
+                  }
+                },
+                {
+                  $addFields: {
+                    seedProductId: productEmbed._id,
+                    seedProductName: productEmbed.name,
+                    similaritySource: "product_embedding"
+                  }
+                }
+              ];
+              
+              return collection.aggregate(pipeline).toArray();
+            });
+
+            const allSimilarityResults = await Promise.all(similaritySearches);
+            const flattenedSimilarityResults = allSimilarityResults.flat();
+            
+            console.log(`[${requestId}] 🧬 Found ${flattenedSimilarityResults.length} products via embedding similarity`);
+
+            // Merge similarity results with soft category results
+            const resultMap = new Map();
+            
+            // First pass: Add all soft category results
+            categoryFilteredResults.forEach(product => {
+              resultMap.set(product._id.toString(), {
+                ...product,
+                sources: ['soft_category'],
+                similarityBoost: 0
+              });
+            });
+
+            // Second pass: Add or merge similarity results
+            flattenedSimilarityResults.forEach(product => {
+              const id = product._id.toString();
+              if (resultMap.has(id)) {
+                // Product found via BOTH methods - highest confidence
+                const existing = resultMap.get(id);
+                existing.sources.push('product_similarity');
+                existing.similarityBoost = 5000; // Dual-source boost
+                existing.seedProductName = product.seedProductName;
+              } else {
+                // New product from similarity only
+                resultMap.set(id, {
+                  ...product,
+                  sources: ['product_similarity'],
+                  similarityBoost: 2500, // Similarity-only boost
+                  softFilterMatch: false,
+                  softCategoryMatches: 0
+                });
+              }
+            });
+
+            // Convert back to array
+            categoryFilteredResults = Array.from(resultMap.values());
+            
+            const dualSourceCount = categoryFilteredResults.filter(p => p.sources && p.sources.length > 1).length;
+            console.log(`[${requestId}] 🧬 TIER-2 MERGED: ${categoryFilteredResults.length} total (${dualSourceCount} via both methods)`);
+          }
         } else {
           // Just category filter without soft categories
           const { syncMode } = req.store;
@@ -5596,6 +5687,7 @@ app.post("/search", async (req, res) => {
 
     // Continue with standard search logic only if filter-only wasn't used successfully
     // PERFORMANCE: Skip standard search for simple queries - they use two-step search below (line ~5732)
+    console.log(`[${requestId}] 🔍 BEFORE COMPLEX BLOCK: combinedResults.length=${combinedResults.length}, isComplexQueryResult=${isComplexQueryResult}`);
     if ((!shouldUseFilterOnly || combinedResults.length === 0) && isComplexQueryResult) {
       if (hasSoftFilters) {
         console.log(`[${requestId}] Executing explicit soft category search`, softFilters.softCategory);
@@ -5691,6 +5783,7 @@ app.post("/search", async (req, res) => {
         });
       }
     }
+  }
 
     // TWO-STEP SEARCH FOR SIMPLE QUERIES
     // Step 1: Pure text search to find strong matches
@@ -6039,7 +6132,6 @@ app.post("/search", async (req, res) => {
       reorderedData = combinedResults.map((result) => ({ _id: result._id.toString(), explanation: null }));
         llmReorderingSuccessful = false;
       }
-    }
     // Log search results summary
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
