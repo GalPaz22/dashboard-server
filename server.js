@@ -129,7 +129,7 @@ function extractHardCodedCategories(query, categories = '') {
   // If no categories provided, return null
   if (!categories) {
     return null;
-  }
+}
 
   // Handle both string and array input
   let categoriesStr = categories;
@@ -176,7 +176,7 @@ function extractHardCodedCategories(query, categories = '') {
       wordCount: words.length
     });
   }
-
+  
   // Sort patterns by priority (highest first), then by word count (most words first)
   categoryPatterns.sort((a, b) => {
     if (b.priority !== a.priority) {
@@ -1951,7 +1951,7 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
     ];
     
       quickResults = await collection.aggregate(quickTextSearchPipeline).toArray();
-
+    
     } catch (error) {
       console.error('[QUERY CLASSIFICATION] Text search failed:', error.message);
       quickResults = [];
@@ -2044,7 +2044,7 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
       } else {
         // Longer indicators: allow substring matching
         return word.includes(indicator) || indicator.includes(word);
-      }
+    }
     })
   );
 
@@ -2069,7 +2069,7 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
   if (hasComplexIndicators && queryWords.length >= 2) {
     console.log(`[QUERY CLASSIFICATION] 🔴 COMPLEX indicators detected (${queryWords.length} words with contextual terms) → COMPLEX query`);
     return false;
-  }
+      }
 
   // Very long queries without text matches are likely complex/descriptive
   if (queryWords.length > 4) {
@@ -2370,7 +2370,7 @@ ${example}.`;
           // AI extracted a category, but let's check if dynamic extraction is more specific
           const aiCategory = Array.isArray(filters.category) ? filters.category[0] : filters.category;
           const dynamicCat = Array.isArray(validatedDynamicCategory) ? validatedDynamicCategory[0] : validatedDynamicCategory;
-
+          
           // If dynamic category is more specific (longer string), prefer it
           if (dynamicCat.length > aiCategory.length) {
             filters.category = validatedDynamicCategory;
@@ -3742,7 +3742,7 @@ async function executeExplicitSoftCategorySearch(
   if (deliveredIds && deliveredIds.length > 0) {
     console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
-
+  
   // Limit early to reduce processing latency in subsequent operations
   // Use searchLimit * 3 to provide enough variety while reducing overhead
   const earlyLimitedResults = filteredResults.slice(0, searchLimit * 3);
@@ -5556,6 +5556,7 @@ app.post("/search", async (req, res) => {
       
     // ULTRA-FAST PATH: Filter-only queries (optimized for speed and completeness)
     const shouldUseFilterOnly = shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQueryResult);
+    console.log(`[${requestId}] 🔍 FILTER-ONLY CHECK: shouldUseFilterOnly=${shouldUseFilterOnly}, isComplexQueryResult=${isComplexQueryResult}`);
 
     if (shouldUseFilterOnly) {
       console.log(`[${requestId}] Filter-only query detected - using ultra-fast optimized pipeline`);
@@ -5691,12 +5692,13 @@ app.post("/search", async (req, res) => {
       }
     }
 
-      // TWO-STEP SEARCH FOR SIMPLE QUERIES
-      // Step 1: Pure text search to find strong matches
-      // Step 2: Extract categories and do category-filtered search
+    // TWO-STEP SEARCH FOR SIMPLE QUERIES
+    // Step 1: Pure text search to find strong matches
+    // Step 2: Extract categories and do category-filtered search
     // CRITICAL: This must be OUTSIDE the complex query block above (line 5583)
-      if (isSimpleResult && !shouldUseFilterOnly) {
-        console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
+    console.log(`[${requestId}] 🔍 TWO-STEP CHECK: isSimpleResult=${isSimpleResult}, shouldUseFilterOnly=${shouldUseFilterOnly}, combined=${isSimpleResult && !shouldUseFilterOnly}`);
+    if (isSimpleResult && !shouldUseFilterOnly) {
+      console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
 
         try {
           // OPTIMIZATION: Reuse preliminary search results instead of querying again
@@ -7153,7 +7155,7 @@ app.post("/test-multi-category-boosting", async (req, res) => {
     console.log("Product soft categories:", JSON.stringify(productSoftCategories));
     console.log("Query soft categories:", JSON.stringify(querySoftCategories));
     console.log("Boost scores:", JSON.stringify(boostScores));
-
+    
     const matchResult = calculateSoftCategoryMatches(productSoftCategories, querySoftCategories, boostScores);
     const multiCategoryBoost = matchResult.weightedScore > 0 ? Math.pow(5, matchResult.weightedScore) * 2000 : 0;
     const filterOnlyBoost = matchResult.weightedScore > 0 ? Math.pow(3, matchResult.weightedScore) * 2000 : 0;
