@@ -5102,22 +5102,11 @@ app.post("/search", async (req, res) => {
 
   // Early extraction of soft filters for progressive loading phases
   // This prevents "Cannot access 'enhancedFilters' before initialization" error
+  // NOTE: This is DISABLED for now as it causes issues with simple product name queries
+  // For example "סנסר לבן" (Sancerre white) would extract "לבן" as a soft category
+  // which then filters out all products without "לבן" in softCategory field
+  // TODO: Only extract filters if query contains filter keywords (price, "until", "for", etc.)
   let earlySoftFilters = null;
-  try {
-    const translatedQuery = await translateQuery(query, context);
-    if (translatedQuery) {
-      const queryForExtraction = translatedQuery || query;
-      const earlyEnhancedFilters = categories
-        ? await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context)
-        : {};
-      earlySoftFilters = {
-        softCategory: earlyEnhancedFilters.softCategory
-      };
-    }
-  } catch (error) {
-    console.warn(`[${requestId}] Could not extract early soft filters:`, error.message);
-    earlySoftFilters = null;
-  }
 
   // Check if this is a digits-only query for SKU search
   if (isDigitsOnlyQuery(query)) {
