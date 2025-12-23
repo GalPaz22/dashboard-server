@@ -875,13 +875,9 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     }
   }
 
-  // Add soft filters
-  if (softFilters && softFilters.softCategory) {
-    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-    matchConditions.push({
-      softCategory: { $in: softCats }
-    });
-  }
+  // NOTE: Soft filters are NOT added as hard conditions here
+  // Soft categories should boost results, not exclude non-matching products
+  // The scoring is handled in executeOptimizedFilterOnlySearch via calculateSoftCategoryMatches
 
   // Single compound match stage for optimal performance
   pipeline.push({
@@ -5871,16 +5867,26 @@ app.post("/search", async (req, res) => {
               // Get full category-filtered results
               let categoryFilteredResults;
 
-              if (softCategoriesArray.length > 0 && queryEmbedding) {
-                // Use soft category search (only if we have embeddings for complex queries)
+              // Combine LLM-extracted soft category with soft categories extracted from results
+              // This ensures the original user intent (e.g., "שמתאים לגבינות") is preserved
+              const llmSoftCategories = softFilters.softCategory || [];
+              const combinedSoftCategories = [...new Set([
+                ...(Array.isArray(llmSoftCategories) ? llmSoftCategories : [llmSoftCategories]),
+                ...softCategoriesArray
+              ])].filter(Boolean);
+
+              if (combinedSoftCategories.length > 0 && queryEmbedding) {
+                // Use soft category search - this returns BOTH products with AND without soft category
+                // Products matching soft category get boosted, but non-matching products are still returned
+                console.log(`[${requestId}] Using combined soft categories: LLM=${JSON.stringify(llmSoftCategories)}, extracted=${JSON.stringify(softCategoriesArray)}, combined=${JSON.stringify(combinedSoftCategories)}`);
                 categoryFilteredResults = await executeExplicitSoftCategorySearch(
                   collection,
                   cleanedText,
                   query,
                   categoryFilteredHardFilters,
-                  { softCategory: softCategoriesArray },
+                  { softCategory: combinedSoftCategories },
                   queryEmbedding,
-                  10, // OPTIMIZATION: Fixed at 10 results for faster tier 2 queries (down from searchLimit * 2)
+                  searchLimit, // Use full searchLimit to ensure we get enough results including non-soft-category matches
                   vectorLimit,
                   true, // useOrLogic
                   false,
@@ -5888,6 +5894,47 @@ app.post("/search", async (req, res) => {
                   [],
                   req.store.softCategoriesBoost
                 );
+              } else if (queryEmbedding) {
+                // No soft categories but we have embedding - use combined fuzzy + vector search
+                console.log(`[${requestId}] No soft categories, using combined fuzzy + vector search`);
+
+                const searchPromises = [
+                  collection.aggregate(buildStandardSearchPipeline(
+                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
+                  )).toArray(),
+                  collection.aggregate(buildStandardVectorSearchPipeline(
+                    queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+                  )).toArray()
+                ];
+
+                const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
+
+                const docRanks = new Map();
+                fuzzyRes.forEach((doc, index) => {
+                  docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+                });
+                vectorRes.forEach((doc, index) => {
+                  const id = doc._id.toString();
+                  const existing = docRanks.get(id);
+                  if (existing) {
+                    existing.vectorRank = index;
+                  } else {
+                    docRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+                  }
+                });
+
+                categoryFilteredResults = Array.from(docRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
+                  const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+                  return {
+                    ...doc,
+                    rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0),
+                    softFilterMatch: false,
+                    softCategoryMatches: 0,
+                    exactMatchBonus: exactMatchBonus,
+                    fuzzyRank: fuzzyRank,
+                    vectorRank: vectorRank
+                  };
+                }).sort((a, b) => b.rrf_score - a.rrf_score);
               } else {
                 // PERFORMANCE OPTIMIZATION: For simple queries, skip vector search entirely
                 // Only do text-based fuzzy search with category filters
@@ -5935,10 +5982,10 @@ app.post("/search", async (req, res) => {
                 // Replace combinedResults with category-filtered results
                 combinedResults = finalResults;
 
-                // Store metadata for response
+                // Store metadata for response - use combined soft categories to reflect what was actually used
                 extractedCategoriesMetadata = {
                   hardCategories: hardCategoriesArray,
-                  softCategories: softCategoriesArray,
+                  softCategories: combinedSoftCategories.length > 0 ? combinedSoftCategories : softCategoriesArray,
                   textMatchCount: highQualityTextMatches.length,
                   categoryFiltered: true
                 };
