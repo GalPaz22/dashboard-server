@@ -5458,11 +5458,17 @@ app.post("/search", async (req, res) => {
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, hardFilters, categories, types);
     console.log(`[${requestId}] Original text: "${cleanedText}" -> Search text: "${cleanedTextForSearch}"`);
 
-    // PERFORMANCE OPTIMIZATION: Only generate embeddings for complex queries
-    // Simple queries rely on text matching and don't need expensive embedding generation
+    // PERFORMANCE OPTIMIZATION: Only generate embeddings when needed
+    // - Complex queries always need embeddings for LLM reordering
+    // - Simple queries with soft filters need embeddings for soft category search
+    // - Simple queries without soft filters can skip embeddings (text matching only)
     let queryEmbedding = null;
-    if (isComplexQueryResult) {
-      console.log(`[${requestId}] 🔄 Generating embedding for COMPLEX query (100-300ms)...`);
+    const hasSoftFiltersForEmbedding = enhancedFilters && enhancedFilters.softCategory &&
+      (Array.isArray(enhancedFilters.softCategory) ? enhancedFilters.softCategory.length > 0 : !!enhancedFilters.softCategory);
+
+    if (isComplexQueryResult || hasSoftFiltersForEmbedding) {
+      const reason = isComplexQueryResult ? 'COMPLEX query' : 'soft category filters present';
+      console.log(`[${requestId}] 🔄 Generating embedding (${reason})...`);
       queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
       if (!queryEmbedding) {
         return res.status(500).json({ error: "Error generating query embedding" });
