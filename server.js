@@ -476,11 +476,20 @@ app.post("/queries", async (req, res) => {
 \* =========================================================== */
 
 async function getStoreConfigByApiKey(apiKey) {
-  if (!apiKey) return null;
+  if (!apiKey) {
+    console.log(`[CONFIG] ❌ No API key provided`);
+    return null;
+  }
+  
+  console.log(`[CONFIG] 🔍 Looking up store config for API key: ${apiKey.substring(0, 10)}...`);
   const client = await connectToMongoDB(mongodbUri);
   const coreDb = client.db("users");
   const userDoc = await coreDb.collection("users").findOne({ apiKey });
-  if (!userDoc) return null;
+  
+  if (!userDoc) {
+    console.log(`[CONFIG] ❌ No user document found for this API key`);
+    return null;
+  }
 
   // Intelligent fallback: use boosted soft categories if available, otherwise use original
   // This keeps the server context light by only loading one version
@@ -536,14 +545,20 @@ async function getStoreConfigByApiKey(apiKey) {
 async function authenticate(req, res, next) {
   try {
     const apiKey = req.get("X-API-Key");
+    console.log(`[AUTH] Request to ${req.path}, API Key: ${apiKey ? apiKey.substring(0, 10) + '...' : 'MISSING'}`);
+    
     const store = await getStoreConfigByApiKey(apiKey);
+    
     if (!apiKey || !store) {
+      console.log(`[AUTH] ❌ Authentication failed - apiKey: ${!!apiKey}, store: ${!!store}`);
       return res.status(401).json({ error: "Invalid or missing API key" });
     }
+    
+    console.log(`[AUTH] ✅ Authenticated - dbName: ${store.dbName}, products: ${store.products}`);
     req.store = store;
     next();
   } catch (err) {
-    console.error("[auth]", err);
+    console.error("[AUTH] ❌ Exception during authentication:", err);
     res.status(500).json({ error: "Auth failure" });
   }
 }
@@ -5675,13 +5690,13 @@ app.post("/search", async (req, res) => {
         });
       }
     }
-    
-    // TWO-STEP SEARCH FOR SIMPLE QUERIES
-    // Step 1: Pure text search to find strong matches
-    // Step 2: Extract categories and do category-filtered search
+
+      // TWO-STEP SEARCH FOR SIMPLE QUERIES
+      // Step 1: Pure text search to find strong matches
+      // Step 2: Extract categories and do category-filtered search
     // CRITICAL: This must be OUTSIDE the complex query block above (line 5583)
-    if (isSimpleResult && !shouldUseFilterOnly) {
-      console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
+      if (isSimpleResult && !shouldUseFilterOnly) {
+        console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
 
         try {
           // OPTIMIZATION: Reuse preliminary search results instead of querying again
