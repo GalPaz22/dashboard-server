@@ -5592,13 +5592,19 @@ app.post("/search", async (req, res) => {
     // PERFORMANCE OPTIMIZATION: Only generate embeddings when needed
     // - Complex queries always need embeddings for LLM reordering
     // - Simple queries with soft filters need embeddings for soft category search
-    // - Simple queries without soft filters can skip embeddings (text matching only)
+    // - Simple queries that trigger two-step search (category expansion) need embeddings for relevance
+    // - Simple queries without soft filters or expansion can skip embeddings (text matching only)
     let queryEmbedding = null;
     const hasSoftFiltersForEmbedding = enhancedFilters && enhancedFilters.softCategory &&
       (Array.isArray(enhancedFilters.softCategory) ? enhancedFilters.softCategory.length > 0 : !!enhancedFilters.softCategory);
+    
+    // Determine if this simple query will likely trigger a two-step search
+    // (matches the logic at line 5870: isSimpleResult && !shouldUseFilterOnly)
+    const isSimpleTwoStepCandidate = isSimpleResult && !shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, false);
 
-    if (isComplexQueryResult || hasSoftFiltersForEmbedding) {
-      const reason = isComplexQueryResult ? 'COMPLEX query' : 'soft category filters present';
+    if (isComplexQueryResult || hasSoftFiltersForEmbedding || isSimpleTwoStepCandidate) {
+      const reason = isComplexQueryResult ? 'COMPLEX query' : 
+                    (hasSoftFiltersForEmbedding ? 'soft category filters present' : 'SIMPLE two-step search candidate');
       console.log(`[${requestId}] 🔄 Generating embedding (${reason})...`);
       queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
     if (!queryEmbedding) {
@@ -5962,8 +5968,14 @@ app.post("/search", async (req, res) => {
 
             const extractedHardCategories = new Set();
             const extractedSoftCategories = new Set();
+            const seedProducts = [];
 
             highQualityTextMatches.forEach(product => {
+              // Collect top products for similarity search (seed embeddings)
+              if (seedProducts.length < 2) {
+                seedProducts.push(product);
+              }
+
               // Extract hard categories
               if (product.category) {
                 if (Array.isArray(product.category)) {
@@ -5987,6 +5999,22 @@ app.post("/search", async (req, res) => {
             const softCategoriesArray = Array.from(extractedSoftCategories);
 
             console.log(`[${requestId}] 🏷️ Extracted categories: ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft`);
+            
+            // Fetch embeddings for seed products if needed
+            let topProductEmbeddings = [];
+            if (seedProducts.length > 0) {
+              try {
+                const seedIds = seedProducts.map(p => p._id);
+                const fullSeedDocs = await collection.find({ _id: { $in: seedIds } }).project({ _id: 1, embedding: 1, name: 1 }).toArray();
+                topProductEmbeddings = fullSeedDocs.filter(doc => doc.embedding && Array.isArray(doc.embedding));
+                if (topProductEmbeddings.length > 0) {
+                  console.log(`[${requestId}] 🧬 Found ${topProductEmbeddings.length} seed embeddings for similarity search`);
+                }
+              } catch (embedError) {
+                console.warn(`[${requestId}] ⚠️ Failed to fetch seed embeddings:`, embedError.message);
+              }
+            }
+
             if (hardCategoriesArray.length > 0) {
               console.log(`[${requestId}] Hard categories: ${JSON.stringify(hardCategoriesArray)}`);
             }
@@ -6036,6 +6064,84 @@ app.post("/search", async (req, res) => {
                   [],
                   req.store.softCategoriesBoost
                 );
+
+                // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
+                // Use seed embeddings to find products that are semantically similar to the text matches
+                if (topProductEmbeddings.length > 0) {
+                  console.log(`[${requestId}] 🧬 TIER-2 ENHANCEMENT: Finding products similar to ${topProductEmbeddings.length} seed products`);
+                  
+                  try {
+                    const similaritySearches = topProductEmbeddings.map(async (productEmbed) => {
+                      const annFilter = {
+                        $and: [
+                          { stockStatus: { $ne: "outofstock" } },
+                          { _id: { $ne: productEmbed._id } }
+                        ]
+                      };
+                      
+                      if (categoryFilteredHardFilters.category) {
+                        annFilter.$and.push({ category: Array.isArray(categoryFilteredHardFilters.category) ? { $in: categoryFilteredHardFilters.category } : categoryFilteredHardFilters.category });
+                      }
+                      
+                      const pipeline = [
+                        {
+                          $vectorSearch: {
+                            index: "vector_index",
+                            path: "embedding",
+                            queryVector: productEmbed.embedding,
+                            numCandidates: 50,
+                            limit: 15,
+                            filter: annFilter
+                          }
+                        },
+                        {
+                          $addFields: {
+                            similaritySource: "product_embedding",
+                            seedProductName: productEmbed.name
+                          }
+                        }
+                      ];
+                      return collection.aggregate(pipeline).toArray();
+                    });
+
+                    const allSimilarityResults = await Promise.all(similaritySearches);
+                    const flattenedSimilarityResults = allSimilarityResults.flat();
+                    
+                    console.log(`[${requestId}] 🧬 Found ${flattenedSimilarityResults.length} similar products via embedding similarity`);
+
+                    // Merge results
+                    const resultMap = new Map();
+                    categoryFilteredResults.forEach(p => resultMap.set(p._id.toString(), { ...p, sources: ['soft_category'] }));
+                    
+                    flattenedSimilarityResults.forEach(p => {
+                      const id = p._id.toString();
+                      if (resultMap.has(id)) {
+                        const existing = resultMap.get(id);
+                        existing.sources.push('product_similarity');
+                        existing.similarityBoost = 8000; // Boost for matching both
+                      } else {
+                        resultMap.set(id, {
+                          ...p,
+                          sources: ['product_similarity'],
+                          similarityBoost: 4000,
+                          softFilterMatch: false,
+                          softCategoryMatches: 0
+                        });
+                      }
+                    });
+
+                    categoryFilteredResults = Array.from(resultMap.values());
+                    // Update scores for similarity results
+                    categoryFilteredResults.forEach(p => {
+                      if (p.similarityBoost) {
+                        p.rrf_score = (p.rrf_score || 0) + p.similarityBoost;
+                      }
+                    });
+                    categoryFilteredResults.sort((a, b) => b.rrf_score - a.rrf_score);
+                  } catch (simError) {
+                    console.warn(`[${requestId}] ⚠️ Similarity enhancement failed:`, simError.message);
+                  }
+                }
               } else if (queryEmbedding) {
                 // No soft categories but we have embedding - use combined fuzzy + vector search
                 console.log(`[${requestId}] No soft categories, using combined fuzzy + vector search`);
