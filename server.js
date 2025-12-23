@@ -5584,6 +5584,36 @@ app.post("/search", async (req, res) => {
         return type;
       });
     }
+
+    const softFilters = {
+      softCategory: enhancedFilters.softCategory
+    };
+
+    // Normalize softCategory to array and split comma-separated values
+    if (softFilters.softCategory) {
+      if (!Array.isArray(softFilters.softCategory)) {
+        softFilters.softCategory = [softFilters.softCategory];
+      }
+      // Split any comma-separated values in the array
+      softFilters.softCategory = softFilters.softCategory.flatMap(cat => {
+        if (typeof cat === 'string' && cat.includes(',')) {
+          return cat.split(',').map(c => c.trim()).filter(c => c);
+        }
+        return cat;
+      });
+    }
+
+    let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
+    if (hardFilters.category) {
+      const cats = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
+      cats.forEach(c => tempNoHebrewWord.push(...c.split(' ')));
+    }
+    if (hardFilters.type) {
+      const typs = Array.isArray(hardFilters.type) ? hardFilters.type : [hardFilters.type];
+      typs.forEach(t => tempNoHebrewWord.push(...t.split(' ')));
+    }
+    tempNoHebrewWord = [...new Set(tempNoHebrewWord)];
+    const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
     
     // Create a version of cleanedText with hard filter words removed for vector/fuzzy search
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, hardFilters, categories, types);
@@ -5657,24 +5687,6 @@ app.post("/search", async (req, res) => {
       }
     }
 
-    const softFilters = {
-      softCategory: enhancedFilters.softCategory
-    };
-
-    // Normalize softCategory to array and split comma-separated values
-    if (softFilters.softCategory) {
-      if (!Array.isArray(softFilters.softCategory)) {
-        softFilters.softCategory = [softFilters.softCategory];
-      }
-      // Split any comma-separated values in the array
-      softFilters.softCategory = softFilters.softCategory.flatMap(cat => {
-        if (typeof cat === 'string' && cat.includes(',')) {
-          return cat.split(',').map(c => c.trim()).filter(c => c);
-        }
-        return cat;
-      });
-    }
-
     const hasExtractedHardFilters = hardFilters.category || hardFilters.type || hardFilters.price || hardFilters.minPrice || hardFilters.maxPrice;
     const hasExtractedSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
 
@@ -5709,20 +5721,6 @@ app.post("/search", async (req, res) => {
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
-
-    let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
-    if (hardFilters.category) {
-      const cats = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
-      cats.forEach(c => tempNoHebrewWord.push(...c.split(' ')));
-    }
-    if (hardFilters.type) {
-      const typs = Array.isArray(hardFilters.type) ? hardFilters.type : [hardFilters.type];
-      typs.forEach(t => tempNoHebrewWord.push(...t.split(' ')));
-    }
-    tempNoHebrewWord = [...new Set(tempNoHebrewWord)];
-
-    const cleanedHebrewText = removeWordsFromQuery(query, tempNoHebrewWord);
-    console.log(`[${requestId}] Cleaned query for fuzzy search:`, cleanedHebrewText);
 
     let extractedCategoriesMetadata = null; // Store extracted categories for progressive loading
     let reorderedData = []; // Initialize to empty array to prevent undefined errors
