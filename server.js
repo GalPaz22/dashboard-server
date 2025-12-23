@@ -4205,16 +4205,72 @@ app.get("/search/load-more", async (req, res) => {
     // Check if this is a category-filtered request or complex tier-2 request
     const isCategoryFiltered = type === 'category-filtered';
     const isComplexTier2 = type === 'complex-tier2';
+    const isTextMatchesOnly = type === 'text-matches-only';
     
     if (isComplexTier2) {
       console.log(`[${requestId}] 🔄 Complex query tier-2: Finding additional products matching LLM-selected categories`);
     } else if (isCategoryFiltered) {
       console.log(`[${requestId}] Category-filtered load request for query: "${query}"`);
+    } else if (isTextMatchesOnly) {
+      console.log(`[${requestId}] Text-matches-only load request for query: "${query}", offset: ${offset}`);
     } else {
       console.log(`[${requestId}] Loading more for query: "${query}", offset: ${offset}`);
     }
     
     let cachedResults = null;
+
+    // HANDLE TEXT-MATCHES-ONLY REQUEST
+    if (isTextMatchesOnly) {
+      try {
+        const { dbName } = req.store;
+        const client = await connectToMongoDB(mongodbUri);
+        const db = client.db(dbName);
+        const collection = db.collection("products");
+        
+        const translatedQuery = await translateQuery(query, context);
+        const cleanedText = removeWineFromQuery(translatedQuery, []);
+        
+        // Use a larger limit for pagination
+        const textSearchLimit = 200;
+        const textSearchPipeline = buildStandardSearchPipeline(
+          cleanedText, query, filters || {}, textSearchLimit, false, false, []
+        );
+        
+        textSearchPipeline.push({
+          $project: {
+            id: 1,
+            name: 1,
+            description: 1,
+            price: 1,
+            image: 1,
+            url: 1,
+            type: 1,
+            specialSales: 1,
+            ItemID: 1,
+            category: 1,
+            softCategory: 1,
+            stockStatus: 1
+          }
+        });
+
+        const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
+        const textResultsWithBonuses = textSearchResults.map(doc => ({
+          ...doc,
+          exactMatchBonus: getExactMatchBonus(doc.name, query, cleanedText),
+          rrf_score: 0,
+          softFilterMatch: false,
+          softCategoryMatches: 0
+        }));
+
+        cachedResults = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+        cachedResults.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
+        
+        console.log(`[${requestId}] Text-matches-only search returned ${cachedResults.length} products`);
+      } catch (error) {
+        console.error(`[${requestId}] Error in text-matches-only search:`, error);
+        return res.status(500).json({ error: "Text-matches-only load-more failed" });
+      }
+    }
     
     // HANDLE CATEGORY-FILTERED REQUEST (direct Tier 2 access)
     // NOTE: isComplexTier2 is NOT included here because it needs to first load
@@ -4669,8 +4725,8 @@ app.get("/search/load-more", async (req, res) => {
     }
 
     // Calculate pagination
-    // For category-filtered requests, offset starts at 0 (it's a new search)
-    const startIndex = isCategoryFiltered ? 0 : (offset || 0);
+    // For category-filtered requests, offset is used to slice the fresh search results
+    const startIndex = (offset || 0);
     const endIndex = Math.min(startIndex + parseInt(limit), cachedResults.length);
     const nextOffset = endIndex;
     const hasMore = endIndex < cachedResults.length;
@@ -4704,16 +4760,11 @@ app.get("/search/load-more", async (req, res) => {
         totalAvailable: cachedResults.length,
         returned: paginatedResults.length,
         offset: startIndex,
-        nextToken: nextToken,
-        categoryFiltered: isCategoryFiltered // Flag indicating these are category-filtered results (Tier 2)
+        nextToken: nextToken
       },
       metadata: {
         query: query,
-        requestId: requestId,
-        cached: !isCategoryFiltered, // Category-filtered results are fresh, not cached
-        ...(isCategoryFiltered && extractedCategories && {
-          extractedCategories: extractedCategories
-        })
+        requestId: requestId
       }
     });
     
@@ -4968,17 +5019,33 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       explanation: null
     }));
 
+    const hasMore = highQualityTextMatches.length > searchLimit;
+    const hasCategoryFiltering = (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0);
+    
+    // If we have more text matches but no category filtering, provide a nextToken
+    // This allows paginating simple text results that don't trigger Phase 2
+    let nextToken = null;
+    if (hasMore && !hasCategoryFiltering) {
+      nextToken = Buffer.from(JSON.stringify({
+        query,
+        filters: extractedFilters,
+        offset: searchLimit,
+        timestamp: Date.now(),
+        type: 'text-matches-only'
+      })).toString('base64');
+    }
+
     res.json({
       products: response,
       pagination: {
         totalAvailable: response.length,
         returned: response.length,
         batchNumber: 1,
-        hasMore: false,
-        nextToken: null,
+        hasMore: hasMore && !hasCategoryFiltering, // Only mark as hasMore if no Phase 2 is coming
+        nextToken: nextToken,
         autoLoadMore: false,
         secondBatchToken: null,
-        hasCategoryFiltering: (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0),
+        hasCategoryFiltering: hasCategoryFiltering,
         categoryFilterToken: null
       },
       metadata: {
@@ -5131,14 +5198,24 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 
     console.log(`[${requestId}] Phase 2: Returning ${response.length} category-filtered results`);
 
+    const hasMore = (categoryFilteredResults || []).length > searchLimit;
+    const nextToken = hasMore ? Buffer.from(JSON.stringify({
+      query,
+      filters: categoryFilteredHardFilters,
+      offset: searchLimit,
+      timestamp: Date.now(),
+      type: 'category-filtered',
+      extractedCategories: extractedCategories
+    })).toString('base64') : null;
+
     res.json({
       products: response,
       pagination: {
         totalAvailable: response.length,
         returned: response.length,
         batchNumber: 2,
-        hasMore: false,
-        nextToken: null,
+        hasMore: hasMore,
+        nextToken: nextToken,
         autoLoadMore: false,
         secondBatchToken: null,
         hasCategoryFiltering: false,
