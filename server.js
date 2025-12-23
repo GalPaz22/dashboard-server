@@ -1067,59 +1067,39 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
       }
     }
 
-    // Soft category filter - OPTIMIZED: moved into $search filter clause
-    if (softFilters && softFilters.softCategory) {
+    // IMPORTANT: Soft categories should NOT be used as filters here
+    // They are handled separately by executeExplicitSoftCategorySearch
+    // which runs TWO searches (with and without soft categories) and merges them
+    // This ensures products without the soft category are still included (just ranked lower)
+    
+    // Note: invertSoftFilter logic is kept for the NON-soft-category search
+    if (softFilters && softFilters.softCategory && invertSoftFilter) {
       const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-
-      if (invertSoftFilter) {
-        // For non-soft-category filtering: exclude documents with these soft categories
-        filterClauses.push({
-          compound: {
-            should: [
-              {
-                compound: {
-                  mustNot: [
-                    { exists: { path: "softCategory" } }
-                  ]
-                }
-              },
-              {
-                compound: {
-                  mustNot: softCats.map(sc => ({
-                    text: {
-                      query: sc,
-                      path: "softCategory"
-                    }
-                  }))
-                }
+      // For non-soft-category filtering: exclude documents with these soft categories
+      filterClauses.push({
+        compound: {
+          should: [
+            {
+              compound: {
+                mustNot: [
+                  { exists: { path: "softCategory" } }
+                ]
               }
-            ],
-            minimumShouldMatch: 1
-          }
-        });
-      } else {
-        // For soft-category filtering: include only documents with these soft categories
-        if (softCats.length === 1) {
-          filterClauses.push({
-            text: {
-              query: softCats[0],
-              path: "softCategory"
+            },
+            {
+              compound: {
+                mustNot: softCats.map(sc => ({
+                  text: {
+                    query: sc,
+                    path: "softCategory"
+                  }
+                }))
+              }
             }
-          });
-        } else {
-          filterClauses.push({
-            compound: {
-              should: softCats.map(sc => ({
-                text: {
-                  query: sc,
-                  path: "softCategory"
-                }
-              })),
-              minimumShouldMatch: 1
-            }
-          });
+          ],
+          minimumShouldMatch: 1
         }
-      }
+      });
     }
 
     console.log(`[TEXT SEARCH] Building compound search with ${filterClauses.length} filter clauses and text queries for: name, description, category, softCategory`);
@@ -1350,18 +1330,13 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     conditions.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
   }
 
-  // Soft category filter - OPTIMIZED: moved into $vectorSearch filter
-  if (softFilters && softFilters.softCategory) {
-    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-
-    if (invertSoftFilter) {
-      // For non-soft-category filtering: this is complex, skip for now to avoid Atlas Search issues
-      // Just don't add soft category filter when inverting
-    } else {
-      // For soft-category filtering: include only documents with these soft categories
-      conditions.push({ softCategory: { $in: softCats } });
-    }
-  }
+  // IMPORTANT: Soft categories should NOT be used as filters here
+  // They are handled separately by executeExplicitSoftCategorySearch
+  // which runs TWO searches (with and without soft categories) and merges them
+  // This ensures products without the soft category are still included (just ranked lower)
+  
+  // Note: We don't add soft category filters at all - not even for invertSoftFilter
+  // The separate WITH/WITHOUT searches handle the filtering logic
 
   // Build final filter - use $and only if multiple conditions
   let filter;
@@ -3726,7 +3701,13 @@ async function executeExplicitSoftCategorySearch(
       }
       // Check type filter
       if (hardFilters.type && hardFilters.type.length > 0) {
-        if (!product.type || !hardFilters.type.includes(product.type)) {
+        if (!product.type) {
+          return false; // Product has no type - exclude it
+        }
+        // Handle both string and array types (same logic as category)
+        const productTypes = Array.isArray(product.type) ? product.type : [product.type];
+        const hasMatch = productTypes.some(type => hardFilters.type.includes(type));
+        if (!hasMatch) {
           return false; // Product doesn't match hard type - exclude it
         }
       }
@@ -4272,6 +4253,99 @@ app.get("/search/load-more", async (req, res) => {
             [],
             req.store.softCategoriesBoost
           );
+
+          // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
+          // If tier 1 found high-quality textual matches, use their embeddings to find similar products
+          if (extractedCategories.topProductEmbeddings && extractedCategories.topProductEmbeddings.length > 0) {
+            console.log(`[${requestId}] 🧬 TIER-2 ENHANCEMENT: Finding products similar to ${extractedCategories.topProductEmbeddings.length} tier-1 textual matches`);
+            
+            // For each seed product, run ANN search using its embedding
+            const similaritySearches = extractedCategories.topProductEmbeddings.map(async (productEmbed) => {
+              // Build filter for ANN search
+              const annFilter = {
+                $and: [
+                  { stockStatus: "instock" },
+                  // Exclude the seed product itself
+                  { _id: { $ne: productEmbed._id } }
+                ]
+              };
+              
+              // Apply hard category filter if present
+              if (categoryFilteredHardFilters.category) {
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
+                  ? categoryFilteredHardFilters.category 
+                  : [categoryFilteredHardFilters.category];
+                annFilter.$and.push({ category: { $in: categoryArray } });
+              }
+              
+              const pipeline = [
+                {
+                  $vectorSearch: {
+                    index: "vector_index",
+                    path: "embedding",
+                    queryVector: productEmbed.embedding,
+                    numCandidates: Math.max(vectorLimit * 2, 100),
+                    exact: false,
+                    limit: 20, // Top 20 similar per seed
+                    filter: annFilter
+                  }
+                },
+                {
+                  $addFields: {
+                    seedProductId: productEmbed._id,
+                    seedProductName: productEmbed.name,
+                    similaritySource: "product_embedding"
+                  }
+                }
+              ];
+              
+              return collection.aggregate(pipeline).toArray();
+            });
+
+            const allSimilarityResults = await Promise.all(similaritySearches);
+            const flattenedSimilarityResults = allSimilarityResults.flat();
+            
+            console.log(`[${requestId}] 🧬 Found ${flattenedSimilarityResults.length} products via embedding similarity`);
+
+            // Merge similarity results with soft category results
+            const resultMap = new Map();
+            
+            // First pass: Add all soft category results
+            categoryFilteredResults.forEach(product => {
+              resultMap.set(product._id.toString(), {
+                ...product,
+                sources: ['soft_category'],
+                similarityBoost: 0
+              });
+            });
+
+            // Second pass: Add or merge similarity results
+            flattenedSimilarityResults.forEach(product => {
+              const id = product._id.toString();
+              if (resultMap.has(id)) {
+                // Product found via BOTH methods - highest confidence
+                const existing = resultMap.get(id);
+                existing.sources.push('product_similarity');
+                existing.similarityBoost = 5000; // Dual-source boost
+                existing.seedProductName = product.seedProductName;
+              } else {
+                // New product from similarity only
+                resultMap.set(id, {
+                  ...product,
+                  sources: ['product_similarity'],
+                  similarityBoost: 2500, // Similarity-only boost
+                  softFilterMatch: false,
+                  softCategoryMatches: 0
+                });
+              }
+            });
+
+            // Convert back to array
+            categoryFilteredResults = Array.from(resultMap.values());
+            
+            const dualSourceCount = categoryFilteredResults.filter(p => p.sources && p.sources.length > 1).length;
+            console.log(`[${requestId}] 🧬 TIER-2 MERGED: ${categoryFilteredResults.length} total (${dualSourceCount} via both methods)`);
+          }
 
           // Debug: Check categories of results
           const categoryCounts = {};
@@ -5602,7 +5676,6 @@ app.post("/search", async (req, res) => {
         });
       }
     }
-    }
 
     // TWO-STEP SEARCH FOR SIMPLE QUERIES
     // Step 1: Pure text search to find strong matches
@@ -5890,7 +5963,7 @@ app.post("/search", async (req, res) => {
                 match.highTextMatch = true;
               });
             }
-            } // Close else block for early exit optimization
+            }
           } else {
             console.log(`[${requestId}] No high-quality text matches found (bonus < 1000), falling back to text search results`);
             // Fall back to all text search results (even with lower bonuses)
@@ -5946,7 +6019,7 @@ app.post("/search", async (req, res) => {
         
         console.log(`[${requestId}] Skipping LLM reordering (${skipReason})`);
         
-      reorderedData = combinedResults.map((result) => ({ _id: result._id.toString(), explanation: null }));
+        reorderedData = combinedResults.map((result) => ({ _id: result._id.toString(), explanation: null }));
         llmReorderingSuccessful = false;
       }
     }
@@ -6300,6 +6373,45 @@ app.post("/search", async (req, res) => {
       }
 
       const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
+      
+      // 🆕 TIER 2 ENHANCEMENT: Extract product embeddings from high-quality textual matches
+      // Find products with very high exactMatchBonus (exact/near-exact product name matches)
+      const highQualityTextMatches = combinedResults
+        .filter(p => (p.exactMatchBonus || 0) >= 50000) // Exact/near-exact matches only
+        .slice(0, 3); // Top 3 textual matches
+      
+      if (highQualityTextMatches.length > 0) {
+        console.log(`[${requestId}] 🧬 Found ${highQualityTextMatches.length} high-quality textual matches (bonus >= 50k)`);
+        console.log(`[${requestId}] 🧬 Products:`, highQualityTextMatches.map(p => ({ 
+          name: p.name, 
+          bonus: p.exactMatchBonus 
+        })));
+        
+        // Fetch full product documents with embeddings from database
+        try {
+          const productIds = highQualityTextMatches.map(p => p._id);
+          const productsWithEmbeddings = await collection.find({
+            _id: { $in: productIds },
+            embedding: { $exists: true, $ne: null }
+          }).toArray();
+          
+          if (productsWithEmbeddings.length > 0) {
+            // Store embeddings in tier-2 token for similarity search
+            extractedFromLLM.topProductEmbeddings = productsWithEmbeddings.map(p => ({
+              _id: p._id,
+              name: p.name,
+              embedding: p.embedding
+            }));
+            console.log(`[${requestId}] 🧬 Extracted ${productsWithEmbeddings.length} embeddings for tier-2 similarity`);
+          } else {
+            console.log(`[${requestId}] 🧬 Warning: No embeddings found for textual matches`);
+          }
+        } catch (embedError) {
+          console.error(`[${requestId}] 🧬 Error fetching embeddings:`, embedError.message);
+        }
+      } else {
+        console.log(`[${requestId}] ℹ️ No high-quality textual matches (bonus >= 50k) - tier-2 will use soft categories only`);
+      }
 
       // Keep hard categories from tier1 (top 4 LLM products) for tier2 search
       console.log(`[${requestId}] ℹ️ Complex query: Keeping hard categories from tier1 LLM products for tier2 search`);
