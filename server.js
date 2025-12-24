@@ -3132,7 +3132,7 @@ ${JSON.stringify(productData, null, 2)}`;
         systemInstruction, 
         temperature: 0.1,
         thinkingConfig: {
-          thinkingBudget: 0,
+          thinkingLevel: ThinkingLevel.LOW,
         },
         responseMimeType: "application/json",
         responseSchema: responseSchema,
