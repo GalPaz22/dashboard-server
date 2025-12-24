@@ -3372,11 +3372,14 @@ Focus on visual elements that match the search intent, prioritizing products tha
            };
 
        const response = await genAI.models.generateContent({
-         model: "gemini-3-flash-preview",
+         model: "gemini-2.5-flash-lite",
          contents: contents,
+
          config: { 
            temperature: 0.1,
-       
+           thinkingConfig: {
+            thinkingBudget: 0,
+          },
            responseMimeType: "application/json",
            responseSchema: responseSchema,
          },
