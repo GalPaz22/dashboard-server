@@ -2498,14 +2498,31 @@ Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCa
       const typesList = normalizeList(types);
       const softCategoriesList = normalizeList(softCategories);
 
-      // Simple validation
+      // Simple validation with fuzzy matching for Hebrew spelling variations
       const validate = (val, list) => {
         if (!val) return undefined;
         const vals = Array.isArray(val) ? val : [val];
-        const valid = vals.filter(v => list.some(l => l.toLowerCase() === String(v).toLowerCase()));
+        
+        const valid = vals.map(v => {
+          const vLower = String(v).toLowerCase().trim();
+          
+          // First try exact match
+          let match = list.find(l => l.toLowerCase().trim() === vLower);
+          if (match) return match;
+          
+          // For Hebrew text, try fuzzy match (allowing missing י ו characters which are often optional)
+          // This handles cases like "פרמיטיבו" vs "פרימיטיבו"
+          const vNormalized = vLower.replace(/[יו]/g, '');
+          match = list.find(l => {
+            const lNormalized = l.toLowerCase().trim().replace(/[יו]/g, '');
+            return lNormalized === vNormalized;
+          });
+          
+          return match;
+        }).filter(Boolean);
+        
         if (valid.length === 0) return undefined;
-        return valid.length === 1 ? list.find(l => l.toLowerCase() === String(valid[0]).toLowerCase()) : 
-                                   valid.map(v => list.find(l => l.toLowerCase() === String(v).toLowerCase()));
+        return valid.length === 1 ? valid[0] : valid;
       };
 
       filters.category = validate(filters.category, categoriesList);
