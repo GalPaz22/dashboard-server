@@ -2240,6 +2240,9 @@ ${example}.`;
       model: "gemini-3-flash-preview",
       contents: [{ text: query }],
       config: {
+          thinkingConfig: {
+        thinkingLevel: ThinkingLevel.LOW,
+      },
         systemInstruction,
         temperature: 0.1,
         responseMimeType: "application/json",
@@ -4429,9 +4432,8 @@ app.get("/search/load-more", async (req, res) => {
               // Build filter for ANN search
               const annFilter = {
                 $and: [
-                  { stockStatus: "instock" },
-                  // Exclude the seed product itself
-                  { _id: { $ne: productEmbed._id } }
+                  { stockStatus: "instock" }
+                  // Exclude the seed product itself - handled after results to avoid index requirements
                 ]
               };
               
@@ -4464,7 +4466,9 @@ app.get("/search/load-more", async (req, res) => {
                 }
               ];
               
-              return collection.aggregate(pipeline).toArray();
+              const results = await collection.aggregate(pipeline).toArray();
+              // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
+              return results.filter(r => r._id.toString() !== productEmbed._id.toString());
             });
 
             const allSimilarityResults = await Promise.all(similaritySearches);
@@ -4668,9 +4672,8 @@ app.get("/search/load-more", async (req, res) => {
               // Build filter for ANN search
               const annFilter = {
                 $and: [
-                  { stockStatus: "instock" },
-                  // Exclude the seed product itself
-                  { _id: { $ne: productEmbed._id } }
+                  { stockStatus: "instock" }
+                  // Exclude the seed product itself - handled after results to avoid index requirements
                 ]
               };
               
@@ -4703,7 +4706,9 @@ app.get("/search/load-more", async (req, res) => {
                 }
               ];
               
-              return collection.aggregate(pipeline).toArray();
+              const results = await collection.aggregate(pipeline).toArray();
+              // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
+              return results.filter(r => r._id.toString() !== productEmbed._id.toString());
             });
 
             const allSimilarityResults = await Promise.all(similaritySearches);
@@ -6174,8 +6179,8 @@ app.post("/search", async (req, res) => {
                     const similaritySearches = topProductEmbeddings.map(async (productEmbed) => {
                       const annFilter = {
                         $and: [
-                          { stockStatus: { $ne: "outofstock" } },
-                          { _id: { $ne: productEmbed._id } }
+                          { stockStatus: { $ne: "outofstock" } }
+                          // Exclude the seed product itself - handled after results to avoid index requirements
                         ]
                       };
                       
@@ -6201,7 +6206,10 @@ app.post("/search", async (req, res) => {
                           }
                         }
                       ];
-                      return collection.aggregate(pipeline).toArray();
+                      
+                      const results = await collection.aggregate(pipeline).toArray();
+                      // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
+                      return results.filter(r => r._id.toString() !== productEmbed._id.toString());
                     });
 
                     const allSimilarityResults = await Promise.all(similaritySearches);
