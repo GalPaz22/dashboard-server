@@ -4,7 +4,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type, ThinkingLevel} from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from 'redis';
 import crypto from 'crypto';
 
@@ -1574,9 +1574,6 @@ Analyze the query and return your classification.`;
                 enum: ["simple", "complex"],
                 description: "Whether the query is a simple product name or complex descriptive search"
               },
-              thinkingConfig: {
-                thinkingLevel: thinkingBudget = 0,
-              },
              
             },
             required: ["classification"]
@@ -2240,9 +2237,6 @@ ${example}.`;
       model: "gemini-3-flash-preview",
       contents: [{ text: query }],
       config: {
-          thinkingConfig: {
-        thinkingLevel: ThinkingLevel.LOW,
-      },
         systemInstruction,
         temperature: 0.1,
         responseMimeType: "application/json",
@@ -3131,9 +3125,7 @@ ${JSON.stringify(productData, null, 2)}`;
       config: { 
         systemInstruction, 
         temperature: 0.1,
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.LOW,
-        },
+     
         responseMimeType: "application/json",
         responseSchema: responseSchema,
       },
@@ -3380,9 +3372,7 @@ Focus on visual elements that match the search intent, prioritizing products tha
          contents: contents,
          config: { 
            temperature: 0.1,
-           thinkingConfig: {
-             thinkingBudget: 0,
-           },
+       
            responseMimeType: "application/json",
            responseSchema: responseSchema,
          },
