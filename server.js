@@ -4,7 +4,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { createClient } from 'redis';
 import crypto from 'crypto';
 
@@ -1574,7 +1574,9 @@ Analyze the query and return your classification.`;
                 enum: ["simple", "complex"],
                 description: "Whether the query is a simple product name or complex descriptive search"
               },
-           
+              thinkingConfig: {
+                thinkingLevel: thinkingBudget = 0,
+              },
              
             },
             required: ["classification"]
@@ -2239,7 +2241,7 @@ ${example}.`;
       contents: [{ text: query }],
       config: {
           thinkingConfig: {
-        thinkingBudget: 0,
+        thinkingLevel: ThinkingLevel.LOW,
       },
         systemInstruction,
         temperature: 0.1,
@@ -3130,7 +3132,7 @@ ${JSON.stringify(productData, null, 2)}`;
         systemInstruction, 
         temperature: 0.1,
         thinkingConfig: {
-          thinkingBudget: 0,
+          thinkingLevel: ThinkingLevel.LOW,
         },
         responseMimeType: "application/json",
         responseSchema: responseSchema,
