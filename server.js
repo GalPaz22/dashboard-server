@@ -2430,12 +2430,16 @@ EXTRACT FROM THESE LISTS ONLY:
 - type: ${types}
 - softCategory: ${softCategories}
 
-RULES:
-1. USE YOUR DOMAIN KNOWLEDGE: If a brand or specific item is mentioned, extract its characteristics (e.g. "Arini" -> region: "Sicily", type: "Red wine" if they exist in lists).
-2. ONLY extract values that exist in the provided lists.
-3. Return JSON only.
+CRITICAL RULES:
+1. If the query is a BRAND NAME or PRODUCT NAME (like "פלטר", "Arini", "מטר"), DO NOT extract it as a category or softCategory.
+2. For brand/product queries, you MAY extract general category (like "יין") but NEVER add the brand name itself to softCategory.
+3. USE YOUR DOMAIN KNOWLEDGE: If a brand is mentioned, extract its characteristics ONLY if they exist in the lists (e.g. "Arini" -> region: "Sicily" if Sicily is in softCategory list).
+4. ONLY extract values that exist in the provided lists.
+5. Return JSON only. Return empty {} if nothing to extract.
 
-Example: {"category": "יין אדום", "softCategory": ["איטליה", "סיציליה"]}`;
+Example for brand query: 
+Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
+Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCategory": ["איטליה"]}`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-3-flash-preview",
