@@ -1574,6 +1574,9 @@ Analyze the query and return your classification.`;
                 enum: ["simple", "complex"],
                 description: "Whether the query is a simple product name or complex descriptive search"
               },
+              thinkingConfig: {
+                thinkingLevel: thinkingBudget = 0,
+              },
              
             },
             required: ["classification"]
@@ -2406,6 +2409,99 @@ ${example}.`;
     console.log(`[AI FALLBACK] Using rule-based filter extraction for: "${query}"`);
     return extractFiltersFallback(query);
   }
+  }, 604800);
+}
+
+/**
+ * Brief version of filter extraction for simple queries
+ * Focuses on quick extraction of category, type, and softCategory
+ */
+async function extractFiltersBrief(query, categories, types, softCategories, context) {
+  const cacheKey = generateCacheKey('filters-brief', query, categories, types, softCategories, context);
+  
+  return withCache(cacheKey, async () => {
+    try {
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        return extractFiltersFallback(query, categories);
+      }
+      
+      const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}. 
+Extract relevant filters from the query.
+
+EXTRACT FROM THESE LISTS ONLY:
+- category: ${categories}
+- type: ${types}
+- softCategory: ${softCategories}
+
+RULES:
+1. USE YOUR DOMAIN KNOWLEDGE: If a brand or specific item is mentioned, extract its characteristics (e.g. "Arini" -> region: "Sicily", type: "Red wine" if they exist in lists).
+2. ONLY extract values that exist in the provided lists.
+3. Return JSON only.
+
+Example: {"category": "יין אדום", "softCategory": ["איטליה", "סיציליה"]}`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-3-flash-preview",
+        contents: [{ text: query }],
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              category: { type: Type.STRING },
+              type: { type: Type.STRING },
+              softCategory: { 
+                oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }]
+              },
+              price: { type: Type.NUMBER },
+              minPrice: { type: Type.NUMBER },
+              maxPrice: { type: Type.NUMBER }
+            }
+          }
+        }
+      });
+
+      let content = response.text ? response.text.trim() : null;
+      if (!content && response.candidates && response.candidates[0]) {
+        content = response.candidates[0].content.parts[0].text;
+      }
+      
+      if (!content) return {};
+      content = content.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+      const filters = JSON.parse(content);
+
+      // Helper to normalize string or array lists into a clean array
+      const normalizeList = (list) => {
+        if (!list) return [];
+        const arr = Array.isArray(list) ? list : String(list).split(',');
+        return arr.map(item => String(item).trim());
+      };
+
+      const categoriesList = normalizeList(categories);
+      const typesList = normalizeList(types);
+      const softCategoriesList = normalizeList(softCategories);
+
+      // Simple validation
+      const validate = (val, list) => {
+        if (!val) return undefined;
+        const vals = Array.isArray(val) ? val : [val];
+        const valid = vals.filter(v => list.some(l => l.toLowerCase() === String(v).toLowerCase()));
+        if (valid.length === 0) return undefined;
+        return valid.length === 1 ? list.find(l => l.toLowerCase() === String(valid[0]).toLowerCase()) : 
+                                   valid.map(v => list.find(l => l.toLowerCase() === String(v).toLowerCase()));
+      };
+
+      filters.category = validate(filters.category, categoriesList);
+      filters.type = validate(filters.type, typesList);
+      filters.softCategory = validate(filters.softCategory, softCategoriesList);
+
+      return filters;
+    } catch (error) {
+      console.warn("Brief filter extraction failed:", error.message);
+      return {};
+    }
   }, 604800);
 }
 
@@ -4227,7 +4323,7 @@ app.get("/search/load-more", async (req, res) => {
         const db = client.db(dbName);
         const collection = db.collection("products");
         
-        const translatedQuery = await translateQuery(query, context);
+        const translatedQuery = query; // Skipping translation for simple query phases
         const cleanedText = removeWineFromQuery(translatedQuery, []);
         
         // Use a larger limit for pagination
@@ -4835,7 +4931,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    const translatedQuery = await translateQuery(query, context);
+    const translatedQuery = query; // Skipping translation for simple query phases
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
 
     // Extract category filters from query if enableSimpleCategoryExtraction is ON
@@ -5080,7 +5176,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    const translatedQuery = await translateQuery(query, context);
+    const translatedQuery = query; // Skipping translation for simple query phases
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
 
     const hardCategoriesArray = extractedCategories.hardCategories || [];
@@ -5471,10 +5567,14 @@ app.post("/search", async (req, res) => {
     }
 
     let combinedResults = []; // Initialize combinedResults here
-    let translatedQuery = await translateQuery(query, context);
-
-    if (!translatedQuery) {
-      return res.status(500).json({ error: "Error translating query" });
+    let translatedQuery = query;
+    if (isComplexQueryResult) {
+      translatedQuery = await translateQuery(query, context);
+      if (!translatedQuery) {
+        return res.status(500).json({ error: "Error translating query" });
+      }
+    } else {
+      console.log(`[${requestId}] ⚡ SKIPPING translation for SIMPLE query`);
     }
 
     // Check for matches across all searchable fields
@@ -5495,13 +5595,15 @@ app.post("/search", async (req, res) => {
     const queryForExtraction = translatedQuery || query;
     let enhancedFilters = {};
     
-    if (categories && isComplexQueryResult) {
-      // Only extract filters for complex queries
-      enhancedFilters = await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context);
-    } else if (isSimpleResult) {
-      // For simple queries, explicitly set empty filters to prevent cache pollution
-      console.log(`[${requestId}] ⚡ SIMPLE QUERY: Skipping filter extraction (no filters applied)`);
-      enhancedFilters = {};
+    if (categories) {
+      if (isComplexQueryResult) {
+        // Full extraction for complex queries
+        enhancedFilters = await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context);
+      } else if (isSimpleResult) {
+        // Brief extraction for simple queries (as requested by user)
+        console.log(`[${requestId}] ⚡ SIMPLE QUERY: Performing brief filter extraction`);
+        enhancedFilters = await extractFiltersBrief(queryForExtraction, categories, types, finalSoftCategories, context);
+      }
     }
 
     // Store original extracted values before clearing (for debugging/logging)
@@ -5718,7 +5820,7 @@ app.post("/search", async (req, res) => {
     cleanFilters(hardFilters);
     cleanFilters(softFilters);
 
-    const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
+    let hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
     const hasHardFilters = Object.keys(hardFilters).length > 0;
     const useOrLogic = shouldUseOrLogicForCategories(query, hardFilters.category);
 
@@ -6227,6 +6329,11 @@ app.post("/search", async (req, res) => {
 
                 // Replace combinedResults with category-filtered results
                 combinedResults = finalResults;
+
+                // Update hasSoftFilters for sorting logic later
+                if (combinedSoftCategories.length > 0) {
+                  hasSoftFilters = true;
+                }
 
                 // Store metadata for response - use combined soft categories to reflect what was actually used
                 extractedCategoriesMetadata = {
