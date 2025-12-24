@@ -771,9 +771,14 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     }
   }
 
-  // NOTE: Soft filters are NOT added as hard conditions here
-  // Soft categories should boost results, not exclude non-matching products
-  // The scoring is handled in executeOptimizedFilterOnlySearch via calculateSoftCategoryMatches
+  // Add soft category filters as conditions for filter-only queries
+  // For filter-only paths (like "ריוחה"), the user explicitly wants products matching those soft categories
+  if (softFilters && softFilters.softCategory && Array.isArray(softFilters.softCategory) && softFilters.softCategory.length > 0) {
+    matchConditions.push({
+      softCategory: { $in: softFilters.softCategory }
+    });
+    console.log(`[FILTER-ONLY] Adding soft category filter: ${JSON.stringify(softFilters.softCategory)}`);
+  }
 
   // Single compound match stage for optimal performance
   pipeline.push({
@@ -1560,11 +1565,14 @@ COMPLEX queries are:
 Analyze the query and return your classification.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.5-flash",
         contents: [{ text: query }],
         config: {
           systemInstruction,
           temperature: 0.1,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -2234,11 +2242,14 @@ Return the extracted filters in JSON format. Only extract values that exist in t
 ${example}.`;
 
     const response = await genAI.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.5-flash",
       contents: [{ text: query }],
       config: {
         systemInstruction,
         temperature: 0.1,
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
         responseMimeType: "application/json",
         responseSchema: {
           type: Type.OBJECT,
@@ -2442,11 +2453,14 @@ Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
 Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCategory": ["איטליה"]}`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.5-flash",
         contents: [{ text: query }],
         config: {
           systemInstruction,
           temperature: 0.1,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -3124,12 +3138,14 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     const response = await genAI.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: "gemini-2.5-flash",
       contents: userContent,
       config: { 
         systemInstruction, 
         temperature: 0.1,
-     
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
         responseMimeType: "application/json",
         responseSchema: responseSchema,
       },
@@ -3372,7 +3388,7 @@ Focus on visual elements that match the search intent, prioritizing products tha
            };
 
        const response = await genAI.models.generateContent({
-         model: "gemini-2.5-flash-lite",
+         model: "gemini-2.5-flash",
          contents: contents,
 
          config: { 
