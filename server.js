@@ -6179,7 +6179,7 @@ app.post("/search", async (req, res) => {
                     const similaritySearches = topProductEmbeddings.map(async (productEmbed) => {
                       const annFilter = {
                         $and: [
-                          { stockStatus: { $ne: "outofstock" } }
+                          { stockStatus: "instock" }  // Changed from $ne to positive filter to avoid index requirements
                           // Exclude the seed product itself - handled after results to avoid index requirements
                         ]
                       };
