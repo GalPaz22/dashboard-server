@@ -433,7 +433,18 @@ function getMongoClient() {
   if (!cachedClient) {
     cachedClient = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
-      useUnifiedTopology: true
+      useUnifiedTopology: true,
+      // Connection pool optimization for better performance
+      maxPoolSize: 50, // Increased from default 100 for better resource utilization
+      minPoolSize: 10, // Keep minimum connections alive for faster queries
+      maxIdleTimeMS: 30000, // Close idle connections after 30 seconds
+      // Performance optimizations
+      connectTimeoutMS: 10000, // 10 second connection timeout
+      serverSelectionTimeoutMS: 5000, // 5 second server selection timeout
+      // Compression for faster data transfer over network
+      compressors: ['snappy', 'zlib'],
+      // Read preference for better performance on replica sets
+      readPreference: 'primaryPreferred'
     });
     cachedPromise = cachedClient.connect();
   }
