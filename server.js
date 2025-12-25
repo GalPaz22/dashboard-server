@@ -433,7 +433,18 @@ function getMongoClient() {
   if (!cachedClient) {
     cachedClient = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
-      useUnifiedTopology: true
+      useUnifiedTopology: true,
+      // Connection pool optimization for better performance
+      maxPoolSize: 50, // Increased from default 100 for better resource utilization
+      minPoolSize: 10, // Keep minimum connections alive for faster queries
+      maxIdleTimeMS: 30000, // Close idle connections after 30 seconds
+      // Performance optimizations
+      connectTimeoutMS: 10000, // 10 second connection timeout
+      serverSelectionTimeoutMS: 5000, // 5 second server selection timeout
+      // Compression for faster data transfer over network
+      compressors: ['snappy', 'zlib'],
+      // Read preference for better performance on replica sets
+      readPreference: 'primaryPreferred'
     });
     cachedPromise = cachedClient.connect();
   }
@@ -3569,15 +3580,7 @@ async function executeExplicitSoftCategorySearch(
     highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
-    // STRICT TEXT MATCHING: If we have excellent exact matches (90000+), ONLY return those
-    // This prevents fuzzy matches like "אוריה" when user searched for "אורטה"
-    const excellentMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= 90000);
-    if (excellentMatches.length > 0) {
-      console.log(`[SOFT SEARCH] Found ${excellentMatches.length} EXCELLENT text matches (90000+) - excluding fuzzy matches`);
-      highQualityTextMatches = excellentMatches;
-    } else {
-      console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include`);
-    }
+    console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include`);
   } catch (error) {
     console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
   }
@@ -5020,19 +5023,12 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       softCategoryMatches: 0
     }));
 
-          let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
     // Sort by text match strength
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
-    // STRICT TEXT MATCHING: If we have excellent exact matches (90000+), ONLY return those
-    const excellentMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= 90000);
-    if (excellentMatches.length > 0) {
-      console.log(`[${requestId}] Phase 1: Found ${excellentMatches.length} EXCELLENT text matches (90000+) - excluding fuzzy matches`);
-      highQualityTextMatches = excellentMatches;
-    } else {
-      console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches`);
-    }
+    console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches`);
 
     if (highQualityTextMatches.length === 0) {
       console.log(`[${requestId}] Phase 1: No text matches found - falling back to vector search`);
@@ -6064,14 +6060,9 @@ app.post("/search", async (req, res) => {
           }));
 
           // Filter for high-quality text matches (lower threshold for better extraction)
-          let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
-          // STRICT TEXT MATCHING: If we have excellent exact matches (90000+), ONLY return those
-          const excellentMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= 90000);
-          if (excellentMatches.length > 0) {
-            console.log(`[${requestId}] Found ${excellentMatches.length} EXCELLENT text matches (90000+) - excluding fuzzy matches`);
-            highQualityTextMatches = excellentMatches;
-          } else if (highQualityTextMatches.length > 0) {
+          if (highQualityTextMatches.length > 0) {
             console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches`);
             
             // Log tier 1 text match results with their categories
@@ -6470,29 +6461,6 @@ app.post("/search", async (req, res) => {
     // Log search results summary
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
-    
-    // STRICT TEXT MATCHING: If we have excellent text matches (90000+), exclude fuzzy text matches
-    // BUT keep soft category and similarity results (products without text matches)
-    if (isSimpleResult) {
-      const excellentTextMatches = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 90000);
-      if (excellentTextMatches.length > 0) {
-        console.log(`[${requestId}] 🎯 STRICT MODE: Found ${excellentTextMatches.length} excellent text matches (90000+)`);
-        console.log(`[${requestId}] 🎯 Filtering out fuzzy text matches, but keeping soft category/similarity results`);
-        
-        // Keep: excellent text matches + products without text matches (soft category/similarity only)
-        // Filter out: products with fuzzy text matches (1000-89999) - these are noise
-        combinedResults = combinedResults.filter(r => {
-          const textBonus = r.exactMatchBonus || 0;
-          // Keep if: excellent text match (>= 90000) OR no text match at all (< 1000, meaning soft category/similarity only)
-          // Exclude: fuzzy text matches (1000-89999)
-          return textBonus >= 90000 || textBonus < 1000;
-        });
-        
-        const softCategoryOnly = combinedResults.filter(r => (r.exactMatchBonus || 0) < 1000).length;
-        console.log(`[${requestId}] 🎯 After strict filtering: ${combinedResults.length} results (${excellentTextMatches.length} excellent text + ${softCategoryOnly} soft category/similarity)`);
-      }
-    }
-    
     // TEXT MATCH PRIORITY SORTING: Text matches prioritized for simple queries
     // Complex queries use regular RRF scoring
     if (hasSoftFilters || isSimpleResult) {
