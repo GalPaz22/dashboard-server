@@ -451,7 +451,7 @@ app.post("/queries", async (req, res) => {
     const db = client.db(dbName);
     const queriesCollection = db.collection("queries");
 
-    const queries = await queriesCollection.find({}).limit(100).toArray();
+    const queries = await queriesCollection.find({}).toArray();
 
     return res.status(200).json({ queries });
   } catch (error) {
