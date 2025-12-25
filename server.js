@@ -433,7 +433,18 @@ function getMongoClient() {
   if (!cachedClient) {
     cachedClient = new MongoClient(mongodbUri, {
       useNewUrlParser: true,
-      useUnifiedTopology: true
+      useUnifiedTopology: true,
+      // Connection pool optimization for better performance
+      maxPoolSize: 50, // Increased from default 100 for better resource utilization
+      minPoolSize: 10, // Keep minimum connections alive for faster queries
+      maxIdleTimeMS: 30000, // Close idle connections after 30 seconds
+      // Performance optimizations
+      connectTimeoutMS: 10000, // 10 second connection timeout
+      serverSelectionTimeoutMS: 5000, // 5 second server selection timeout
+      // Compression for faster data transfer over network
+      compressors: ['snappy', 'zlib'],
+      // Read preference for better performance on replica sets
+      readPreference: 'primaryPreferred'
     });
     cachedPromise = cachedClient.connect();
   }
@@ -442,7 +453,7 @@ function getMongoClient() {
 
 // POST /queries endpoint
 app.post("/queries", async (req, res) => {
-  const { dbName } = req.body;
+  const { dbName, limit = 100 } = req.body;
   if (!dbName) {
     return res.status(400).json({ error: "dbName parameter is required in the request body" });
   }
@@ -451,7 +462,13 @@ app.post("/queries", async (req, res) => {
     const db = client.db(dbName);
     const queriesCollection = db.collection("queries");
 
-    const queries = await queriesCollection.find({}).limit(100).toArray();
+    // Optimized: limit results, sort by timestamp (uses index), project only needed fields
+    const queries = await queriesCollection
+      .find({})
+      .sort({ timestamp: -1 }) // Most recent first, uses idx_timestamp index
+      .limit(parseInt(limit, 10))
+      .project({ _id: 1, query: 1, filters: 1, timestamp: 1, results: 1 }) // Only return necessary fields
+      .toArray();
 
     return res.status(200).json({ queries });
   } catch (error) {
