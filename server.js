@@ -452,20 +452,102 @@ function getMongoClient() {
   return cachedPromise;
 }
 
-// POST /queries endpoint
-app.post("/queries", async (req, res) => {
-  const { dbName } = req.body;
+// GET /queries endpoint (with pagination support via query parameters)
+app.get("/queries", async (req, res) => {
+  const { dbName, skip = 0, limit = 100 } = req.query;
   if (!dbName) {
-    return res.status(400).json({ error: "dbName parameter is required in the request body" });
+    return res.status(400).json({ error: "dbName parameter is required as a query parameter" });
   }
+  
+  // Validate skip and limit
+  const skipNum = parseInt(skip, 10);
+  const limitNum = parseInt(limit, 10);
+  
+  if (isNaN(skipNum) || skipNum < 0) {
+    return res.status(400).json({ error: "skip must be a non-negative integer" });
+  }
+  if (isNaN(limitNum) || limitNum <= 0 || limitNum > 1000) {
+    return res.status(400).json({ error: "limit must be a positive integer between 1 and 1000" });
+  }
+  
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const queriesCollection = db.collection("queries");
 
-    const queries = await queriesCollection.find({}).sort({ _id: -1 }).limit(100).toArray();
+    // Fetch one extra document to check if there are more queries
+    const queries = await queriesCollection
+      .find({})
+      .sort({ _id: -1 })
+      .skip(skipNum)
+      .limit(limitNum + 1)
+      .toArray();
 
-    return res.status(200).json({ queries });
+    // Determine if there are more queries
+    const hasMoreQueries = queries.length > limitNum;
+    
+    // If we fetched an extra document, remove it from the results
+    const resultQueries = hasMoreQueries ? queries.slice(0, limitNum) : queries;
+
+    console.log(`[QUERIES GET] Request: skip=${skipNum}, limit=${limitNum}, returned=${resultQueries.length}, hasMore=${hasMoreQueries}`);
+
+    return res.status(200).json({ 
+      queries: resultQueries,
+      hasMoreQueries: hasMoreQueries,
+      skip: skipNum,
+      limit: limitNum
+    });
+  } catch (error) {
+    console.error("Error fetching queries:", error);
+    return res.status(500).json({ error: "Internal Server Error" });
+  }
+});
+
+// POST /queries endpoint (with pagination support via request body)
+app.post("/queries", async (req, res) => {
+  const { dbName, skip = 0, limit = 100 } = req.body;
+  if (!dbName) {
+    return res.status(400).json({ error: "dbName parameter is required in the request body" });
+  }
+  
+  // Validate skip and limit
+  const skipNum = parseInt(skip, 10);
+  const limitNum = parseInt(limit, 10);
+  
+  if (isNaN(skipNum) || skipNum < 0) {
+    return res.status(400).json({ error: "skip must be a non-negative integer" });
+  }
+  if (isNaN(limitNum) || limitNum <= 0 || limitNum > 1000) {
+    return res.status(400).json({ error: "limit must be a positive integer between 1 and 1000" });
+  }
+  
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const queriesCollection = db.collection("queries");
+
+    // Fetch one extra document to check if there are more queries
+    const queries = await queriesCollection
+      .find({})
+      .sort({ _id: -1 })
+      .skip(skipNum)
+      .limit(limitNum + 1)
+      .toArray();
+
+    // Determine if there are more queries
+    const hasMoreQueries = queries.length > limitNum;
+    
+    // If we fetched an extra document, remove it from the results
+    const resultQueries = hasMoreQueries ? queries.slice(0, limitNum) : queries;
+
+    console.log(`[QUERIES POST] Request: skip=${skipNum}, limit=${limitNum}, returned=${resultQueries.length}, hasMore=${hasMoreQueries}`);
+
+    return res.status(200).json({ 
+      queries: resultQueries,
+      hasMoreQueries: hasMoreQueries,
+      skip: skipNum,
+      limit: limitNum
+    });
   } catch (error) {
     console.error("Error fetching queries:", error);
     return res.status(500).json({ error: "Internal Server Error" });
