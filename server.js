@@ -8730,6 +8730,274 @@ app.delete("/active-users/:visitor_id", async (req, res) => {
   }
 });
 /* =========================================================== *\
+   PRODUCT CLICK TRACKING
+\* =========================================================== */
+
+/**
+ * POST /product-click
+ * Track when a user clicks on a product
+ * Stores the click with session, query, and product information
+ */
+app.post("/product-click", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { dbName } = store;
+    const { product_id, product_name, search_query, session_id } = req.body;
+
+    // Validate required fields
+    if (!product_id || !session_id) {
+      return res.status(400).json({
+        error: "Missing required fields: product_id and session_id are required"
+      });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const clicksCollection = db.collection('product_clicks');
+
+    // Create the click document
+    const clickDocument = {
+      product_id: String(product_id),
+      product_name: product_name || null,
+      search_query: search_query || null,
+      session_id: session_id,
+      timestamp: new Date(),
+      user_agent: req.get('user-agent') || null,
+      ip_address: req.ip || req.connection.remoteAddress
+    };
+
+    // If product_name not provided, try to fetch it from products collection
+    if (!clickDocument.product_name) {
+      try {
+        const productsCollection = db.collection('products');
+        const product = await productsCollection.findOne({
+          $or: [
+            { ItemID: parseInt(product_id) },
+            { ItemID: product_id.toString() },
+            { id: parseInt(product_id) },
+            { id: product_id.toString() },
+            { _id: product_id }
+          ]
+        });
+
+        if (product && product.name) {
+          clickDocument.product_name = product.name;
+        }
+      } catch (productError) {
+        console.error("[PRODUCT CLICK] Error fetching product name:", productError);
+      }
+    }
+
+    // If search_query not provided but we have session, try to find the most recent query for this session
+    if (!clickDocument.search_query) {
+      try {
+        const queriesCollection = db.collection('queries');
+        const recentQuery = await queriesCollection.findOne(
+          {},
+          { sort: { timestamp: -1 } }
+        );
+
+        if (recentQuery && recentQuery.query) {
+          clickDocument.search_query = recentQuery.query;
+          clickDocument.query_source = 'inferred_from_recent';
+        }
+      } catch (queryError) {
+        console.error("[PRODUCT CLICK] Error fetching recent query:", queryError);
+      }
+    } else {
+      clickDocument.query_source = 'provided';
+    }
+
+    // Insert the click
+    const insertResult = await clicksCollection.insertOne(clickDocument);
+
+    console.log(`[PRODUCT CLICK] Tracked: session=${session_id}, product=${product_id}, query="${clickDocument.search_query || 'none'}"`);
+
+    res.status(201).json({
+      success: true,
+      message: "Product click tracked successfully",
+      click_id: insertResult.insertedId,
+      product_name: clickDocument.product_name,
+      search_query: clickDocument.search_query
+    });
+
+  } catch (error) {
+    console.error("[PRODUCT CLICK] Error tracking click:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /product-clicks/:session_id
+ * Retrieve all product clicks for a specific session
+ * Returns the saved query and all products clicked in this session
+ */
+app.get("/product-clicks/:session_id", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { session_id } = req.params;
+    const { dbName } = store;
+
+    if (!session_id) {
+      return res.status(400).json({ error: "Session ID is required" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const clicksCollection = db.collection('product_clicks');
+
+    // Get all clicks for this session, sorted by timestamp
+    const clicks = await clicksCollection
+      .find({ session_id: session_id })
+      .sort({ timestamp: 1 })
+      .toArray();
+
+    if (clicks.length === 0) {
+      return res.status(200).json({
+        session_id: session_id,
+        total_clicks: 0,
+        search_queries: [],
+        products_clicked: [],
+        clicks: []
+      });
+    }
+
+    // Extract unique search queries from this session
+    const searchQueries = [...new Set(
+      clicks
+        .filter(c => c.search_query)
+        .map(c => c.search_query)
+    )];
+
+    // Extract unique products clicked
+    const productsClicked = [];
+    const seenProducts = new Set();
+
+    for (const click of clicks) {
+      if (!seenProducts.has(click.product_id)) {
+        seenProducts.add(click.product_id);
+        productsClicked.push({
+          product_id: click.product_id,
+          product_name: click.product_name,
+          first_clicked_at: click.timestamp,
+          search_query: click.search_query
+        });
+      }
+    }
+
+    console.log(`[PRODUCT CLICKS] Retrieved ${clicks.length} clicks for session ${session_id}`);
+
+    res.status(200).json({
+      session_id: session_id,
+      total_clicks: clicks.length,
+      unique_products: productsClicked.length,
+      search_queries: searchQueries,
+      products_clicked: productsClicked,
+      clicks: clicks.map(c => ({
+        click_id: c._id,
+        product_id: c.product_id,
+        product_name: c.product_name,
+        search_query: c.search_query,
+        timestamp: c.timestamp
+      }))
+    });
+
+  } catch (error) {
+    console.error("[PRODUCT CLICKS] Error retrieving clicks:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * GET /product-clicks-by-query
+ * Retrieve all product clicks associated with a specific search query
+ */
+app.get("/product-clicks-by-query", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { query } = req.query;
+    const { dbName } = store;
+
+    if (!query) {
+      return res.status(400).json({ error: "Query parameter 'query' is required" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const clicksCollection = db.collection('product_clicks');
+
+    // Get all clicks for this query
+    const clicks = await clicksCollection
+      .find({ search_query: query })
+      .sort({ timestamp: -1 })
+      .toArray();
+
+    // Aggregate by product
+    const productStats = {};
+    for (const click of clicks) {
+      if (!productStats[click.product_id]) {
+        productStats[click.product_id] = {
+          product_id: click.product_id,
+          product_name: click.product_name,
+          click_count: 0,
+          sessions: new Set(),
+          first_click: click.timestamp,
+          last_click: click.timestamp
+        };
+      }
+      productStats[click.product_id].click_count++;
+      productStats[click.product_id].sessions.add(click.session_id);
+      if (click.timestamp < productStats[click.product_id].first_click) {
+        productStats[click.product_id].first_click = click.timestamp;
+      }
+      if (click.timestamp > productStats[click.product_id].last_click) {
+        productStats[click.product_id].last_click = click.timestamp;
+      }
+    }
+
+    // Convert to array and format
+    const products = Object.values(productStats)
+      .map(p => ({
+        ...p,
+        unique_sessions: p.sessions.size,
+        sessions: undefined // Remove the Set
+      }))
+      .sort((a, b) => b.click_count - a.click_count);
+
+    console.log(`[PRODUCT CLICKS] Retrieved ${clicks.length} clicks for query "${query}"`);
+
+    res.status(200).json({
+      search_query: query,
+      total_clicks: clicks.length,
+      unique_products: products.length,
+      products: products
+    });
+
+  } catch (error) {
+    console.error("[PRODUCT CLICKS] Error retrieving clicks by query:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/* =========================================================== *\
    SERVER STARTUP
 \* =========================================================== */
 
