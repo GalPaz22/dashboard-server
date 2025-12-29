@@ -6917,7 +6917,7 @@ app.post("/search", async (req, res) => {
     
     // Log all queries (both simple and complex)
     try {
-        await logQuery(querycollection, query, enhancedFilters, limitedResults, true);
+        await logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult);
         console.log(`[${requestId}] Query logged to database (${isComplexQueryResult ? 'complex' : 'simple'})`);
     } catch (logError) {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
