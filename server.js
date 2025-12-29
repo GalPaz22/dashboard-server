@@ -5213,7 +5213,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches`);
 
     if (highQualityTextMatches.length === 0) {
-      console.log(`[${requestId}] Phase 1: No text matches found - falling back to vector search`);
+      console.log(`[${requestId}] Phase 1: No text matches found - falling back to vector search with filters:`, JSON.stringify(extractedFilters));
 
       try {
         const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
@@ -5221,7 +5221,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           return res.status(500).json({ error: "Error generating query embedding for vector fallback" });
         }
 
-        const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, {}, searchLimit, false);
+        const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, extractedFilters, searchLimit, false);
         const vectorResults = await collection.aggregate(vectorPipeline).toArray();
 
         const response = vectorResults.slice(0, searchLimit).map((product, index) => ({
