@@ -5350,11 +5350,14 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       return;
     }
 
-    // Extract categories from these matches
+    // Extract categories from top 3 matches only (same as complex queries)
     const extractedHardCategories = new Set();
     const extractedSoftCategories = new Set();
+    const top3TextMatches = highQualityTextMatches.slice(0, 3);
 
-    highQualityTextMatches.forEach(product => {
+    console.log(`[${requestId}] Phase 1: Extracting categories from top 3 matches (of ${highQualityTextMatches.length} total)`);
+
+    top3TextMatches.forEach(product => {
       if (product.category) {
         if (Array.isArray(product.category)) {
           product.category.forEach(cat => {
@@ -7165,18 +7168,18 @@ app.post("/search", async (req, res) => {
       if (req.store.enableSimpleCategoryExtraction && limitedResults.length > 0) {
         console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH CATEGORY EXTRACTION ENABLED - Preparing tier-2 token`);
 
-        // Get the top 4 products for category extraction (similar to complex query logic)
-        const top4Products = limitedResults.slice(0, 4);
-        console.log(`[${requestId}] Analyzing TOP 4 products for category extraction (simple query mode)`);
-        console.log(`[${requestId}] Top 4 product names:`, top4Products.map(p => p.name));
+        // Get the top 3 products for category extraction (same as complex queries)
+        const top3Products = limitedResults.slice(0, 3);
+        console.log(`[${requestId}] Analyzing TOP 3 products for category extraction (simple query mode)`);
+        console.log(`[${requestId}] Top 3 product names:`, top3Products.map(p => p.name));
 
-        const extractedFromTop4 = extractCategoriesFromProducts(top4Products);
+        const extractedFromTop3 = extractCategoriesFromProducts(top3Products);
 
         // Merge with initial query filters if present
         if (enhancedFilters) {
           if (enhancedFilters.category) {
             console.log(`[${requestId}] ℹ️ Simple query: Restoring initial hard category "${enhancedFilters.category}" as priority`);
-            extractedFromTop4.hardCategories.push(enhancedFilters.category);
+            extractedFromTop3.hardCategories.push(enhancedFilters.category);
           }
 
           if (enhancedFilters.softCategory) {
@@ -7186,22 +7189,22 @@ app.post("/search", async (req, res) => {
 
             console.log(`[${requestId}] ℹ️ Simple query: Merging initial soft categories [${initialSoftCats.join(', ')}] with priority`);
 
-            const llmSoftCats = extractedFromTop4.softCategories || [];
+            const llmSoftCats = extractedFromTop3.softCategories || [];
             const uniqueLlmSoftCats = llmSoftCats.filter(cat => !initialSoftCats.includes(cat));
 
-            extractedFromTop4.softCategories = [...initialSoftCats, ...uniqueLlmSoftCats];
+            extractedFromTop3.softCategories = [...initialSoftCats, ...uniqueLlmSoftCats];
           }
         }
 
-        extractedForSimple = extractedFromTop4;
+        extractedForSimple = extractedFromTop3;
 
-        console.log(`[${requestId}] ✅ Simple query: Created tier-2 load-more token with categories from TOP 4 products`);
-        console.log(`[${requestId}] 📊 Extracted categories (from 4 products): hard=${extractedFromTop4.hardCategories?.length || 0}, soft=${extractedFromTop4.softCategories?.length || 0}`);
-        if (extractedFromTop4.hardCategories?.length > 0) {
-          console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromTop4.hardCategories)}`);
+        console.log(`[${requestId}] ✅ Simple query: Created tier-2 load-more token with categories from TOP 3 products`);
+        console.log(`[${requestId}] 📊 Extracted categories (from 3 products): hard=${extractedFromTop3.hardCategories?.length || 0}, soft=${extractedFromTop3.softCategories?.length || 0}`);
+        if (extractedFromTop3.hardCategories?.length > 0) {
+          console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromTop3.hardCategories)}`);
         }
-        if (extractedFromTop4.softCategories?.length > 0) {
-          console.log(`[${requestId}]    🎯 Soft: ${JSON.stringify(extractedFromTop4.softCategories)}`);
+        if (extractedFromTop3.softCategories?.length > 0) {
+          console.log(`[${requestId}]    🎯 Soft: ${JSON.stringify(extractedFromTop3.softCategories)}`);
         }
       }
 
