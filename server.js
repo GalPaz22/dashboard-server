@@ -2820,6 +2820,52 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
 
 // Hebrew stemming function to normalize singular/plural forms
 // Handles common Hebrew suffixes to find the root form
+// Convert Hebrew letter to its final form (sofit) if it should be at end of word
+function toFinalForm(char) {
+  const finalForms = {
+    'כ': 'ך',  // kaf → final kaf
+    'מ': 'ם',  // mem → final mem
+    'נ': 'ן',  // nun → final nun
+    'פ': 'ף',  // pe → final pe
+    'צ': 'ץ',  // tsade → final tsade
+  };
+  return finalForms[char] || char;
+}
+
+// Convert Hebrew final letter back to regular form (for adding suffixes)
+function toRegularForm(char) {
+  const regularForms = {
+    'ך': 'כ',  // final kaf → kaf
+    'ם': 'מ',  // final mem → mem
+    'ן': 'נ',  // final nun → nun
+    'ף': 'פ',  // final pe → pe
+    'ץ': 'צ',  // final tsade → tsade
+  };
+  return regularForms[char] || char;
+}
+
+// Normalize the last letter of a Hebrew word to its final form
+function normalizeHebrewFinalLetter(word) {
+  if (!word || word.length < 1) return word;
+  const lastChar = word.charAt(word.length - 1);
+  const finalChar = toFinalForm(lastChar);
+  if (finalChar !== lastChar) {
+    return word.slice(0, -1) + finalChar;
+  }
+  return word;
+}
+
+// Prepare a stem for adding suffixes (convert final letter to regular form)
+function prepareForSuffix(word) {
+  if (!word || word.length < 1) return word;
+  const lastChar = word.charAt(word.length - 1);
+  const regularChar = toRegularForm(lastChar);
+  if (regularChar !== lastChar) {
+    return word.slice(0, -1) + regularChar;
+  }
+  return word;
+}
+
 function stemHebrew(word) {
   if (!word || word.length < 3) return word;
 
@@ -2842,7 +2888,9 @@ function stemHebrew(word) {
   // Use minimum stem length of 2 to avoid over-stemming
   for (const suffix of suffixes) {
     if (trimmed.endsWith(suffix) && trimmed.length > suffix.length + 1) {
-      return trimmed.slice(0, -suffix.length);
+      const stem = trimmed.slice(0, -suffix.length);
+      // Normalize the last letter to its final form (e.g., נ → ן)
+      return normalizeHebrewFinalLetter(stem);
     }
   }
 
@@ -2862,11 +2910,14 @@ function generateHebrewVariations(word) {
 
   const variations = new Set([word]); // Always include the original word
 
-  // Get the stem
+  // Get the stem (with final letter normalized, e.g., מלפפונים → מלפפון)
   const stem = stemHebrew(word);
   variations.add(stem);
 
-  // If the word is already stemmed (ends without common suffixes), generate variations
+  // Prepare stem for adding suffixes (convert final letters back to regular form)
+  // e.g., מלפפון → מלפפונ (so we can add ים to get מלפפונים)
+  const stemForSuffix = prepareForSuffix(stem);
+
   // Common patterns to generate from a stem:
   const suffixesToAdd = [
     'ות',    // feminine plural (e.g., עגבני → עגבניות)
@@ -2877,17 +2928,10 @@ function generateHebrewVariations(word) {
     'יה',    // feminine singular alt
   ];
 
-  // Generate variations from the stem
+  // Generate variations from the stem (using regular form for concatenation)
   suffixesToAdd.forEach(suffix => {
-    variations.add(stem + suffix);
+    variations.add(stemForSuffix + suffix);
   });
-
-  // If original word has a suffix, also try stem + different suffixes
-  if (stem !== word) {
-    suffixesToAdd.forEach(suffix => {
-      variations.add(stem + suffix);
-    });
-  }
 
   return Array.from(variations);
 }
@@ -5168,14 +5212,12 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, extractedFilters, categories, types);
 
-    console.log(`[${requestId}] 🎯 Extracted filters for vector fallback:`, JSON.stringify(extractedFilters));
+    console.log(`[${requestId}] 🎯 Building search pipeline with filters:`, JSON.stringify(extractedFilters));
 
-    // Do text search WITHOUT extracted category filters - we want direct text matches
-    // The extracted filters will only be used for vector search fallback
-    // This ensures products with matching text aren't excluded due to category mismatches
+    // Do text search with extracted filters (category only - softCategory is ignored by text search)
     const textSearchLimit = Math.max(searchLimit, 100);
     const textSearchPipeline = buildStandardSearchPipeline(
-      cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
+      cleanedTextForSearch, query, extractedFilters, textSearchLimit, false, false, []
     );
 
     // Add project to ensure we get categories
