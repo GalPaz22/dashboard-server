@@ -1817,9 +1817,13 @@ function classifyQueryFallback(query) {
   return false; // Default to complex for longer queries
 }
 // Function to extract categories from a list of products (used for complex query tier-2)
-function extractCategoriesFromProducts(products) {
+function extractCategoriesFromProducts(products, options = {}) {
   const categoryCount = new Map();
   const softCategoryCount = new Map();
+
+  // Option to limit soft category extraction to top N products (default: use all)
+  const softCategoryProductLimit = options.softCategoryProductLimit || products.length;
+  const productsForSoftCategory = products.slice(0, softCategoryProductLimit);
 
   // Hardcoded priority categories to always check for
   const priorityHardCategories = [
@@ -1829,14 +1833,14 @@ function extractCategoriesFromProducts(products) {
   ];
 
   // Debug: Log what categories are in each product
-  console.log(`[extractCategoriesFromProducts] DEBUG - Examining ${products.length} products:`);
+  console.log(`[extractCategoriesFromProducts] DEBUG - Examining ${products.length} products (soft categories from top ${softCategoryProductLimit}):`);
   products.forEach((p, idx) => {
-    console.log(`[extractCategoriesFromProducts]   Product ${idx + 1}: "${p.name}"`);
+    console.log(`[extractCategoriesFromProducts]   Product ${idx + 1}: "${p.name}"${idx >= softCategoryProductLimit ? ' (excluded from soft category extraction)' : ''}`);
     console.log(`[extractCategoriesFromProducts]     • category: ${p.category ? JSON.stringify(p.category) : 'MISSING'}`);
     console.log(`[extractCategoriesFromProducts]     • softCategory: ${p.softCategory ? JSON.stringify(p.softCategory) : 'MISSING'}`);
   });
 
-  // Count occurrences of each category across products
+  // Count occurrences of each hard category across ALL products
   for (const product of products) {
     // Hard categories
     if (product.category) {
@@ -1850,8 +1854,10 @@ function extractCategoriesFromProducts(products) {
         }
       });
     }
+  }
 
-    // Soft categories
+  // Count occurrences of soft categories only from top N products
+  for (const product of productsForSoftCategory) {
     if (product.softCategory) {
       const softCats = Array.isArray(product.softCategory) ? product.softCategory : [product.softCategory];
       softCats.forEach(cat => {
@@ -1928,13 +1934,22 @@ function extractCategoriesFromProducts(products) {
   // - Priority categories: extract if they appear at least once
   // - Other categories: extract most common (at least 2 occurrences for 4 products)
   // For larger sets: require at least 25%
-  const minOccurrences = products.length <= 4
-    ? 2 // For 4 LLM products, need at least 2 occurrences (50%)
-    : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
 
-  const minOccurrencesForPriority = products.length <= 4 ? 1 : minOccurrences; // Priority categories: 1 occurrence is enough for small sets
+  // Hard categories use all products
+  const minOccurrencesHard = products.length <= 3
+    ? 1 // For 3 or fewer products, need at least 1 occurrence
+    : products.length <= 4
+      ? 2 // For 4 products, need at least 2 occurrences (50%)
+      : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
 
-  console.log(`[extractCategoriesFromProducts] Using thresholds: regular=${minOccurrences}, priority=${minOccurrencesForPriority}`);
+  // Soft categories use only the limited subset (top 3 by default)
+  const minOccurrencesSoft = productsForSoftCategory.length <= 3
+    ? 1 // For 3 or fewer products, need at least 1 occurrence
+    : Math.max(2, Math.ceil(productsForSoftCategory.length * 0.25));
+
+  const minOccurrencesForPriority = products.length <= 3 ? 1 : minOccurrencesHard; // Priority categories: 1 occurrence is enough for small sets
+
+  console.log(`[extractCategoriesFromProducts] Using thresholds: hard=${minOccurrencesHard}, soft=${minOccurrencesSoft}, priority=${minOccurrencesForPriority}`);
 
   // Hard categories: Extract priority categories first, then common ones
   const sortedHardCategories = Array.from(categoryCount.entries())
@@ -1951,7 +1966,7 @@ function extractCategoriesFromProducts(products) {
 
   // Second pass: Add non-priority categories that meet the regular threshold
   for (const [cat, count] of sortedHardCategories) {
-    if (!hardCategories.includes(cat) && count >= minOccurrences && hardCategories.length < 3) {
+    if (!hardCategories.includes(cat) && count >= minOccurrencesHard && hardCategories.length < 3) {
       hardCategories.push(cat);
     }
   }
@@ -1962,9 +1977,9 @@ function extractCategoriesFromProducts(products) {
     hardCategories.push(sortedHardCategories[0][0]);
   }
 
-  // Soft categories: get the most common ones
+  // Soft categories: get the most common ones (extracted from top 3 products only)
   const softCategories = Array.from(softCategoryCount.entries())
-    .filter(([_, count]) => count >= minOccurrences)
+    .filter(([_, count]) => count >= minOccurrencesSoft)
     .sort((a, b) => b[1] - a[1]) // Sort by count, most common first
     .slice(0, 5) // Take top 5 soft categories max
     .map(([cat, _]) => cat);
@@ -1972,9 +1987,9 @@ function extractCategoriesFromProducts(products) {
   // Log priority categories found
   const priorityCatsFound = hardCategories.filter(cat => priorityHardCategories.includes(cat));
   
-  console.log(`[extractCategoriesFromProducts] Analyzed ${products.length} products:`);
-  console.log(`  • Hard categories found: ${hardCategories.length} (min occurrences: ${minOccurrences})`);
-  console.log(`  • Soft categories found: ${softCategories.length} (min occurrences: ${minOccurrences})`);
+  console.log(`[extractCategoriesFromProducts] Analyzed ${products.length} products (soft from top ${productsForSoftCategory.length}):`);
+  console.log(`  • Hard categories found: ${hardCategories.length} (min occurrences: ${minOccurrencesHard})`);
+  console.log(`  • Soft categories found: ${softCategories.length} (min occurrences: ${minOccurrencesSoft})`);
   if (priorityCatsFound.length > 0) {
     console.log(`  • ⭐ Priority hard categories: ${JSON.stringify(priorityCatsFound)}`);
   }
@@ -7039,22 +7054,23 @@ app.post("/search", async (req, res) => {
     let nextToken = null;
     
     if (isComplexQueryResult) {
-      // Complex queries: Extract categories from the TOP 4 LLM-reordered products for tier-2
+      // Complex queries: Extract categories from the TOP 3 LLM-reordered products for tier-2
       console.log(`[${requestId}] 🎯 COMPLEX QUERY DETECTED - Preparing tier-2 token`);
-      
-      // Get ONLY the first 4 LLM-selected products (the perfect matches)
-      const top4LLMProducts = limitedResults.slice(0, 4);
-      console.log(`[${requestId}] Analyzing TOP 4 LLM-selected products for category extraction (perfect matches only)`);
-      console.log(`[${requestId}] Top 4 product names:`, top4LLMProducts.map(p => p.name));
+
+      // Get ONLY the first 3 LLM-selected products (the top textual matches)
+      const top3LLMProducts = limitedResults.slice(0, 3);
+      console.log(`[${requestId}] Analyzing TOP 3 LLM-selected products for category extraction`);
+      console.log(`[${requestId}] Top 3 product names:`, top3LLMProducts.map(p => p.name));
 
       // Debug: Log all fields of first product to understand data structure
-      if (top4LLMProducts.length > 0) {
-        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(top4LLMProducts[0]));
-        console.log(`[${requestId}] DEBUG - Sample product type:`, top4LLMProducts[0].type);
-        console.log(`[${requestId}] DEBUG - Sample product description:`, top4LLMProducts[0].description?.substring(0, 100));
+      if (top3LLMProducts.length > 0) {
+        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(top3LLMProducts[0]));
+        console.log(`[${requestId}] DEBUG - Sample product type:`, top3LLMProducts[0].type);
+        console.log(`[${requestId}] DEBUG - Sample product description:`, top3LLMProducts[0].description?.substring(0, 100));
       }
 
-      const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts);
+      // Extract both hard and soft categories from top 3 products only
+      const extractedFromLLM = extractCategoriesFromProducts(top3LLMProducts);
       
       // 🆕 TIER 2 ENHANCEMENT: Extract product embeddings from high-quality textual matches
       // Find products with very high exactMatchBonus (exact/near-exact product name matches)
@@ -7129,12 +7145,12 @@ app.post("/search", async (req, res) => {
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
-        extractedCategories: extractedFromLLM, // Categories extracted from TOP 4 LLM-selected products
+        extractedCategories: extractedFromLLM, // Categories extracted from TOP 3 LLM-selected products
         type: 'complex-tier2' // Mark as complex query tier 2
       })).toString('base64');
-      
-      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 4 LLM perfect matches`);
-      console.log(`[${requestId}] 📊 LLM-extracted categories (from 4 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
+
+      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 3 textual matches`);
+      console.log(`[${requestId}] 📊 LLM-extracted categories (from 3 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
       if (extractedFromLLM.hardCategories?.length > 0) {
         console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromLLM.hardCategories)}`);
       }
