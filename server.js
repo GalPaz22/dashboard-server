@@ -6915,16 +6915,12 @@ app.post("/search", async (req, res) => {
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
     
-    // Log query (only for complex queries)
-    if (isComplexQueryResult) {
+    // Log all queries (both simple and complex)
     try {
         await logQuery(querycollection, query, enhancedFilters, limitedResults, true);
-        console.log(`[${requestId}] Complex query logged to database`);
+        console.log(`[${requestId}] Query logged to database (${isComplexQueryResult ? 'complex' : 'simple'})`);
     } catch (logError) {
       console.error(`[${requestId}] Failed to log query:`, logError.message);
-      }
-    } else {
-      console.log(`[${requestId}] Simple query - skipping database logging`);
     }
 
     const executionTime = Date.now() - searchStartTime;
