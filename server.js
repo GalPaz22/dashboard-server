@@ -5168,12 +5168,14 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, extractedFilters, categories, types);
 
-    console.log(`[${requestId}] 🎯 Building search pipeline with filters:`, JSON.stringify(extractedFilters));
+    console.log(`[${requestId}] 🎯 Extracted filters for vector fallback:`, JSON.stringify(extractedFilters));
 
-    // Do text search with extracted filters if available
+    // Do text search WITHOUT extracted category filters - we want direct text matches
+    // The extracted filters will only be used for vector search fallback
+    // This ensures products with matching text aren't excluded due to category mismatches
     const textSearchLimit = Math.max(searchLimit, 100);
     const textSearchPipeline = buildStandardSearchPipeline(
-      cleanedTextForSearch, query, extractedFilters, textSearchLimit, false, false, []
+      cleanedTextForSearch, query, {}, textSearchLimit, false, false, []
     );
 
     // Add project to ensure we get categories
