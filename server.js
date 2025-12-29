@@ -1936,16 +1936,18 @@ function extractCategoriesFromProducts(products, options = {}) {
   // For larger sets: require at least 25%
 
   // Hard categories use all products
-  const minOccurrencesHard = products.length <= 4
-    ? 2 // For 4 LLM products, need at least 2 occurrences (50%)
-    : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
+  const minOccurrencesHard = products.length <= 3
+    ? 1 // For 3 or fewer products, need at least 1 occurrence
+    : products.length <= 4
+      ? 2 // For 4 products, need at least 2 occurrences (50%)
+      : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
 
   // Soft categories use only the limited subset (top 3 by default)
   const minOccurrencesSoft = productsForSoftCategory.length <= 3
     ? 1 // For 3 or fewer products, need at least 1 occurrence
     : Math.max(2, Math.ceil(productsForSoftCategory.length * 0.25));
 
-  const minOccurrencesForPriority = products.length <= 4 ? 1 : minOccurrencesHard; // Priority categories: 1 occurrence is enough for small sets
+  const minOccurrencesForPriority = products.length <= 3 ? 1 : minOccurrencesHard; // Priority categories: 1 occurrence is enough for small sets
 
   console.log(`[extractCategoriesFromProducts] Using thresholds: hard=${minOccurrencesHard}, soft=${minOccurrencesSoft}, priority=${minOccurrencesForPriority}`);
 
@@ -7052,23 +7054,23 @@ app.post("/search", async (req, res) => {
     let nextToken = null;
     
     if (isComplexQueryResult) {
-      // Complex queries: Extract categories from the TOP 4 LLM-reordered products for tier-2
+      // Complex queries: Extract categories from the TOP 3 LLM-reordered products for tier-2
       console.log(`[${requestId}] 🎯 COMPLEX QUERY DETECTED - Preparing tier-2 token`);
-      
-      // Get ONLY the first 4 LLM-selected products (the perfect matches)
-      const top4LLMProducts = limitedResults.slice(0, 4);
-      console.log(`[${requestId}] Analyzing TOP 4 LLM-selected products for category extraction (perfect matches only)`);
-      console.log(`[${requestId}] Top 4 product names:`, top4LLMProducts.map(p => p.name));
+
+      // Get ONLY the first 3 LLM-selected products (the top textual matches)
+      const top3LLMProducts = limitedResults.slice(0, 3);
+      console.log(`[${requestId}] Analyzing TOP 3 LLM-selected products for category extraction`);
+      console.log(`[${requestId}] Top 3 product names:`, top3LLMProducts.map(p => p.name));
 
       // Debug: Log all fields of first product to understand data structure
-      if (top4LLMProducts.length > 0) {
-        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(top4LLMProducts[0]));
-        console.log(`[${requestId}] DEBUG - Sample product type:`, top4LLMProducts[0].type);
-        console.log(`[${requestId}] DEBUG - Sample product description:`, top4LLMProducts[0].description?.substring(0, 100));
+      if (top3LLMProducts.length > 0) {
+        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(top3LLMProducts[0]));
+        console.log(`[${requestId}] DEBUG - Sample product type:`, top3LLMProducts[0].type);
+        console.log(`[${requestId}] DEBUG - Sample product description:`, top3LLMProducts[0].description?.substring(0, 100));
       }
 
-      // Extract categories: hard categories from all 4, soft categories from top 3 only
-      const extractedFromLLM = extractCategoriesFromProducts(top4LLMProducts, { softCategoryProductLimit: 3 });
+      // Extract both hard and soft categories from top 3 products only
+      const extractedFromLLM = extractCategoriesFromProducts(top3LLMProducts);
       
       // 🆕 TIER 2 ENHANCEMENT: Extract product embeddings from high-quality textual matches
       // Find products with very high exactMatchBonus (exact/near-exact product name matches)
@@ -7143,12 +7145,12 @@ app.post("/search", async (req, res) => {
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
-        extractedCategories: extractedFromLLM, // Categories extracted from TOP 4 LLM-selected products
+        extractedCategories: extractedFromLLM, // Categories extracted from TOP 3 LLM-selected products
         type: 'complex-tier2' // Mark as complex query tier 2
       })).toString('base64');
-      
-      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 4 LLM perfect matches`);
-      console.log(`[${requestId}] 📊 LLM-extracted categories (from 4 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
+
+      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 3 textual matches`);
+      console.log(`[${requestId}] 📊 LLM-extracted categories (from 3 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
       if (extractedFromLLM.hardCategories?.length > 0) {
         console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromLLM.hardCategories)}`);
       }
