@@ -3031,6 +3031,23 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     // Query appears later in the product name
     return 60000; // High boost for text matches (was 30000)
   }
+
+  // STEMMED CONTAINS CHECK - handles זיתים query matching "זית ירוק" product
+  // Check if stemmed query word is contained in product name
+  if (stemmedQuery && stemmedQuery.length >= 2) {
+    const productNameWords = productNameLower.split(/\s+/);
+    for (let i = 0; i < productNameWords.length; i++) {
+      const productWord = productNameWords[i];
+      const stemmedProductWord = stemHebrew(productWord);
+      if (stemmedProductWord === stemmedQuery) {
+        // Stemmed word match found - bonus based on position
+        if (i === 0) {
+          return 62000; // Stemmed match at start of product name
+        }
+        return 58000; // Stemmed match elsewhere in product name
+      }
+    }
+  }
   
   // Product name contains cleaned query - with positional scoring
   if (cleanedQueryLower && productNameLower.includes(cleanedQueryLower)) {
@@ -4107,11 +4124,16 @@ async function executeExplicitSoftCategorySearch(
   const filteredResults = deliveredIds && deliveredIds.length > 0
     ? hardFilteredResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
     : hardFilteredResults;
-  
+
   if (deliveredIds && deliveredIds.length > 0) {
     console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
-  
+
+  // CRITICAL: Final sort by rrf_score to ensure text matches bubble up to top
+  // This is needed because we combine multiple arrays (textMatches, softCategory, nonSoftCategory, sweep)
+  // and they need to be properly ranked by score
+  filteredResults.sort((a, b) => b.rrf_score - a.rrf_score);
+
   // Limit early to reduce processing latency in subsequent operations
   // Use searchLimit * 3 to provide enough variety while reducing overhead
   const earlyLimitedResults = filteredResults.slice(0, searchLimit * 3);
