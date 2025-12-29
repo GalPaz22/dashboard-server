@@ -5146,6 +5146,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
+    const querycollection = db.collection("queries");
 
     const translatedQuery = query; // Skipping translation for simple query phases
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
@@ -5244,6 +5245,14 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           vectorMatch: true,
           explanation: null
         }));
+
+        // Log simple query (vector fallback path)
+        try {
+          await logQuery(querycollection, query, extractedFilters, response, false);
+          console.log(`[${requestId}] Query logged to database (simple - vector fallback)`);
+        } catch (logError) {
+          console.error(`[${requestId}] Failed to log query:`, logError.message);
+        }
 
         res.json({
           products: response,
@@ -5347,6 +5356,14 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       })).toString('base64');
     }
 
+    // Log simple query (text matches path)
+    try {
+      await logQuery(querycollection, query, extractedFilters, response, false);
+      console.log(`[${requestId}] Query logged to database (simple - text matches)`);
+    } catch (logError) {
+      console.error(`[${requestId}] Failed to log query:`, logError.message);
+    }
+
     res.json({
       products: response,
       pagination: {
@@ -5391,6 +5408,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
+    const querycollection = db.collection("queries");
 
     const translatedQuery = query; // Skipping translation for simple query phases
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
@@ -5519,6 +5537,14 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       type: 'category-filtered',
       extractedCategories: extractedCategories
     })).toString('base64') : null;
+
+    // Log simple query (category-filtered path)
+    try {
+      await logQuery(querycollection, query, categoryFilteredHardFilters, response, false);
+      console.log(`[${requestId}] Query logged to database (simple - category filtered)`);
+    } catch (logError) {
+      console.error(`[${requestId}] Failed to log query:`, logError.message);
+    }
 
     res.json({
       products: response,
