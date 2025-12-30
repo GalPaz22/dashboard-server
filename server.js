@@ -6902,6 +6902,27 @@ app.post("/search", async (req, res) => {
       combinedResults.sort((a, b) => b.rrf_score - a.rrf_score);
     }
 
+    // CRITICAL FIX: Filter out fuzzy-only matches when true exact matches exist
+    // This prevents "סלמי" from appearing when searching for "סלרי" (celery)
+    // True exact matches have bonus >= 50000 (contains query, stemmed match, etc.)
+    // Fuzzy-only matches have bonus < 50000 (similarity-based matches only)
+    if (isSimpleResult) {
+      const EXACT_MATCH_FILTER_THRESHOLD = 50000;
+      const trueExactMatches = combinedResults.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_FILTER_THRESHOLD);
+
+      if (trueExactMatches.length > 0) {
+        const originalCount = combinedResults.length;
+        // Keep exact matches and remove fuzzy-only matches
+        combinedResults = combinedResults.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_FILTER_THRESHOLD);
+        const filteredOut = originalCount - combinedResults.length;
+
+        if (filteredOut > 0) {
+          console.log(`[${requestId}] 🎯 EXACT MATCH FILTER: Found ${trueExactMatches.length} true exact matches (bonus >= ${EXACT_MATCH_FILTER_THRESHOLD})`);
+          console.log(`[${requestId}] 🎯 Filtered out ${filteredOut} fuzzy-only matches to prioritize exact results`);
+        }
+      }
+    }
+
     // Log results breakdown
     const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2);
     const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1);
