@@ -719,7 +719,8 @@ async function getStoreConfigByApiKey(apiKey) {
     explain: userDoc.explain || false,
     limit: userDoc.limit || 25,
     context: userDoc.context || "wine store", // Search limit from user config, default to 25
-    enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false // Toggle for category extraction on simple queries (default: false)
+    enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
+    firstMatchCategory: userDoc.credentials?.firstMatchCategory || false// Toggle for category extraction on simple queries (default: false)
   };
 }
 
@@ -3859,6 +3860,18 @@ async function executeExplicitSoftCategorySearch(
     });
 
     highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+    
+    // CRITICAL: If we have strong exact matches (>= 50000), filter out weak fuzzy matches
+    // This prevents "סלמי" from appearing when searching for "סלרי"
+    const STRONG_EXACT_MATCH_THRESHOLD = 50000;
+    const strongExactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= STRONG_EXACT_MATCH_THRESHOLD);
+    
+    if (strongExactMatches.length > 0) {
+      const beforeCount = highQualityTextMatches.length;
+      highQualityTextMatches = strongExactMatches;
+      console.log(`[SOFT SEARCH] 🎯 EXACT MATCH FILTER: Found ${strongExactMatches.length} strong exact matches, filtered out ${beforeCount - strongExactMatches.length} weak fuzzy matches`);
+    }
+    
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
     console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include`);
@@ -5246,7 +5259,8 @@ app.get("/autocomplete", async (req, res) => {
 // Handle Phase 1: Text matches only for progressive loading
 async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, noWord, categories, types, softCategories, dbName, collectionName, searchLimit, enableSimpleCategoryExtraction) {
   try {
-    console.log(`[${requestId}] 🎯 handleTextMatchesOnlyPhase called with enableSimpleCategoryExtraction=${enableSimpleCategoryExtraction}`);
+    const firstMatchCategory = req.store?.firstMatchCategory || false;
+    console.log(`[${requestId}] 🎯 handleTextMatchesOnlyPhase called with enableSimpleCategoryExtraction=${enableSimpleCategoryExtraction}, firstMatchCategory=${firstMatchCategory}`);
 
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
@@ -5310,25 +5324,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       softCategoryMatches: 0
     }));
 
-    let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
-
-    // CRITICAL FIX: Filter out fuzzy-only matches when true exact matches exist
-    // This prevents "סלמי" from appearing when searching for "סלרי" (celery)
-    // True exact matches have bonus >= 50000 (contains query, stemmed match, etc.)
-    // Fuzzy-only matches have bonus < 50000 (similarity-based matches only)
-    const EXACT_MATCH_FILTER_THRESHOLD = 50000;
-    const trueExactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_FILTER_THRESHOLD);
-
-    if (trueExactMatches.length > 0) {
-      const originalCount = highQualityTextMatches.length;
-      highQualityTextMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_FILTER_THRESHOLD);
-      const filteredOut = originalCount - highQualityTextMatches.length;
-
-      if (filteredOut > 0) {
-        console.log(`[${requestId}] 🎯 Phase 1 EXACT MATCH FILTER: Found ${trueExactMatches.length} true exact matches (bonus >= ${EXACT_MATCH_FILTER_THRESHOLD})`);
-        console.log(`[${requestId}] 🎯 Phase 1: Filtered out ${filteredOut} fuzzy-only matches`);
-      }
-    }
+          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
     // Sort by text match strength
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
@@ -5414,14 +5410,28 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       return;
     }
 
-    // Extract categories from top 3 matches only (same as complex queries)
+    // Extract categories - use TOP 1 only if it's a very strong exact match
     const extractedHardCategories = new Set();
     const extractedSoftCategories = new Set();
-    const top3TextMatches = highQualityTextMatches.slice(0, 3);
+    
+    const VERY_STRONG_EXACT_MATCH_THRESHOLD_PHASE1 = 90000;
+    const topMatch = highQualityTextMatches[0];
+    const topMatchBonus = topMatch ? (topMatch.exactMatchBonus || 0) : 0;
+    
+    let matchesForCategoryExtraction;
+    
+    if (topMatchBonus >= VERY_STRONG_EXACT_MATCH_THRESHOLD_PHASE1) {
+      // Use ONLY the top 1 result for category extraction
+      matchesForCategoryExtraction = [topMatch];
+      console.log(`[${requestId}] 🎯 Phase 1: TOP match is VERY STRONG (bonus: ${topMatchBonus})`);
+      console.log(`[${requestId}] 🎯 Phase 1: Using TOP 1 result ONLY for category extraction: "${topMatch.name}"`);
+    } else {
+      // Use top 3 matches
+      matchesForCategoryExtraction = highQualityTextMatches.slice(0, 3);
+      console.log(`[${requestId}] Phase 1: Extracting categories from top 3 matches (of ${highQualityTextMatches.length} total)`);
+    }
 
-    console.log(`[${requestId}] Phase 1: Extracting categories from top 3 matches (of ${highQualityTextMatches.length} total)`);
-
-    top3TextMatches.forEach(product => {
+    matchesForCategoryExtraction.forEach(product => {
       if (product.category) {
         if (Array.isArray(product.category)) {
           product.category.forEach(cat => {
@@ -5444,8 +5454,30 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     console.log(`[${requestId}] Phase 1: Extracted ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
 
-    // Return text matches immediately
-    const response = highQualityTextMatches.slice(0, searchLimit).map(product => ({
+    // CRITICAL: Filter Tier 1 results by extracted hard categories (if enabled via firstMatchCategory flag)
+    // This ensures all Phase 1 results match the category of the top textual match
+    let filteredTextMatches = highQualityTextMatches;
+    
+    if (firstMatchCategory && hardCategoriesArray.length > 0 && topMatchBonus >= VERY_STRONG_EXACT_MATCH_THRESHOLD_PHASE1) {
+      console.log(`[${requestId}] 🎯 Phase 1: firstMatchCategory enabled - Filtering Tier 1 results by extracted hard categories: ${JSON.stringify(hardCategoriesArray)}`);
+      
+      filteredTextMatches = highQualityTextMatches.filter(product => {
+        if (!product.category) return false;
+        
+        const productCategories = Array.isArray(product.category) ? product.category : [product.category];
+        
+        // Product must match at least one of the extracted categories
+        return productCategories.some(cat => hardCategoriesArray.includes(cat));
+      });
+      
+      const filteredOut = highQualityTextMatches.length - filteredTextMatches.length;
+      console.log(`[${requestId}] 🎯 Phase 1: Filtered Tier 1 from ${highQualityTextMatches.length} to ${filteredTextMatches.length} products (removed ${filteredOut} non-matching)`);
+    } else if (!firstMatchCategory && hardCategoriesArray.length > 0) {
+      console.log(`[${requestId}] ℹ️ Phase 1: firstMatchCategory disabled - NOT filtering Tier 1 by categories`);
+    }
+
+    // Return filtered text matches
+    const response = filteredTextMatches.slice(0, searchLimit).map(product => ({
       _id: product._id.toString(),
       id: product.id,
       name: product.name,
@@ -5466,7 +5498,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       explanation: null
     }));
 
-    const hasMore = highQualityTextMatches.length > searchLimit;
+    const hasMore = filteredTextMatches.length > searchLimit;
     const hasCategoryFiltering = (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0);
     
     // If we have more text matches but no category filtering, provide a nextToken
@@ -5511,7 +5543,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         extractedCategories: {
           hardCategories: hardCategoriesArray,
           softCategories: softCategoriesArray,
-          textMatchCount: highQualityTextMatches.length
+          textMatchCount: filteredTextMatches.length
         },
         tiers: {
           hasTextMatchTier: true,
@@ -5846,6 +5878,22 @@ app.post("/search", async (req, res) => {
 
       preliminaryTextSearchResults = await collection.aggregate(preliminaryTextSearchPipeline).toArray();
 
+      // CRITICAL: Filter out fuzzy noise if we have strong exact matches
+      // This prevents "סלמי" from interfering with "סלרי" searches
+      const STRONG_EXACT_MATCH_THRESHOLD = 50000;
+      const preliminaryWithBonuses = preliminaryTextSearchResults.map(doc => ({
+        ...doc,
+        exactMatchBonus: getExactMatchBonus(doc.name, query, query)
+      }));
+      
+      const strongExactPreliminary = preliminaryWithBonuses.filter(doc => doc.exactMatchBonus >= STRONG_EXACT_MATCH_THRESHOLD);
+      
+      if (strongExactPreliminary.length > 0) {
+        const beforeCount = preliminaryTextSearchResults.length;
+        preliminaryTextSearchResults = strongExactPreliminary;
+        console.log(`[${requestId}] 🎯 PRELIMINARY EXACT MATCH FILTER: Found ${strongExactPreliminary.length} strong exact matches, filtered out ${beforeCount - strongExactPreliminary.length} weak fuzzy matches`);
+      }
+
       // Analyze query structure to determine if text match should override classification
       const queryWords = query.toLowerCase().split(/\s+/).filter(word => word.length > 1);
       const queryWordCount = queryWords.length;
@@ -5853,7 +5901,7 @@ app.post("/search", async (req, res) => {
       // For single-word queries, any high-quality match forces SIMPLE
       if (queryWordCount === 1) {
         const highQualityPreliminaryMatches = preliminaryTextSearchResults.filter(doc => {
-          const bonus = getExactMatchBonus(doc.name, query, query);
+          const bonus = doc.exactMatchBonus || getExactMatchBonus(doc.name, query, query);
           return bonus >= 1000;
         });
         hasHighTextMatch = highQualityPreliminaryMatches.length > 0;
@@ -5869,7 +5917,7 @@ app.post("/search", async (req, res) => {
         if (highQualityPreliminaryMatches.length > 0) {
           // Check if this is a near-exact product name match (high bonus for entire query)
           const veryHighMatches = highQualityPreliminaryMatches.filter(doc => {
-            const bonus = getExactMatchBonus(doc.name, query, query);
+            const bonus = doc.exactMatchBonus || getExactMatchBonus(doc.name, query, query);
             return bonus >= 50000; // Very high bonus indicates near-exact match
           });
 
@@ -6432,24 +6480,45 @@ app.post("/search", async (req, res) => {
 
               console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search`);
             } else {
+              // CRITICAL: For very strong exact matches, extract categories from TOP 1 result ONLY
+              // This prevents fuzzy noise (e.g., "סלמי" when searching "סלרי") from polluting category extraction
+              const VERY_STRONG_EXACT_MATCH_THRESHOLD = 90000;
+              const topMatch = highQualityTextMatches[0];
+              const topMatchBonus = topMatch ? (topMatch.exactMatchBonus || 0) : 0;
+              
+              const shouldExtractFromTopOneOnly = topMatchBonus >= VERY_STRONG_EXACT_MATCH_THRESHOLD;
+              
+              if (shouldExtractFromTopOneOnly) {
+                console.log(`[${requestId}] 🎯 TOP match is VERY STRONG (bonus: ${topMatchBonus} >= ${VERY_STRONG_EXACT_MATCH_THRESHOLD})`);
+                console.log(`[${requestId}] 🎯 Extracting categories from TOP 1 result ONLY: "${topMatch.name}"`);
+              }
+              
               // Continue with Step 2: Extract categories from high-quality text matches
-            console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
+              console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
 
-            // CRITICAL FIX: Prioritize EXACT matches for category extraction
-            // If there are true exact matches (bonus >= 50000), use ONLY those for filters
-            // This prevents fuzzy matches like "סלמי" from polluting "סלרי" search results
-            const EXACT_MATCH_THRESHOLD = 50000;
-            const exactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD);
-
-            // Use exact matches if available, otherwise fall back to all high-quality matches
-            const matchesForCategoryExtraction = exactMatches.length > 0 ? exactMatches : highQualityTextMatches;
-
-            if (exactMatches.length > 0) {
-              console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY: Found ${exactMatches.length} exact matches (bonus >= ${EXACT_MATCH_THRESHOLD}), using ONLY these for category extraction`);
-              exactMatches.slice(0, 5).forEach((m, i) => {
-                console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
-              });
-            }
+                // CRITICAL FIX: Prioritize EXACT matches for category extraction
+                // If top match is VERY strong (>= 90000), use ONLY top 1 result
+                // Otherwise, if there are strong exact matches (>= 50000), use only those
+                // This prevents fuzzy matches like "סלמי" from polluting "סלרי" search results
+                let matchesForCategoryExtraction;
+                
+                if (shouldExtractFromTopOneOnly) {
+                  // Use ONLY the top 1 result for category extraction
+                  matchesForCategoryExtraction = [topMatch];
+                  console.log(`[${requestId}] 🎯 Using TOP 1 result ONLY for category extraction (very strong match)`);
+                } else {
+                  // Use all strong exact matches (bonus >= 50000)
+                  const EXACT_MATCH_THRESHOLD = 50000;
+                  const exactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD);
+                  matchesForCategoryExtraction = exactMatches.length > 0 ? exactMatches : highQualityTextMatches;
+                  
+                  if (exactMatches.length > 0) {
+                    console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY: Found ${exactMatches.length} exact matches (bonus >= ${EXACT_MATCH_THRESHOLD}), using these for category extraction`);
+                    exactMatches.slice(0, 5).forEach((m, i) => {
+                      console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
+                    });
+                  }
+                }
 
             const extractedHardCategories = new Set();
             const extractedSoftCategories = new Set();
@@ -6749,7 +6818,7 @@ app.post("/search", async (req, res) => {
                 match.highTextMatch = true;
               });
             }
-            }
+            } // End of else block for category extraction
           } else {
             console.log(`[${requestId}] No high-quality text matches found (bonus < 1000), falling back to text search results`);
             // Fall back to all text search results (even with lower bonuses)
@@ -7167,17 +7236,31 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] Analyzing TOP 3 LLM-selected products for category extraction`);
       console.log(`[${requestId}] Top 3 product names:`, top3LLMProducts.map(p => p.name));
 
-      // CRITICAL FIX: Prioritize EXACT matches for category extraction (same as two-step search)
-      // If there are true exact matches among top 3, use ONLY those for filters
-      const EXACT_MATCH_THRESHOLD_LLM = 50000;
-      const exactMatchesLLM = top3LLMProducts.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD_LLM);
-      const productsForLLMCategoryExtraction = exactMatchesLLM.length > 0 ? exactMatchesLLM : top3LLMProducts;
+      // CRITICAL FIX: For very strong exact matches, extract categories from TOP 1 result ONLY
+      // This prevents fuzzy noise from polluting category extraction
+      const VERY_STRONG_EXACT_MATCH_THRESHOLD_LLM = 90000;
+      const topLLMMatch = top3LLMProducts[0];
+      const topLLMMatchBonus = topLLMMatch ? (topLLMMatch.exactMatchBonus || 0) : 0;
+      
+      let productsForLLMCategoryExtraction;
+      
+      if (topLLMMatchBonus >= VERY_STRONG_EXACT_MATCH_THRESHOLD_LLM) {
+        // Use ONLY the top 1 result for category extraction
+        productsForLLMCategoryExtraction = [topLLMMatch];
+        console.log(`[${requestId}] 🎯 TOP match is VERY STRONG (bonus: ${topLLMMatchBonus} >= ${VERY_STRONG_EXACT_MATCH_THRESHOLD_LLM})`);
+        console.log(`[${requestId}] 🎯 Using TOP 1 result ONLY for category extraction: "${topLLMMatch.name}"`);
+      } else {
+        // Use all strong exact matches (bonus >= 50000)
+        const EXACT_MATCH_THRESHOLD_LLM = 50000;
+        const exactMatchesLLM = top3LLMProducts.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD_LLM);
+        productsForLLMCategoryExtraction = exactMatchesLLM.length > 0 ? exactMatchesLLM : top3LLMProducts;
 
-      if (exactMatchesLLM.length > 0) {
-        console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY (complex): Found ${exactMatchesLLM.length} exact matches among top 3, using ONLY these for category extraction`);
-        exactMatchesLLM.forEach((m, i) => {
-          console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
-        });
+        if (exactMatchesLLM.length > 0) {
+          console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY (complex): Found ${exactMatchesLLM.length} exact matches among top 3, using these for category extraction`);
+          exactMatchesLLM.forEach((m, i) => {
+            console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
+          });
+        }
       }
 
       // Debug: Log all fields of first product to understand data structure
@@ -7288,17 +7371,31 @@ app.post("/search", async (req, res) => {
         console.log(`[${requestId}] Analyzing TOP 3 products for category extraction (simple query mode)`);
         console.log(`[${requestId}] Top 3 product names:`, top3Products.map(p => p.name));
 
-        // CRITICAL FIX: Prioritize EXACT matches for category extraction
-        // If there are true exact matches among top 3, use ONLY those for filters
-        const EXACT_MATCH_THRESHOLD_SIMPLE = 50000;
-        const exactMatchesSimple = top3Products.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD_SIMPLE);
-        const productsForSimpleCategoryExtraction = exactMatchesSimple.length > 0 ? exactMatchesSimple : top3Products;
+        // CRITICAL FIX: For very strong exact matches, extract categories from TOP 1 result ONLY
+        // This prevents fuzzy noise from polluting category extraction
+        const VERY_STRONG_EXACT_MATCH_THRESHOLD_SIMPLE = 90000;
+        const topSimpleMatch = top3Products[0];
+        const topSimpleMatchBonus = topSimpleMatch ? (topSimpleMatch.exactMatchBonus || 0) : 0;
+        
+        let productsForSimpleCategoryExtraction;
+        
+        if (topSimpleMatchBonus >= VERY_STRONG_EXACT_MATCH_THRESHOLD_SIMPLE) {
+          // Use ONLY the top 1 result for category extraction
+          productsForSimpleCategoryExtraction = [topSimpleMatch];
+          console.log(`[${requestId}] 🎯 TOP match is VERY STRONG (bonus: ${topSimpleMatchBonus} >= ${VERY_STRONG_EXACT_MATCH_THRESHOLD_SIMPLE})`);
+          console.log(`[${requestId}] 🎯 Using TOP 1 result ONLY for category extraction: "${topSimpleMatch.name}"`);
+        } else {
+          // Use all strong exact matches (bonus >= 50000)
+          const EXACT_MATCH_THRESHOLD_SIMPLE = 50000;
+          const exactMatchesSimple = top3Products.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD_SIMPLE);
+          productsForSimpleCategoryExtraction = exactMatchesSimple.length > 0 ? exactMatchesSimple : top3Products;
 
-        if (exactMatchesSimple.length > 0) {
-          console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY (simple): Found ${exactMatchesSimple.length} exact matches among top 3, using ONLY these for category extraction`);
-          exactMatchesSimple.forEach((m, i) => {
-            console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
-          });
+          if (exactMatchesSimple.length > 0) {
+            console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY (simple): Found ${exactMatchesSimple.length} exact matches among top 3, using these for category extraction`);
+            exactMatchesSimple.forEach((m, i) => {
+              console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
+            });
+          }
         }
 
         const extractedFromTop3 = extractCategoriesFromProducts(productsForSimpleCategoryExtraction);
