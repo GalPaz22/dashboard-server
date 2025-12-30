@@ -1849,7 +1849,9 @@ function extractCategoriesFromProducts(products, options = {}) {
         categoryCount.set(cat, (categoryCount.get(cat) || 0) + 1);
 
         // Boost priority categories (ensure they're always extracted if present)
-        if (priorityHardCategories.includes(cat)) {
+        // Normalize quote characters for comparison (Hebrew geresh → ASCII apostrophe)
+        const normalizedCat = normalizeQuoteCharacters(cat);
+        if (priorityHardCategories.some(pc => normalizeQuoteCharacters(pc) === normalizedCat)) {
           categoryCount.set(cat, (categoryCount.get(cat) || 0) + 100);
         }
       });
@@ -2833,6 +2835,24 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
   return baseScore + softBoost + keywordMatchBonus + exactMatchBonus + multiCategoryBoost;
 }
 
+// Normalize quote-like characters to ASCII apostrophe
+// This ensures Hebrew geresh (׳) and other quote variants match ASCII apostrophe (')
+// Important for search queries like "צ'יפס" vs "צ׳יפס" to return the same results
+function normalizeQuoteCharacters(text) {
+  if (!text) return text;
+  // Hebrew geresh: ׳ (U+05F3)
+  // Hebrew gershayim: ״ (U+05F4)
+  // Right single quotation mark: ' (U+2019)
+  // Left single quotation mark: ' (U+2018)
+  // Modifier letter apostrophe: ʼ (U+02BC)
+  // Prime: ′ (U+2032)
+  // Acute accent: ´ (U+00B4)
+  // Grave accent: ` (U+0060)
+  return text
+    .replace(/[\u05F3\u2019\u2018\u02BC\u2032\u00B4\u0060]/g, "'")  // → ASCII apostrophe
+    .replace(/[\u05F4\u201C\u201D]/g, '"');  // → ASCII double quote
+}
+
 // Hebrew stemming function to normalize singular/plural forms
 // Handles common Hebrew suffixes to find the root form
 // Convert Hebrew letter to its final form (sofit) if it should be at end of word
@@ -2913,9 +2933,12 @@ function stemHebrew(word) {
 }
 
 // Normalize Hebrew text by stemming each word
+// Also normalizes quote characters for consistent matching
 function normalizeHebrew(text) {
   if (!text) return '';
-  return text.split(/\s+/).map(word => stemHebrew(word)).join(' ');
+  // Normalize quote characters first (Hebrew geresh → ASCII apostrophe)
+  const normalized = normalizeQuoteCharacters(text);
+  return normalized.split(/\s+/).map(word => stemHebrew(word)).join(' ');
 }
 
 // Generate Hebrew word variations from a stem or word
@@ -2971,10 +2994,11 @@ function generateHebrewQueryVariations(text) {
 // Returns much higher bonuses to ensure text matches rank above soft category matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
   if (!productName || !query) return 0;
-  
-  const productNameLower = productName.toLowerCase().trim();
-  const queryLower = query.toLowerCase().trim();
-  const cleanedQueryLower = cleanedQuery ? cleanedQuery.toLowerCase().trim() : '';
+
+  // Normalize quote characters for consistent matching (Hebrew geresh → ASCII apostrophe)
+  const productNameLower = normalizeQuoteCharacters(productName.toLowerCase().trim());
+  const queryLower = normalizeQuoteCharacters(query.toLowerCase().trim());
+  const cleanedQueryLower = cleanedQuery ? normalizeQuoteCharacters(cleanedQuery.toLowerCase().trim()) : '';
   
   // Exact match - highest priority (boosted significantly)
   if (productNameLower === queryLower) {
@@ -5682,7 +5706,8 @@ app.post("/search", async (req, res) => {
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
 
   // Trim query to avoid classification issues with trailing/leading whitespace
-  query = query ? query.trim() : query;
+  // Also normalize quote characters (Hebrew geresh ׳ → ASCII apostrophe ')
+  query = query ? normalizeQuoteCharacters(query.trim()) : query;
   
   // Default to legacy mode (array only) for backward compatibility
   // Only use modern format (with pagination) if explicitly requested
