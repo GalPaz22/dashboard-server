@@ -5310,7 +5310,25 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       softCategoryMatches: 0
     }));
 
-          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+    let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+
+    // CRITICAL FIX: Filter out fuzzy-only matches when true exact matches exist
+    // This prevents "סלמי" from appearing when searching for "סלרי" (celery)
+    // True exact matches have bonus >= 50000 (contains query, stemmed match, etc.)
+    // Fuzzy-only matches have bonus < 50000 (similarity-based matches only)
+    const EXACT_MATCH_FILTER_THRESHOLD = 50000;
+    const trueExactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_FILTER_THRESHOLD);
+
+    if (trueExactMatches.length > 0) {
+      const originalCount = highQualityTextMatches.length;
+      highQualityTextMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_FILTER_THRESHOLD);
+      const filteredOut = originalCount - highQualityTextMatches.length;
+
+      if (filteredOut > 0) {
+        console.log(`[${requestId}] 🎯 Phase 1 EXACT MATCH FILTER: Found ${trueExactMatches.length} true exact matches (bonus >= ${EXACT_MATCH_FILTER_THRESHOLD})`);
+        console.log(`[${requestId}] 🎯 Phase 1: Filtered out ${filteredOut} fuzzy-only matches`);
+      }
+    }
 
     // Sort by text match strength
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
