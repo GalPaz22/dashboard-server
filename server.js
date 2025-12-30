@@ -6417,11 +6417,27 @@ app.post("/search", async (req, res) => {
               // Continue with Step 2: Extract categories from high-quality text matches
             console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
 
+            // CRITICAL FIX: Prioritize EXACT matches for category extraction
+            // If there are true exact matches (bonus >= 50000), use ONLY those for filters
+            // This prevents fuzzy matches like "סלמי" from polluting "סלרי" search results
+            const EXACT_MATCH_THRESHOLD = 50000;
+            const exactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD);
+
+            // Use exact matches if available, otherwise fall back to all high-quality matches
+            const matchesForCategoryExtraction = exactMatches.length > 0 ? exactMatches : highQualityTextMatches;
+
+            if (exactMatches.length > 0) {
+              console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY: Found ${exactMatches.length} exact matches (bonus >= ${EXACT_MATCH_THRESHOLD}), using ONLY these for category extraction`);
+              exactMatches.slice(0, 5).forEach((m, i) => {
+                console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
+              });
+            }
+
             const extractedHardCategories = new Set();
             const extractedSoftCategories = new Set();
             const seedProducts = [];
 
-            highQualityTextMatches.forEach(product => {
+            matchesForCategoryExtraction.forEach(product => {
               // Collect top products for similarity search (seed embeddings)
               if (seedProducts.length < 2) {
                 seedProducts.push(product);
@@ -7112,15 +7128,28 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] Analyzing TOP 3 LLM-selected products for category extraction`);
       console.log(`[${requestId}] Top 3 product names:`, top3LLMProducts.map(p => p.name));
 
-      // Debug: Log all fields of first product to understand data structure
-      if (top3LLMProducts.length > 0) {
-        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(top3LLMProducts[0]));
-        console.log(`[${requestId}] DEBUG - Sample product type:`, top3LLMProducts[0].type);
-        console.log(`[${requestId}] DEBUG - Sample product description:`, top3LLMProducts[0].description?.substring(0, 100));
+      // CRITICAL FIX: Prioritize EXACT matches for category extraction (same as two-step search)
+      // If there are true exact matches among top 3, use ONLY those for filters
+      const EXACT_MATCH_THRESHOLD_LLM = 50000;
+      const exactMatchesLLM = top3LLMProducts.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD_LLM);
+      const productsForLLMCategoryExtraction = exactMatchesLLM.length > 0 ? exactMatchesLLM : top3LLMProducts;
+
+      if (exactMatchesLLM.length > 0) {
+        console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY (complex): Found ${exactMatchesLLM.length} exact matches among top 3, using ONLY these for category extraction`);
+        exactMatchesLLM.forEach((m, i) => {
+          console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
+        });
       }
 
-      // Extract both hard and soft categories from top 3 products only
-      const extractedFromLLM = extractCategoriesFromProducts(top3LLMProducts);
+      // Debug: Log all fields of first product to understand data structure
+      if (productsForLLMCategoryExtraction.length > 0) {
+        console.log(`[${requestId}] DEBUG - Sample product fields:`, Object.keys(productsForLLMCategoryExtraction[0]));
+        console.log(`[${requestId}] DEBUG - Sample product type:`, productsForLLMCategoryExtraction[0].type);
+        console.log(`[${requestId}] DEBUG - Sample product description:`, productsForLLMCategoryExtraction[0].description?.substring(0, 100));
+      }
+
+      // Extract both hard and soft categories from exact matches (or top 3 if no exact matches)
+      const extractedFromLLM = extractCategoriesFromProducts(productsForLLMCategoryExtraction);
       
       // 🆕 TIER 2 ENHANCEMENT: Extract product embeddings from high-quality textual matches
       // Find products with very high exactMatchBonus (exact/near-exact product name matches)
@@ -7220,7 +7249,20 @@ app.post("/search", async (req, res) => {
         console.log(`[${requestId}] Analyzing TOP 3 products for category extraction (simple query mode)`);
         console.log(`[${requestId}] Top 3 product names:`, top3Products.map(p => p.name));
 
-        const extractedFromTop3 = extractCategoriesFromProducts(top3Products);
+        // CRITICAL FIX: Prioritize EXACT matches for category extraction
+        // If there are true exact matches among top 3, use ONLY those for filters
+        const EXACT_MATCH_THRESHOLD_SIMPLE = 50000;
+        const exactMatchesSimple = top3Products.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD_SIMPLE);
+        const productsForSimpleCategoryExtraction = exactMatchesSimple.length > 0 ? exactMatchesSimple : top3Products;
+
+        if (exactMatchesSimple.length > 0) {
+          console.log(`[${requestId}] 🎯 EXACT MATCH PRIORITY (simple): Found ${exactMatchesSimple.length} exact matches among top 3, using ONLY these for category extraction`);
+          exactMatchesSimple.forEach((m, i) => {
+            console.log(`[${requestId}]   ${i + 1}. "${m.name}" (bonus: ${m.exactMatchBonus})`);
+          });
+        }
+
+        const extractedFromTop3 = extractCategoriesFromProducts(productsForSimpleCategoryExtraction);
 
         // Merge with initial query filters if present
         if (enhancedFilters) {
