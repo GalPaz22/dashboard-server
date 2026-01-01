@@ -2373,8 +2373,8 @@ async function getQueryEmbedding(cleanedText) {
   }, 604800);
 }
 
-async function extractFiltersFromQueryEnhanced(query, categories, types, softCategories, example, context) {
-  const cacheKey = generateCacheKey('filters', query, categories, types, softCategories, example, context);
+async function extractFiltersFromQueryEnhanced(query, categories, types, softCategories, example, context, customSystemInstruction = null) {
+  const cacheKey = generateCacheKey('filters', query, categories, types, softCategories, example, context, customSystemInstruction);
   
   return withCache(cacheKey, async () => {
   try {
@@ -2384,7 +2384,8 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
       return extractFiltersFallback(query, categories);
     }
     
-    const systemInstruction = `You are an expert at extracting structured data from e-commerce search queries. The user's context/domain is: ${context || 'online wine and alcohol shop'}.
+    // Use custom system instruction if provided, otherwise use default
+    const systemInstruction = customSystemInstruction || `You are an expert at extracting structured data from e-commerce search queries. The user's context/domain is: ${context || 'online wine and alcohol shop'}.
 
 DOMAIN KNOWLEDGE: You should use your knowledge of the domain specified in the context above. For example:
 - If working with wine/alcohol: wine brands, grape varieties, regions (Bordeaux, Tuscany, Mendoza, etc.), spirits types (Whisky, Vodka, Gin, etc.)
@@ -2439,6 +2440,11 @@ CRITICAL VALIDATION:
 
 Return the extracted filters in JSON format. Only extract values that exist in the provided lists.
 ${example}.`;
+
+    // If custom system instruction is provided, log it
+    if (customSystemInstruction) {
+      console.log(`[FILTER EXTRACTION] Using custom system instruction for query: "${query}"`);
+    }
 
     const response = await genAI.models.generateContent({
       model: "gemini-2.5-flash",
@@ -5274,7 +5280,9 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     let extractedFilters = {};
     if (enableSimpleCategoryExtraction && categories) {
       console.log(`[${requestId}] 🎯 enableSimpleCategoryExtraction is ON - extracting categories from query: "${query}"`);
-      extractedFilters = await extractFiltersFromQueryEnhanced(translatedQuery || query, categories, types, softCategories, false, context);
+      // Use custom system instruction from store config if available
+      const customSystemInstruction = req.store?.filterExtractionSystemInstruction || null;
+      extractedFilters = await extractFiltersFromQueryEnhanced(translatedQuery || query, categories, types, softCategories, false, context, customSystemInstruction);
 
       if (extractedFilters.category || extractedFilters.softCategory) {
         console.log(`[${requestId}] 🎯 SIMPLE QUERY CATEGORY EXTRACTION: category="${extractedFilters.category || 'none'}", softCategory="${extractedFilters.softCategory || 'none'}"`);
@@ -6017,7 +6025,9 @@ app.post("/search", async (req, res) => {
     if (categories) {
       if (isComplexQueryResult) {
         // Full extraction for complex queries
-        enhancedFilters = await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context);
+        // Use custom system instruction from store config if available
+        const customSystemInstruction = req.store?.filterExtractionSystemInstruction || null;
+        enhancedFilters = await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context, customSystemInstruction);
       } else if (isSimpleResult) {
         // Brief extraction for simple queries (as requested by user)
         console.log(`[${requestId}] ⚡ SIMPLE QUERY: Performing brief filter extraction`);
