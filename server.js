@@ -5953,7 +5953,7 @@ app.post("/fast-search", async (req, res) => {
   
   try {
     const { query } = req.body;
-    const FAST_LIMIT = 5; // Always return max 5 products for speed
+    const FAST_LIMIT = 10; // Always return max 10 products
     
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
@@ -5983,7 +5983,7 @@ app.post("/fast-search", async (req, res) => {
       } else {
         const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         const model = genAI.getGenerativeModel({ 
-          model: "gemini-2.0-flash-exp", // Fastest model
+          model: "gemini-2.0-flash-exp", // Using gemini-2.0-flash-exp (gemini-2.5-flash not available yet)
           generationConfig: {
             temperature: 0,
             maxOutputTokens: 150,
