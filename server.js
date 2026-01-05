@@ -1270,23 +1270,15 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     }
 
     // Soft category filtering logic
+    // NOTE: Soft categories are used for BOOSTING in scoring, not as hard filters
+    // This ensures text search returns relevant products regardless of soft category
     if (softFilters && softFilters.softCategory) {
       const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
       
       if (!invertSoftFilter) {
-        // FOR SOFT-CATEGORY SEARCH: Require products to have AT LEAST ONE of the soft categories
-        console.log(`[SOFT FILTER] Adding MUST-HAVE soft category filter: ${softCats.join(', ')}`);
-        filterClauses.push({
-          compound: {
-            should: softCats.map(sc => ({
-              text: {
-                query: sc,
-                path: "softCategory"
-              }
-            })),
-            minimumShouldMatch: 1
-          }
-        });
+        // FOR SOFT-CATEGORY SEARCH: Don't filter, just log - boosting happens in post-processing
+        console.log(`[SOFT FILTER] ℹ️ Soft categories for boosting (not filtering): ${softCats.join(', ')}`);
+        // No filter added - products will be boosted in scoring phase based on softCategory match
       } else {
         // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
         console.log(`[SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
@@ -1546,14 +1538,16 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
   }
 
   // Soft category filtering for vector search
-  // NOTE: Atlas Vector Search filters use MongoDB query syntax, NOT the text search syntax
+  // NOTE: Soft categories are used for BOOSTING, not as hard filters
+  // This ensures vector search returns semantically similar products regardless of soft category
+  // The soft category matching will be applied as a boost in the scoring phase
   if (softFilters && softFilters.softCategory) {
     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
     
     if (!invertSoftFilter) {
-      // FOR SOFT-CATEGORY SEARCH: Require products to have AT LEAST ONE of the soft categories
-      console.log(`[VECTOR SOFT FILTER] Adding MUST-HAVE soft category filter: ${softCats.join(', ')}`);
-      conditions.push({ softCategory: { $in: softCats } });
+      // FOR SOFT-CATEGORY SEARCH: Don't filter, just log - boosting happens in post-processing
+      console.log(`[VECTOR SOFT FILTER] ℹ️ Soft categories for boosting (not filtering): ${softCats.join(', ')}`);
+      // No filter added - products will be boosted in scoring phase based on softCategory match
     } else {
       // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
       console.log(`[VECTOR SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
