@@ -1552,13 +1552,10 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
         // No filter added - products will be boosted in scoring phase based on softCategory match
       } else {
         // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
+        // SIMPLIFIED: Only use $nin - Atlas Vector Search doesn't support $size in filters
         console.log(`[VECTOR SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
         conditions.push({
-          $or: [
-            { softCategory: { $exists: false } },
-            { softCategory: { $size: 0 } },
-            { softCategory: { $nin: softCats } }
-          ]
+          softCategory: { $nin: softCats }
         });
       }
     }
