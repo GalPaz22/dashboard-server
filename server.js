@@ -3519,14 +3519,11 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     const response = await genAI.models.generateContent({
-      model: "gemini-2.5-flash",
+      model: "gemini-3.0-flash-lite",
       contents: userContent,
       config: { 
         systemInstruction, 
         temperature: 0.1,
-        thinkingConfig: {
-          thinkingBudget: 0,
-        },
         responseMimeType: "application/json",
         responseSchema: responseSchema,
       },
@@ -5968,9 +5965,9 @@ app.post("/search", async (req, res) => {
   // Use limit from user config (via API key), fallback to 5 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
-  const vectorLimit = searchLimit; // Keep them the same for balanced RRF
+  const vectorLimit = searchLimit * 3; // INCREASED: 3x for stronger semantic search
   
-  console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (from user config: ${userLimit || 'default'})`);
+  console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (INCREASED for semantic power) (from user config: ${userLimit || 'default'})`);
   
   const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט,ספרדי,איטלקי,צרפתי,פורטוגלי,ארגנטיני,צ'ילה,דרום אפריקה,אוסטרליה";
   const finalSoftCategories = softCategories || defaultSoftCategories;
@@ -7275,30 +7272,36 @@ app.post("/search", async (req, res) => {
           // Build hard filters with extracted category
           const categoryFilteredHardFilters = { ...hardFilters, category: topProductCategories };
           
-          // Run new vector search with category filter
+          // Run new vector search with category filter - INCREASED LIMIT for more semantic results
           const categoryFilteredVectorResults = await collection.aggregate(
             buildStandardVectorSearchPipeline(
               queryEmbedding,
               categoryFilteredHardFilters,
-              50, // Get more results for remaining slots
+              100, // INCREASED: Get many more semantically similar results
               useOrLogic,
               Array.from(reorderedProductIds) // Exclude already selected products
             )
           ).toArray();
           
-          console.log(`[${requestId}] 🔄 Category-filtered vector search returned ${categoryFilteredVectorResults.length} results`);
+          console.log(`[${requestId}] 🔄 Category-filtered vector search returned ${categoryFilteredVectorResults.length} results (limit: 100)`);
           
-          // Convert to combinedResults format with scoring
+          // Convert to combinedResults format with STRONG vector scoring
           remainingResults = categoryFilteredVectorResults.map((doc, index) => {
             const exactMatchBonus = getExactMatchBonus(doc.name, query, cleanedText);
             const matchResult = calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, req.store.softCategoriesBoost);
             
+            // ENHANCED: Give strong weight to vector rank (low index = high similarity)
+            // Vector rank is PRIORITIZED over exact match for semantic searches
+            const vectorBoost = 10000 / (index + 1); // Top result gets 10000, 2nd gets 5000, etc.
+            
             return {
               ...doc,
-              rrf_score: calculateEnhancedRRFScore(Infinity, index, 0, 0, exactMatchBonus, matchResult.weightedScore),
+              rrf_score: calculateEnhancedRRFScore(Infinity, index, 0, 0, exactMatchBonus, matchResult.weightedScore) + vectorBoost,
               softFilterMatch: matchResult.count > 0,
               softCategoryMatches: matchResult.count,
-              exactMatchBonus: exactMatchBonus
+              exactMatchBonus: exactMatchBonus,
+              vectorRank: index, // Store for debugging
+              vectorBoost: vectorBoost // Store for debugging
             };
           });
         } else {
