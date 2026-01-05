@@ -6087,7 +6087,7 @@ app.post("/fast-search", async (req, res) => {
         [], // deliveredIds
         req.store.softCategoriesBoost || null,
         false, // skipTextualSearch
-        true   // enforceSoftCategoryFilter - ENFORCE for better quality
+        false  // enforceSoftCategoryFilter - use boost instead, enforce can return empty
       );
 
       // Add soft category match info for LLM reordering
@@ -6189,7 +6189,9 @@ app.post("/fast-search", async (req, res) => {
           model: "gemini-2.5-flash",
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 200,
+            thinkingConfig: {
+              thinkingBudget: 0,
+            },
           }
         });
 
