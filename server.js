@@ -840,13 +840,14 @@ function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewT
   // Check if this is primarily a filter-based query (high filter coverage)
   const isPrimarilyFilterBased = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
 
-  // Allow filter-only path even with soft filters if the query is primarily filter-based
-  if (hasSoftFilters && !isPrimarilyFilterBased) {
-    console.log("[FILTER-ONLY] Soft filters with text content detected - using full search with soft category boosting");
+  // IMPORTANT: If soft filters exist, NEVER use filter-only path
+  // Soft filters indicate we need two-step search with Tier 2 category expansion
+  if (hasSoftFilters) {
+    console.log("[FILTER-ONLY] Soft filters detected - skipping filter-only to enable two-step search with Tier 2 expansion");
     return false;
   }
 
-  // If it's primarily filter-based (whether with soft filters or not), use fast filter-only path
+  // If it's primarily filter-based (hard filters only, no soft filters), use fast filter-only path
   if (isPrimarilyFilterBased) {
     console.log("[FILTER-ONLY] Primarily filter-based query detected - using ultra-fast filter-only pipeline");
     return true;
