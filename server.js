@@ -1269,15 +1269,27 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
       }
     }
 
-    // IMPORTANT: Soft categories should NOT be used as filters here
-    // They are handled separately by executeExplicitSoftCategorySearch
-    // which runs TWO searches (with and without soft categories) and merges them
-    // This ensures products without the soft category are still included (just ranked lower)
-    
-    // Note: invertSoftFilter logic is kept for the NON-soft-category search
-    if (softFilters && softFilters.softCategory && invertSoftFilter) {
+    // Soft category filtering logic
+    if (softFilters && softFilters.softCategory) {
       const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-        // For non-soft-category filtering: exclude documents with these soft categories
+      
+      if (!invertSoftFilter) {
+        // FOR SOFT-CATEGORY SEARCH: Require products to have AT LEAST ONE of the soft categories
+        console.log(`[SOFT FILTER] Adding MUST-HAVE soft category filter: ${softCats.join(', ')}`);
+        filterClauses.push({
+          compound: {
+            should: softCats.map(sc => ({
+              text: {
+                query: sc,
+                path: "softCategory"
+              }
+            })),
+            minimumShouldMatch: 1
+          }
+        });
+      } else {
+        // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
+        console.log(`[SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
         filterClauses.push({
           compound: {
             should: [
@@ -1302,6 +1314,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
             minimumShouldMatch: 1
           }
         });
+      }
     }
 
     console.log(`[TEXT SEARCH] Building compound search with ${filterClauses.length} filter clauses and text queries for: name, description, category, softCategory`);
@@ -1532,13 +1545,27 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     conditions.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
   }
 
-  // IMPORTANT: Soft categories should NOT be used as filters here
-  // They are handled separately by executeExplicitSoftCategorySearch
-  // which runs TWO searches (with and without soft categories) and merges them
-  // This ensures products without the soft category are still included (just ranked lower)
-  
-  // Note: We don't add soft category filters at all - not even for invertSoftFilter
-  // The separate WITH/WITHOUT searches handle the filtering logic
+  // Soft category filtering for vector search
+  // NOTE: Atlas Vector Search filters use MongoDB query syntax, NOT the text search syntax
+  if (softFilters && softFilters.softCategory) {
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    
+    if (!invertSoftFilter) {
+      // FOR SOFT-CATEGORY SEARCH: Require products to have AT LEAST ONE of the soft categories
+      console.log(`[VECTOR SOFT FILTER] Adding MUST-HAVE soft category filter: ${softCats.join(', ')}`);
+      conditions.push({ softCategory: { $in: softCats } });
+    } else {
+      // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
+      console.log(`[VECTOR SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
+      conditions.push({
+        $or: [
+          { softCategory: { $exists: false } },
+          { softCategory: { $size: 0 } },
+          { softCategory: { $nin: softCats } }
+        ]
+      });
+    }
+  }
 
   // Build final filter - use $and only if multiple conditions
   let filter;
