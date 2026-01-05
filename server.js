@@ -5953,7 +5953,7 @@ app.post("/fast-search", async (req, res) => {
   
   try {
     const { query } = req.body;
-    const FAST_LIMIT = 10; // Always return max 10 products
+    const FAST_LIMIT = 5; // Always return max 5 products for speed
     
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
@@ -5971,7 +5971,7 @@ app.post("/fast-search", async (req, res) => {
 
     // Step 1: Quick filter extraction with gemini-2.0-flash-exp (fastest model)
     const filterExtractionStart = Date.now();
-    let extractedFilters = {};
+    let extractedFilters = { category: null, softCategory: [] };
     
     try {
       const cacheKey = `fast-filters:${crypto.createHash('md5').update(query).digest('hex')}`;
@@ -5986,26 +5986,39 @@ app.post("/fast-search", async (req, res) => {
           model: "gemini-2.0-flash-exp", // Fastest model
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 100, // Minimal output
+            maxOutputTokens: 150,
           }
         });
 
-        const prompt = `Extract filters from: "${query}"
-Return JSON only: {"category":"","softCategory":[]}
-Categories: יין אדום, יין לבן, בירה, וויסקי, ג'ין, וודקה, ורמוט, ליקר, רום, טקילה, קוניאק, ברנדי, שמפניה, קאווה, פרוסקו
-Keep it minimal. If no category, return empty string.`;
+        const prompt = `מהשאילתה "${query}" - חלץ:
+1. קטגוריה (אחת בלבד): יין אדום, יין לבן, בירה, וויסקי, ג'ין, וודקה, ורמוט, ליקר, רום, טקילה, קוניאק, ברנדי, שמפניה, קאווה, פרוסקו
+2. מאפיינים (עד 3): ארץ, אזור, סגנון, טעם, מאפיין
+
+החזר JSON בלבד:
+{"category":"קטגוריה או null","softCategory":["מאפיין1","מאפיין2"]}
+
+דוגמאות:
+"יין לבן ישראלי" → {"category":"יין לבן","softCategory":["ישראל"]}
+"וויסקי סקוטי" → {"category":"וויסקי","softCategory":["סקוטלנד"]}
+"בירה" → {"category":"בירה","softCategory":[]}`;
 
         const result = await model.generateContent(prompt);
         const text = result.response.text().trim();
+        console.log(`[${requestId}] LLM response:`, text);
+        
         const jsonMatch = text.match(/\{[\s\S]*\}/);
         
         if (jsonMatch) {
-          extractedFilters = JSON.parse(jsonMatch[0]);
+          const parsed = JSON.parse(jsonMatch[0]);
+          extractedFilters = {
+            category: parsed.category === "null" || !parsed.category ? null : parsed.category,
+            softCategory: Array.isArray(parsed.softCategory) ? parsed.softCategory.filter(Boolean) : []
+          };
           await setCachedValue(cacheKey, extractedFilters, 3600); // Cache 1 hour
         }
       }
     } catch (error) {
-      console.log(`[${requestId}] ⚠️ Filter extraction failed, continuing without filters`);
+      console.log(`[${requestId}] ⚠️ Filter extraction error:`, error.message);
     }
 
     console.log(`[${requestId}] Filters extracted in ${Date.now() - filterExtractionStart}ms:`, extractedFilters);
@@ -6023,60 +6036,89 @@ Keep it minimal. If no category, return empty string.`;
     cleanFilters(hardFilters);
     cleanFilters(softFilters);
 
-    // Step 3: Fast text + vector search (parallel)
+    const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
+
+    // Step 3: Fast search with soft category support
     const searchStart = Date.now();
     const cleanedText = query.trim();
     
     // Get embedding
     const queryEmbedding = await getQueryEmbedding(cleanedText);
     
-    // Run text and vector search in parallel
-    const [textResults, vectorResults] = await Promise.all([
-      collection.aggregate(buildStandardSearchPipeline(
-        cleanedText, query, hardFilters, FAST_LIMIT, false, false
-      )).toArray(),
-      queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
-        queryEmbedding, hardFilters, FAST_LIMIT, false
-      )).toArray() : Promise.resolve([])
-    ]);
+    let combinedResults = [];
 
-    console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms: ${textResults.length} text, ${vectorResults.length} vector`);
+    if (hasSoftFilters && queryEmbedding) {
+      // Use soft category search for better results
+      console.log(`[${requestId}] Using soft category search with filters:`, softFilters.softCategory);
+      
+      const results = await executeExplicitSoftCategorySearch(
+        collection,
+        cleanedText,
+        query,
+        hardFilters,
+        softFilters,
+        queryEmbedding,
+        FAST_LIMIT * 2, // Get more for better selection
+        FAST_LIMIT * 2,
+        false, // useOrLogic
+        false, // isImageMode
+        cleanedText,
+        [], // deliveredIds
+        req.store.softCategoriesBoost || null,
+        false, // skipTextualSearch
+        false  // enforceSoftCategoryFilter
+      );
 
-    // Step 4: Merge with RRF scoring
-    const documentRanks = new Map();
-    textResults.forEach((doc, index) => {
-      documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
-    });
-    
-    vectorResults.forEach((doc, index) => {
-      const id = doc._id.toString();
-      const existing = documentRanks.get(id);
-      if (existing) {
-        existing.vectorRank = index;
-      } else {
-        documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
-      }
-    });
+      combinedResults = results.slice(0, FAST_LIMIT);
+    } else {
+      // Standard text + vector search (parallel)
+      const [textResults, vectorResults] = await Promise.all([
+        collection.aggregate(buildStandardSearchPipeline(
+          cleanedText, query, hardFilters, FAST_LIMIT * 2, false, false
+        )).toArray(),
+        queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
+          queryEmbedding, hardFilters, FAST_LIMIT * 2, false
+        )).toArray() : Promise.resolve([])
+      ]);
 
-    // Calculate scores
-    let combinedResults = Array.from(documentRanks.values())
-      .map(data => {
-        const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
-        return {
-          ...data.doc,
-          rrf_score: calculateEnhancedRRFScore(
-            data.fuzzyRank, 
-            data.vectorRank, 
-            0, 
-            0, 
-            exactMatchBonus,
-            0
-          ),
-          exactMatchBonus: exactMatchBonus
-        };
-      })
-      .sort((a, b) => b.rrf_score - a.rrf_score)
-      .slice(0, FAST_LIMIT);
+      // Merge with RRF scoring
+      const documentRanks = new Map();
+      textResults.forEach((doc, index) => {
+        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+      });
+      
+      vectorResults.forEach((doc, index) => {
+        const id = doc._id.toString();
+        const existing = documentRanks.get(id);
+        if (existing) {
+          existing.vectorRank = index;
+        } else {
+          documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+        }
+      });
+
+      // Calculate scores
+      combinedResults = Array.from(documentRanks.values())
+        .map(data => {
+          const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
+          return {
+            ...data.doc,
+            rrf_score: calculateEnhancedRRFScore(
+              data.fuzzyRank, 
+              data.vectorRank, 
+              0, 
+              0, 
+              exactMatchBonus,
+              0
+            ),
+            exactMatchBonus: exactMatchBonus
+          };
+        })
+        .sort((a, b) => b.rrf_score - a.rrf_score)
+        .slice(0, FAST_LIMIT);
+    }
+
+    console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms - ${combinedResults.length} results`);
 
     // Step 5: Format response
     const products = combinedResults.map(r => ({
