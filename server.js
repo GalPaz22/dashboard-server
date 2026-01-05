@@ -3923,7 +3923,8 @@ async function executeExplicitSoftCategorySearch(
   isImageModeWithSoftCategories = false,
   originalCleanedText = null,
   deliveredIds = [],
-  boostScores = null
+  boostScores = null,
+  skipTextualSearch = false // NEW: Skip fuzzy text matching (but keep vector search)
 ) {
   console.log("Executing explicit soft category search");
   
@@ -3981,13 +3982,23 @@ async function executeExplicitSoftCategorySearch(
   
   console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
   
-  // Phase 1: Get products WITH soft categories
-  const softCategoryPromises = [
-    collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
-      cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
-    )).toArray()
-  ];
+  if (skipTextualSearch) {
+    console.log(`[SOFT SEARCH] ⚠️ SKIPPING textual fuzzy search (complex query mode - vectors & soft categories only)`);
+  }
   
+  // Phase 1: Get products WITH soft categories
+  const softCategoryPromises = [];
+  
+  // Add text search only if NOT skipping
+  if (!skipTextualSearch) {
+    softCategoryPromises.push(
+      collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
+        cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+      )).toArray()
+    );
+  }
+  
+  // Always add vector search if embedding is available
   if (queryEmbedding) {
     softCategoryPromises.push(
       collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
@@ -3996,24 +4007,44 @@ async function executeExplicitSoftCategorySearch(
     );
   }
   
-  const [softCategoryFuzzyResults, softCategoryVectorResults = []] = await Promise.all(softCategoryPromises);
+  // Handle results based on what searches were run
+  let softCategoryFuzzyResults = [];
+  let softCategoryVectorResults = [];
   
-  // Phase 2: Get products WITHOUT soft categories
-  const nonSoftCategoryPromises = [
-    collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
-      cleanedTextForSearch, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
-    )).toArray()
-  ];
-  
-  if (queryEmbedding) {
-    nonSoftCategoryPromises.push(
-      collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
-      )).toArray()
-    );
+  if (skipTextualSearch && queryEmbedding) {
+    // Only vector search was run
+    [softCategoryVectorResults] = await Promise.all(softCategoryPromises);
+  } else if (!skipTextualSearch && queryEmbedding) {
+    // Both text and vector searches were run
+    [softCategoryFuzzyResults, softCategoryVectorResults] = await Promise.all(softCategoryPromises);
+  } else if (!skipTextualSearch && !queryEmbedding) {
+    // Only text search was run
+    [softCategoryFuzzyResults] = await Promise.all(softCategoryPromises);
   }
   
-  const [nonSoftCategoryFuzzyResults, nonSoftCategoryVectorResults = []] = await Promise.all(nonSoftCategoryPromises);
+  // Phase 2: Get products WITHOUT soft categories (ALWAYS SKIP for complex queries with skipTextualSearch)
+  let nonSoftCategoryFuzzyResults = [];
+  let nonSoftCategoryVectorResults = [];
+  
+  if (skipTextualSearch) {
+    console.log(`[SOFT SEARCH] ⚠️ SKIPPING non-soft-category search entirely (complex query mode)`);
+  } else {
+    const nonSoftCategoryPromises = [
+      collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
+        cleanedTextForSearch, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+      )).toArray()
+    ];
+    
+    if (queryEmbedding) {
+      nonSoftCategoryPromises.push(
+        collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
+          queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
+        )).toArray()
+      );
+    }
+    
+    [nonSoftCategoryFuzzyResults, nonSoftCategoryVectorResults = []] = await Promise.all(nonSoftCategoryPromises);
+  }
   
   const softCategoryDocumentRanks = new Map();
   softCategoryFuzzyResults.forEach((doc, index) => {
@@ -4867,7 +4898,8 @@ app.get("/search/load-more", async (req, res) => {
             false,
             cleanedText,
             [],
-            req.store.softCategoriesBoost
+            req.store.softCategoriesBoost,
+            true // skipTextualSearch = true for complex query tier-2
           );
 
           // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
@@ -5135,7 +5167,8 @@ app.get("/search/load-more", async (req, res) => {
             syncMode === 'image',
             cleanedText,
             [], // No exclusion since we're loading more
-            req.store.softCategoriesBoost
+            req.store.softCategoriesBoost,
+            true // skipTextualSearch = true for complex query tier-2 load-more
           );
 
           // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
@@ -6487,7 +6520,8 @@ app.post("/search", async (req, res) => {
           isImageModeWithSoftCategories,
           cleanedText,
           [],
-          req.store.softCategoriesBoost
+          req.store.softCategoriesBoost,
+          true // skipTextualSearch = true for complex queries (use only vectors + soft categories)
         );
           
       } else {
