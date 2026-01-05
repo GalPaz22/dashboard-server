@@ -1542,22 +1542,25 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
   // This ensures vector search returns semantically similar products regardless of soft category
   // The soft category matching will be applied as a boost in the scoring phase
   if (softFilters && softFilters.softCategory) {
-    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
+    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory.filter(Boolean) : [softFilters.softCategory].filter(Boolean);
     
-    if (!invertSoftFilter) {
-      // FOR SOFT-CATEGORY SEARCH: Don't filter, just log - boosting happens in post-processing
-      console.log(`[VECTOR SOFT FILTER] ℹ️ Soft categories for boosting (not filtering): ${softCats.join(', ')}`);
-      // No filter added - products will be boosted in scoring phase based on softCategory match
-    } else {
-      // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
-      console.log(`[VECTOR SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
-      conditions.push({
-        $or: [
-          { softCategory: { $exists: false } },
-          { softCategory: { $size: 0 } },
-          { softCategory: { $nin: softCats } }
-        ]
-      });
+    // Only process if we have valid soft categories
+    if (softCats.length > 0) {
+      if (!invertSoftFilter) {
+        // FOR SOFT-CATEGORY SEARCH: Don't filter, just log - boosting happens in post-processing
+        console.log(`[VECTOR SOFT FILTER] ℹ️ Soft categories for boosting (not filtering): ${softCats.join(', ')}`);
+        // No filter added - products will be boosted in scoring phase based on softCategory match
+      } else {
+        // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
+        console.log(`[VECTOR SOFT FILTER] Adding EXCLUSION soft category filter: ${softCats.join(', ')}`);
+        conditions.push({
+          $or: [
+            { softCategory: { $exists: false } },
+            { softCategory: { $size: 0 } },
+            { softCategory: { $nin: softCats } }
+          ]
+        });
+      }
     }
   }
 
