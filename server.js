@@ -7256,16 +7256,23 @@ app.post("/search", async (req, res) => {
       
       console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${reorderedIds.length} LLM-selected = ${remainingResults.length} remaining`);
       
-      // CRITICAL: Filter remaining results by LLM-extracted hard categories
-      // This ensures that vector search results from other categories (e.g., beer when searching for whisky brand)
-      // are filtered out to match the category of the LLM-selected top results
-      if (extractedFromLLM && extractedFromLLM.hardCategories && extractedFromLLM.hardCategories.length > 0) {
-        const beforeCategoryFilter = remainingResults.length;
-        remainingResults = remainingResults.filter(r => {
-          const productCategories = Array.isArray(r.category) ? r.category : (r.category ? [r.category] : []);
-          return extractedFromLLM.hardCategories.some(cat => productCategories.includes(cat));
+      // CRITICAL: Filter remaining results by categories from LLM-selected products
+      // Extract categories from the top LLM-selected products to filter out irrelevant categories
+      if (orderedProducts.length > 0) {
+        const topProductCategories = new Set();
+        orderedProducts.slice(0, 3).forEach(product => {
+          const categories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
+          categories.forEach(cat => topProductCategories.add(cat));
         });
-        console.log(`[${requestId}] 🔍 Category filtering: ${beforeCategoryFilter} results -> ${remainingResults.length} after filtering by [${extractedFromLLM.hardCategories.join(', ')}]`);
+        
+        if (topProductCategories.size > 0) {
+          const beforeCategoryFilter = remainingResults.length;
+          remainingResults = remainingResults.filter(r => {
+            const productCategories = Array.isArray(r.category) ? r.category : (r.category ? [r.category] : []);
+            return productCategories.some(cat => topProductCategories.has(cat));
+          });
+          console.log(`[${requestId}] 🔍 Category filtering: ${beforeCategoryFilter} results -> ${remainingResults.length} after filtering by [${Array.from(topProductCategories).join(', ')}]`);
+        }
       }
 
       // Construct finalResults and deduplicate
