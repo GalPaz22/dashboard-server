@@ -6979,28 +6979,35 @@ app.post("/search", async (req, res) => {
               }
 
               if (categoryFilteredResults && categoryFilteredResults.length > 0) {
-                console.log(`[${requestId}] ✅ Category-filtered search completed: ${categoryFilteredResults.length} results`);
+                console.log(`[${requestId}] ✅ Category-filtered search completed: ${categoryFilteredResults.length} Tier 2 results`);
 
-                // Preserve original text match bonuses and mark for tier separation
-                const textMatchMap = new Map();
-                highQualityTextMatches.forEach(match => {
-                  textMatchMap.set(match._id.toString(), {
-                    originalBonus: match.exactMatchBonus,
-                    isTextMatch: true
-                  });
-                });
-
-                const finalResults = categoryFilteredResults.map(p => {
-                  const textMatchInfo = textMatchMap.get(p._id.toString());
-                  return {
+                // MERGE Tier 1 (text matches) with Tier 2 (category-filtered results)
+                // Tier 1: High-quality text matches (already calculated)
+                // Tier 2: Category-filtered results (semantic similarity)
+                
+                // Create a map of text match IDs for deduplication
+                const textMatchIds = new Set(highQualityTextMatches.map(m => m._id.toString()));
+                
+                // Mark text matches as Tier 1
+                const tier1Results = highQualityTextMatches.map(m => ({
+                  ...m,
+                  highTextMatch: true, // Mark as Tier 1
+                  softCategoryExpansion: false // NOT a Tier 2 result
+                }));
+                
+                // Filter category results to exclude text matches (avoid duplicates), mark as Tier 2
+                const tier2Results = categoryFilteredResults
+                  .filter(p => !textMatchIds.has(p._id.toString()))
+                  .map(p => ({
                     ...p,
-                    exactMatchBonus: textMatchInfo ? Math.max(p.exactMatchBonus || 0, textMatchInfo.originalBonus) : p.exactMatchBonus,
-                    highTextMatch: !!textMatchInfo // Mark original text matches as Tier 1
-                  };
-                });
+                    highTextMatch: false, // NOT a Tier 1 result
+                    softCategoryExpansion: true // Mark as Tier 2
+                  }));
+                
+                console.log(`[${requestId}] 🎯 MERGED TIERS: ${tier1Results.length} text matches (Tier 1) + ${tier2Results.length} category expansion (Tier 2) = ${tier1Results.length + tier2Results.length} total`);
 
-                // Replace combinedResults with category-filtered results
-                combinedResults = finalResults;
+                // Combine: Tier 1 first, then Tier 2
+                combinedResults = [...tier1Results, ...tier2Results];
 
                 // Update hasSoftFilters for sorting logic later
                 if (combinedSoftCategories.length > 0) {
