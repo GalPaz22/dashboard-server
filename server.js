@@ -7252,9 +7252,21 @@ app.post("/search", async (req, res) => {
       const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
       console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
       const reorderedProductIds = new Set(reorderedIds.map(id => id.toString()));
-      const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
+      let remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
       
       console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${reorderedIds.length} LLM-selected = ${remainingResults.length} remaining`);
+      
+      // CRITICAL: Filter remaining results by LLM-extracted hard categories
+      // This ensures that vector search results from other categories (e.g., beer when searching for whisky brand)
+      // are filtered out to match the category of the LLM-selected top results
+      if (extractedFromLLM && extractedFromLLM.hardCategories && extractedFromLLM.hardCategories.length > 0) {
+        const beforeCategoryFilter = remainingResults.length;
+        remainingResults = remainingResults.filter(r => {
+          const productCategories = Array.isArray(r.category) ? r.category : (r.category ? [r.category] : []);
+          return extractedFromLLM.hardCategories.some(cat => productCategories.includes(cat));
+        });
+        console.log(`[${requestId}] 🔍 Category filtering: ${beforeCategoryFilter} results -> ${remainingResults.length} after filtering by [${extractedFromLLM.hardCategories.join(', ')}]`);
+      }
 
       // Construct finalResults and deduplicate
       const complexFinalResults = [
