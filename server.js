@@ -7251,8 +7251,10 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] reorderedIds length: ${reorderedIds.length}, sample:`, reorderedIds.slice(0, 3));
       const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
       console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
-      const reorderedProductIds = new Set(reorderedIds);
+      const reorderedProductIds = new Set(reorderedIds.map(id => id.toString()));
       const remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
+      
+      console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${reorderedIds.length} LLM-selected = ${remainingResults.length} remaining`);
 
       // Construct finalResults and deduplicate
       const complexFinalResults = [
