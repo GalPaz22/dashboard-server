@@ -5943,6 +5943,182 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     res.status(500).json({ error: "Category-filtered search failed" });
   }
 }
+
+// ============================================================================
+// FAST SEARCH ENDPOINT - Optimized for speed (~10 products, <500ms response)
+// ============================================================================
+app.post("/fast-search", async (req, res) => {
+  const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
+  const searchStartTime = Date.now();
+  
+  try {
+    const { query } = req.body;
+    const FAST_LIMIT = 10; // Always return max 10 products
+    
+    if (!query || query.trim() === "") {
+      return res.status(400).json({ error: "Query is required" });
+    }
+
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}"`);
+
+    // Get store config
+    const dbName = req.store?.dbName || "wines";
+    const collectionName = req.store?.collectionName || "products";
+    
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Step 1: Quick filter extraction with gemini-2.0-flash-exp (fastest model)
+    const filterExtractionStart = Date.now();
+    let extractedFilters = {};
+    
+    try {
+      const cacheKey = `fast-filters:${crypto.createHash('md5').update(query).digest('hex')}`;
+      const cached = await getCachedValue(cacheKey);
+      
+      if (cached) {
+        extractedFilters = cached;
+        console.log(`[${requestId}] ⚡ Cache hit for filters`);
+      } else {
+        const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = genAI.getGenerativeModel({ 
+          model: "gemini-2.0-flash-exp", // Fastest model
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 100, // Minimal output
+          }
+        });
+
+        const prompt = `Extract filters from: "${query}"
+Return JSON only: {"category":"","softCategory":[]}
+Categories: יין אדום, יין לבן, בירה, וויסקי, ג'ין, וודקה, ורמוט, ליקר, רום, טקילה, קוניאק, ברנדי, שמפניה, קאווה, פרוסקו
+Keep it minimal. If no category, return empty string.`;
+
+        const result = await model.generateContent(prompt);
+        const text = result.response.text().trim();
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        
+        if (jsonMatch) {
+          extractedFilters = JSON.parse(jsonMatch[0]);
+          await setCachedValue(cacheKey, extractedFilters, 3600); // Cache 1 hour
+        }
+      }
+    } catch (error) {
+      console.log(`[${requestId}] ⚠️ Filter extraction failed, continuing without filters`);
+    }
+
+    console.log(`[${requestId}] Filters extracted in ${Date.now() - filterExtractionStart}ms:`, extractedFilters);
+
+    // Step 2: Build filters
+    const hardFilters = {};
+    if (extractedFilters.category) {
+      hardFilters.category = extractedFilters.category;
+    }
+    const softFilters = {};
+    if (extractedFilters.softCategory && extractedFilters.softCategory.length > 0) {
+      softFilters.softCategory = extractedFilters.softCategory;
+    }
+
+    cleanFilters(hardFilters);
+    cleanFilters(softFilters);
+
+    // Step 3: Fast text + vector search (parallel)
+    const searchStart = Date.now();
+    const cleanedText = query.trim();
+    
+    // Get embedding
+    const queryEmbedding = await getQueryEmbedding(cleanedText);
+    
+    // Run text and vector search in parallel
+    const [textResults, vectorResults] = await Promise.all([
+      collection.aggregate(buildStandardSearchPipeline(
+        cleanedText, query, hardFilters, FAST_LIMIT, false, false
+      )).toArray(),
+      queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
+        queryEmbedding, hardFilters, FAST_LIMIT, false
+      )).toArray() : Promise.resolve([])
+    ]);
+
+    console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms: ${textResults.length} text, ${vectorResults.length} vector`);
+
+    // Step 4: Merge with RRF scoring
+    const documentRanks = new Map();
+    textResults.forEach((doc, index) => {
+      documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+    });
+    
+    vectorResults.forEach((doc, index) => {
+      const id = doc._id.toString();
+      const existing = documentRanks.get(id);
+      if (existing) {
+        existing.vectorRank = index;
+      } else {
+        documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+      }
+    });
+
+    // Calculate scores
+    let combinedResults = Array.from(documentRanks.values())
+      .map(data => {
+        const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
+        return {
+          ...data.doc,
+          rrf_score: calculateEnhancedRRFScore(
+            data.fuzzyRank, 
+            data.vectorRank, 
+            0, 
+            0, 
+            exactMatchBonus,
+            0
+          ),
+          exactMatchBonus: exactMatchBonus
+        };
+      })
+      .sort((a, b) => b.rrf_score - a.rrf_score)
+      .slice(0, FAST_LIMIT);
+
+    // Step 5: Format response
+    const products = combinedResults.map(r => ({
+      _id: r._id.toString(),
+      id: r.id,
+      name: r.name,
+      description: r.description,
+      price: r.price,
+      image: r.image,
+      url: r.url,
+      highlight: (r.exactMatchBonus || 0) >= 20000,
+      type: r.type,
+      category: r.category,
+      softCategory: r.softCategory,
+      specialSales: r.specialSales,
+      onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
+      ItemID: r.ItemID
+    }));
+
+    const executionTime = Date.now() - searchStartTime;
+    console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products`);
+
+    res.json({
+      products,
+      metadata: {
+        query,
+        requestId,
+        executionTime,
+        isFastSearch: true,
+        filters: { ...hardFilters, ...softFilters }
+      }
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] ⚡ Fast search error:`, error);
+    res.status(500).json({ 
+      error: "Fast search failed",
+      message: error.message 
+    });
+  }
+});
+
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
