@@ -5983,10 +5983,10 @@ app.post("/fast-search", async (req, res) => {
       } else {
         const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
         const model = genAI.getGenerativeModel({ 
-          model: "gemini-2.0-flash-exp", // Using gemini-2.0-flash-exp (gemini-2.5-flash not available yet)
+          model: "gemini-2.5-flash", // Using gemini-2.0-flash-exp (gemini-2.5-flash not available yet)
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 150,
+          
           }
         });
 
@@ -6120,8 +6120,80 @@ app.post("/fast-search", async (req, res) => {
 
     console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms - ${combinedResults.length} results`);
 
+    // Step 4: Fast LLM reordering (optimized for speed)
+    const reorderStart = Date.now();
+    let finalResults = combinedResults;
+    
+    if (combinedResults.length > 0) {
+      try {
+        const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+        const model = genAI.getGenerativeModel({ 
+          model: "gemini-2.5-flash",
+          generationConfig: {
+            temperature: 0,
+            maxOutputTokens: 100, // Minimal output for speed
+          }
+        });
+
+        // Create compact product list (only top 15 for speed)
+        const productsToReorder = combinedResults.slice(0, 15);
+        const productList = productsToReorder
+          .map((p, i) => `${i + 1}. ${p.name}`)
+          .join('\n');
+
+        const prompt = `שאילתה: "${query}"
+מוצרים:
+${productList}
+
+דרג לפי רלוונטיות לשאילתה. החזר רק מספרים מופרדים בפסיקים (לדוגמה: 3,1,5,2,4)
+החזר עד 10 מוצרים הכי רלוונטיים.`;
+
+        const result = await model.generateContent(prompt);
+        const text = result.response.text().trim();
+        console.log(`[${requestId}] LLM reorder response: ${text}`);
+        
+        // Parse the ranking
+        const ranking = text.match(/\d+/g);
+        if (ranking && ranking.length > 0) {
+          const reorderedProducts = [];
+          const usedIds = new Set();
+          
+          // Add reordered products
+          ranking.slice(0, FAST_LIMIT).forEach(rank => {
+            const index = parseInt(rank) - 1;
+            if (index >= 0 && index < productsToReorder.length) {
+              const product = productsToReorder[index];
+              const id = product._id.toString();
+              if (!usedIds.has(id)) {
+                reorderedProducts.push(product);
+                usedIds.add(id);
+              }
+            }
+          });
+          
+          // Fill remaining slots with unranked products if needed
+          if (reorderedProducts.length < FAST_LIMIT) {
+            productsToReorder.forEach(p => {
+              const id = p._id.toString();
+              if (!usedIds.has(id) && reorderedProducts.length < FAST_LIMIT) {
+                reorderedProducts.push(p);
+                usedIds.add(id);
+              }
+            });
+          }
+          
+          finalResults = reorderedProducts;
+          console.log(`[${requestId}] ✅ LLM reordered ${finalResults.length} products in ${Date.now() - reorderStart}ms`);
+        } else {
+          console.log(`[${requestId}] ⚠️ Failed to parse LLM ranking, using original order`);
+        }
+      } catch (error) {
+        console.log(`[${requestId}] ⚠️ LLM reordering failed: ${error.message}, using original order`);
+      }
+    }
+
     // Step 5: Format response
-    const products = combinedResults.map(r => ({
+    const products = finalResults.map(r => ({
       _id: r._id.toString(),
       id: r.id,
       name: r.name,
