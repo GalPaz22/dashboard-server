@@ -4,7 +4,7 @@ import { MongoClient, ObjectId } from "mongodb";
 import { OpenAI } from "openai";
 import cors from "cors";
 import dotenv from "dotenv";
-import { GoogleGenAI, Type } from "@google/genai";
+import { GoogleGenAI, Type, } from "@google/genai";
 import { createClient } from 'redis';
 import crypto from 'crypto';
 
@@ -1823,7 +1823,7 @@ COMPLEX queries are:
 Analyze the query and return your classification.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash",
+        model: "gemini-3-flash-preview",
         contents: [{ text: query }],
         config: {
           systemInstruction,
@@ -3519,10 +3519,13 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     const response = await genAI.models.generateContent({
-      model: "gemini-3.0-flash-lite",
+      model: "gemini-3-flash-preview",
       contents: userContent,
       config: { 
         systemInstruction, 
+        thinkingConfig: {
+          thinkingBudget: 0,
+        },
         temperature: 0.1,
         responseMimeType: "application/json",
         responseSchema: responseSchema,
