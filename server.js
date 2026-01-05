@@ -6120,7 +6120,7 @@ app.post("/fast-search", async (req, res) => {
 
     console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms - ${combinedResults.length} results`);
 
-    // Step 4: Fast LLM reordering (optimized for speed)
+    // Step 4: High-quality LLM reordering with descriptions
     const reorderStart = Date.now();
     let finalResults = combinedResults;
     
@@ -6131,22 +6131,28 @@ app.post("/fast-search", async (req, res) => {
           model: "gemini-2.5-flash",
           generationConfig: {
             temperature: 0,
-            maxOutputTokens: 100, // Minimal output for speed
+            maxOutputTokens: 200,
           }
         });
 
-        // Create compact product list (only top 15 for speed)
-        const productsToReorder = combinedResults.slice(0, 15);
+        // Create detailed product list with descriptions (top 20 for better selection)
+        const productsToReorder = combinedResults.slice(0, 20);
         const productList = productsToReorder
-          .map((p, i) => `${i + 1}. ${p.name}`)
-          .join('\n');
+          .map((p, i) => {
+            const desc = p.description ? p.description.substring(0, 150) : '';
+            return `${i + 1}. ${p.name}\n${desc}`;
+          })
+          .join('\n\n');
 
-        const prompt = `שאילתה: "${query}"
+        const prompt = `אתה מומחה יין ואלכוהול. דרג את המוצרים לפי רלוונטיות לשאילתה.
+
+שאילתה: "${query}"
+
 מוצרים:
 ${productList}
 
-דרג לפי רלוונטיות לשאילתה. החזר רק מספרים מופרדים בפסיקים (לדוגמה: 3,1,5,2,4)
-החזר עד 10 מוצרים הכי רלוונטיים.`;
+החזר רק את 10 המספרים של המוצרים הכי רלוונטיים, מופרדים בפסיקים.
+דוגמה: 5,2,8,1,12,3,7,15,4,9`;
 
         const result = await model.generateContent(prompt);
         const text = result.response.text().trim();
@@ -6171,7 +6177,7 @@ ${productList}
             }
           });
           
-          // Fill remaining slots with unranked products if needed
+          // Fill remaining slots with top-scored unranked products if needed
           if (reorderedProducts.length < FAST_LIMIT) {
             productsToReorder.forEach(p => {
               const id = p._id.toString();
