@@ -1487,7 +1487,7 @@ const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, ha
 };
 
 // Standard vector search pipeline - OPTIMIZED
-function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 12, useOrLogic = false, excludeIds = [], softFilters = null, invertSoftFilter = false) {
+function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, limit = 12, useOrLogic = false, excludeIds = [], softFilters = null, invertSoftFilter = false, enforceSoftCategoryFilter = false) {
   // Build filter conditions array
   const conditions = [];
 
@@ -1538,18 +1538,23 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
   }
 
   // Soft category filtering for vector search
-  // NOTE: Soft categories are used for BOOSTING, not as hard filters
-  // This ensures vector search returns semantically similar products regardless of soft category
-  // The soft category matching will be applied as a boost in the scoring phase
+  // NOTE: Soft categories can be used as BOOSTS (default) or HARD FILTERS (enforceSoftCategoryFilter=true)
   if (softFilters && softFilters.softCategory) {
     const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory.filter(Boolean) : [softFilters.softCategory].filter(Boolean);
     
     // Only process if we have valid soft categories
     if (softCats.length > 0) {
       if (!invertSoftFilter) {
-        // FOR SOFT-CATEGORY SEARCH: Don't filter, just log - boosting happens in post-processing
-        console.log(`[VECTOR SOFT FILTER] ℹ️ Soft categories for boosting (not filtering): ${softCats.join(', ')}`);
-        // No filter added - products will be boosted in scoring phase based on softCategory match
+        // FOR SOFT-CATEGORY SEARCH
+        if (enforceSoftCategoryFilter) {
+          // STRICT MODE (Simple Query Tier 2): Require products to have AT LEAST ONE matching soft category
+          console.log(`[VECTOR SOFT FILTER] 🔒 STRICT: Adding MUST-HAVE soft category filter: ${softCats.join(', ')}`);
+          conditions.push({ softCategory: { $in: softCats } });
+        } else {
+          // BOOST MODE (Complex Queries): Don't filter, just log - boosting happens in post-processing
+          console.log(`[VECTOR SOFT FILTER] ℹ️ Soft categories for boosting (not filtering): ${softCats.join(', ')}`);
+          // No filter added - products will be boosted in scoring phase based on softCategory match
+        }
       } else {
         // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
         // SIMPLIFIED: Only use $nin - Atlas Vector Search doesn't support $size in filters
@@ -1611,9 +1616,9 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 }
 
 // Vector search pipeline WITH soft category filter - OPTIMIZED
-function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 12, useOrLogic = false) {
+function buildSoftCategoryFilteredVectorSearchPipeline(queryEmbedding, hardFilters = {}, softFilters = {}, limit = 12, useOrLogic = false, enforceSoftCategoryFilter = false) {
   // Soft category filter now integrated into $vectorSearch filter
-  return buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic, [], softFilters, false);
+  return buildStandardVectorSearchPipeline(queryEmbedding, hardFilters, limit, useOrLogic, [], softFilters, false, enforceSoftCategoryFilter);
 }
 
 // Vector search pipeline WITHOUT soft category filter - OPTIMIZED
@@ -1676,12 +1681,12 @@ function isHebrewQuery(query) {
 
 async function translateQuery(query, context) {
   const cacheKey = generateCacheKey('translate', query, context);
-
+  
   return withCache(cacheKey, async () => {
   try {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
-
+      
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.1,
@@ -1689,11 +1694,11 @@ async function translateQuery(query, context) {
         {
           role: "system",
           content:
-            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction.
+            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction. 
 Instructions:
 1. Translate the text from Hebrew to English.
 2. Remove any extraneous or stop words.
-3. Output only the essential keywords and phrases that will best represent the query context
+3. Output only the essential keywords and phrases that will best represent the query context 
 (remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
 Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
 Also:
@@ -1762,7 +1767,7 @@ If the query is generic (like "vodka", "wine", "red") or you're not confident, o
     } catch (error) {
       console.error("Error translating English to Hebrew:", error);
       return null;
-    }
+  }
   }, 604800);
 }
 
@@ -1933,7 +1938,7 @@ function extractCategoriesFromProducts(products, options = {}) {
         }
       });
     }
-  }
+    }
 
   // Count occurrences of soft categories only from top N products
   for (const product of productsForSoftCategory) {
@@ -2019,7 +2024,7 @@ function extractCategoriesFromProducts(products, options = {}) {
     ? 1 // For 3 or fewer products, need at least 1 occurrence
     : products.length <= 4
       ? 2 // For 4 products, need at least 2 occurrences (50%)
-      : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
+    : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
 
   // Soft categories use only the limited subset (top 3 by default)
   const minOccurrencesSoft = productsForSoftCategory.length <= 3
@@ -2814,7 +2819,7 @@ Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCa
     } catch (error) {
       console.warn("Brief filter extraction failed:", error.message);
       return {};
-    }
+  }
   }, 604800);
 }
 
@@ -3077,7 +3082,7 @@ function generateHebrewQueryVariations(text) {
 // Returns much higher bonuses to ensure text matches rank above soft category matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
   if (!productName || !query) return 0;
-
+  
   // Normalize quote characters for consistent matching (Hebrew geresh → ASCII apostrophe)
   const productNameLower = normalizeQuoteCharacters(productName.toLowerCase().trim());
   const queryLower = normalizeQuoteCharacters(query.toLowerCase().trim());
@@ -3775,8 +3780,8 @@ Focus on visual elements that match the search intent, prioritizing products tha
          config: { 
            temperature: 0.1,
            thinkingConfig: {
-            thinkingBudget: 0,
-          },
+             thinkingBudget: 0,
+           },
            responseMimeType: "application/json",
            responseSchema: responseSchema,
          },
@@ -3918,7 +3923,8 @@ async function executeExplicitSoftCategorySearch(
   originalCleanedText = null,
   deliveredIds = [],
   boostScores = null,
-  skipTextualSearch = false // NEW: Skip fuzzy text matching (but keep vector search)
+  skipTextualSearch = false, // Skip fuzzy text matching (but keep vector search)
+  enforceSoftCategoryFilter = false // NEW: Use soft categories as HARD FILTER instead of boost (for simple query Tier 2)
 ) {
   console.log("Executing explicit soft category search");
   
@@ -3986,9 +3992,9 @@ async function executeExplicitSoftCategorySearch(
   // Add text search only if NOT skipping
   if (!skipTextualSearch) {
     softCategoryPromises.push(
-      collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
-        cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
-      )).toArray()
+    collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
+      cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+    )).toArray()
     );
   }
   
@@ -3996,7 +4002,7 @@ async function executeExplicitSoftCategorySearch(
   if (queryEmbedding) {
     softCategoryPromises.push(
       collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
+        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic, enforceSoftCategoryFilter
       )).toArray()
     );
   }
@@ -4023,20 +4029,20 @@ async function executeExplicitSoftCategorySearch(
   if (skipTextualSearch) {
     console.log(`[SOFT SEARCH] ⚠️ SKIPPING non-soft-category search entirely (complex query mode)`);
   } else {
-    const nonSoftCategoryPromises = [
-      collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
-        cleanedTextForSearch, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+  const nonSoftCategoryPromises = [
+    collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
+      cleanedTextForSearch, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+    )).toArray()
+  ];
+  
+  if (queryEmbedding) {
+    nonSoftCategoryPromises.push(
+      collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
+        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
       )).toArray()
-    ];
-    
-    if (queryEmbedding) {
-      nonSoftCategoryPromises.push(
-        collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
-          queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
-        )).toArray()
-      );
-    }
-    
+    );
+  }
+  
     [nonSoftCategoryFuzzyResults, nonSoftCategoryVectorResults = []] = await Promise.all(nonSoftCategoryPromises);
   }
   
@@ -4274,7 +4280,7 @@ async function executeExplicitSoftCategorySearch(
   const filteredResults = deliveredIds && deliveredIds.length > 0
     ? hardFilteredResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
     : hardFilteredResults;
-
+  
   if (deliveredIds && deliveredIds.length > 0) {
     console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
@@ -4283,7 +4289,7 @@ async function executeExplicitSoftCategorySearch(
   // This is needed because we combine multiple arrays (textMatches, softCategory, nonSoftCategory, sweep)
   // and they need to be properly ranked by score
   filteredResults.sort((a, b) => b.rrf_score - a.rrf_score);
-
+  
   // Limit early to reduce processing latency in subsequent operations
   // Use searchLimit * 3 to provide enough variety while reducing overhead
   const earlyLimitedResults = filteredResults.slice(0, searchLimit * 3);
@@ -4404,7 +4410,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     if (hebrewTranslation) {
       console.log(`[${requestId}] 🔤 English→Hebrew translation: "${query}" → "${hebrewTranslation}"`);
     }
-
+    
     // Get embedding
     const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
     
@@ -4458,10 +4464,10 @@ app.get("/search/auto-load-more", async (req, res) => {
       );
       } else {
         console.log(`[${requestId}] Using standard search`);
-
+        
         // Using user-specified or default limits (defined at the top of the endpoint)
         // searchLimit and vectorLimit are already defined above
-
+      
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
           cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
@@ -4474,19 +4480,19 @@ app.get("/search/auto-load-more", async (req, res) => {
           hebrewTranslation, hebrewTranslation, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray() : Promise.resolve([])
       ];
-
+      
       const [fuzzyResults, vectorResults, hebrewFuzzyResults] = await Promise.all(searchPromises);
 
       // Log Hebrew translation search results
       if (hebrewTranslation && hebrewFuzzyResults.length > 0) {
         console.log(`[${requestId}] 🔤 Hebrew translation search found ${hebrewFuzzyResults.length} products`);
       }
-
+      
       const documentRanks = new Map();
       fuzzyResults.forEach((doc, index) => {
         documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, hebrewRank: Infinity, doc });
       });
-
+      
       vectorResults.forEach((doc, index) => {
         const id = doc._id.toString();
         const existing = documentRanks.get(id);
@@ -4507,7 +4513,7 @@ app.get("/search/auto-load-more", async (req, res) => {
           documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: Infinity, hebrewRank: index, doc });
         }
       });
-
+      
       combinedResults = Array.from(documentRanks.values())
         .map(data => {
           const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
@@ -4519,9 +4525,9 @@ app.get("/search/auto-load-more", async (req, res) => {
             ...data.doc,
             rrf_score: calculateEnhancedRRFScore(
               Math.min(data.fuzzyRank, data.hebrewRank),
-              data.vectorRank,
-              0,
-              0,
+              data.vectorRank, 
+              0, 
+              0, 
               totalExactMatchBonus,
               0
             ),
@@ -4909,11 +4915,11 @@ app.get("/search/load-more", async (req, res) => {
                   { stockStatus: "instock" }
                 ]
               };
-
+              
               // Apply hard category filter if present
               if (categoryFilteredHardFilters.category) {
-                const categoryArray = Array.isArray(categoryFilteredHardFilters.category)
-                  ? categoryFilteredHardFilters.category
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
+                  ? categoryFilteredHardFilters.category 
                   : [categoryFilteredHardFilters.category];
                 annFilter.$and.push({ category: { $in: categoryArray } });
               }
@@ -4941,7 +4947,7 @@ app.get("/search/load-more", async (req, res) => {
                 const priceRange = price * 0.15;
                 annFilter.$and.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
               }
-
+              
               const pipeline = [
                 {
                   $vectorSearch: {
@@ -4962,7 +4968,7 @@ app.get("/search/load-more", async (req, res) => {
                   }
                 }
               ];
-
+              
               const results = await collection.aggregate(pipeline).toArray();
               // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
               return results.filter(r => r._id.toString() !== productEmbed._id.toString());
@@ -5086,7 +5092,7 @@ app.get("/search/load-more", async (req, res) => {
     } else {
       // NORMAL PAGINATION: Try to get cached results from Redis
       const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(filters));
-
+      
       if (redisClient && redisReady) {
         try {
           const cached = await redisClient.get(cacheKey);
@@ -5098,9 +5104,9 @@ app.get("/search/load-more", async (req, res) => {
           console.error(`[${requestId}] Error retrieving cached results:`, error.message);
         }
       }
-
+      
       if (!cachedResults) {
-        return res.status(404).json({
+        return res.status(404).json({ 
           error: "Cached results not found. Please perform a new search.",
           requestId: requestId
         });
@@ -5178,11 +5184,11 @@ app.get("/search/load-more", async (req, res) => {
                   { stockStatus: "instock" }
                 ]
               };
-
+              
               // Apply hard category filter if present
               if (categoryFilteredHardFilters.category) {
-                const categoryArray = Array.isArray(categoryFilteredHardFilters.category)
-                  ? categoryFilteredHardFilters.category
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
+                  ? categoryFilteredHardFilters.category 
                   : [categoryFilteredHardFilters.category];
                 annFilter.$and.push({ category: { $in: categoryArray } });
               }
@@ -5210,7 +5216,7 @@ app.get("/search/load-more", async (req, res) => {
                 const priceRange = price * 0.15;
                 annFilter.$and.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
               }
-
+              
               const pipeline = [
                 {
                   $vectorSearch: {
@@ -5231,7 +5237,7 @@ app.get("/search/load-more", async (req, res) => {
                   }
                 }
               ];
-
+              
               const results = await collection.aggregate(pipeline).toArray();
               // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
               return results.filter(r => r._id.toString() !== productEmbed._id.toString());
@@ -5612,7 +5618,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     // Extract categories - use TOP 2 if they're very strong exact matches
     const extractedHardCategories = new Set();
     const extractedSoftCategories = new Set();
-    
+
     const VERY_STRONG_EXACT_MATCH_THRESHOLD_PHASE1 = 90000;
     const topMatch = highQualityTextMatches[0];
     const topMatchBonus = topMatch ? (topMatch.exactMatchBonus || 0) : 0;
@@ -6188,8 +6194,8 @@ app.post("/search", async (req, res) => {
     let translatedQuery = query;
     if (isComplexQueryResult) {
       translatedQuery = await translateQuery(query, context);
-      if (!translatedQuery) {
-        return res.status(500).json({ error: "Error translating query" });
+    if (!translatedQuery) {
+      return res.status(500).json({ error: "Error translating query" });
       }
     } else {
       console.log(`[${requestId}] ⚡ SKIPPING translation for SIMPLE query`);
@@ -6219,7 +6225,7 @@ app.post("/search", async (req, res) => {
         // Use custom system instruction from store config if available
         const customSystemInstruction = req.store?.filterExtractionSystemInstruction || null;
         enhancedFilters = await extractFiltersFromQueryEnhanced(queryForExtraction, categories, types, finalSoftCategories, example, context, customSystemInstruction);
-      } else if (isSimpleResult) {
+    } else if (isSimpleResult) {
         // Brief extraction for simple queries (as requested by user)
         console.log(`[${requestId}] ⚡ SIMPLE QUERY: Performing brief filter extraction`);
         enhancedFilters = await extractFiltersBrief(queryForExtraction, categories, types, finalSoftCategories, context);
@@ -6349,7 +6355,7 @@ app.post("/search", async (req, res) => {
     let queryEmbedding = null;
     const hasSoftFiltersForEmbedding = enhancedFilters && enhancedFilters.softCategory &&
       (Array.isArray(enhancedFilters.softCategory) ? enhancedFilters.softCategory.length > 0 : !!enhancedFilters.softCategory);
-    
+
     // Determine if this simple query will likely trigger a two-step search
     // (matches the logic at line 5870: isSimpleResult && !shouldUseFilterOnly)
     const isSimpleTwoStepCandidate = isSimpleResult && !shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, false);
@@ -6698,7 +6704,7 @@ app.post("/search", async (req, res) => {
               }
               
               // Continue with Step 2: Extract categories from high-quality text matches
-              console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
+            console.log(`[${requestId}] Step 2: Extracting categories from high-quality matches...`);
 
                 // CRITICAL FIX: Prioritize EXACT matches for category extraction
                 // If top match is VERY strong (>= 90000), use ONLY top 2 results
@@ -6805,9 +6811,11 @@ app.post("/search", async (req, res) => {
               ])].filter(Boolean);
 
               if (combinedSoftCategories.length > 0 && queryEmbedding) {
-                // Use soft category search - this returns BOTH products with AND without soft category
-                // Products matching soft category get boosted, but non-matching products are still returned
-                console.log(`[${requestId}] Using combined soft categories: LLM=${JSON.stringify(llmSoftCategories)}, extracted=${JSON.stringify(softCategoriesArray)}, combined=${JSON.stringify(combinedSoftCategories)}`);
+                // SIMPLE QUERY TIER 2: Only return products WITH matching soft categories from Tier 1
+                // Skip textual search, use ONLY vector search filtered by soft categories for semantic similarity
+                console.log(`[${requestId}] Using combined soft categories for Tier 2: LLM=${JSON.stringify(llmSoftCategories)}, extracted=${JSON.stringify(softCategoriesArray)}, combined=${JSON.stringify(combinedSoftCategories)}`);
+                console.log(`[${requestId}] 🎯 TIER 2 STRICT MODE: Will only return products WITH these soft categories`);
+                
                 categoryFilteredResults = await executeExplicitSoftCategorySearch(
                   collection,
                   cleanedText,
@@ -6821,7 +6829,9 @@ app.post("/search", async (req, res) => {
                   false,
                   cleanedText,
                   [],
-                  req.store.softCategoriesBoost
+                  req.store.softCategoriesBoost,
+                  true, // skipTextualSearch = true for simple query Tier 2 (vector only + soft category strict matching)
+                  true  // enforceSoftCategoryFilter = true - Tier 2 products MUST match Tier 1 soft categories
                 );
 
                 // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
@@ -7497,7 +7507,7 @@ app.post("/search", async (req, res) => {
     if (isComplexQueryResult) {
       // Complex queries: Extract categories from the TOP 3 LLM-reordered products for tier-2
       console.log(`[${requestId}] 🎯 COMPLEX QUERY DETECTED - Preparing tier-2 token`);
-
+      
       // Get ONLY the first 3 LLM-selected products (the top textual matches)
       const top3LLMProducts = limitedResults.slice(0, 3);
       console.log(`[${requestId}] Analyzing TOP 3 LLM-selected products for category extraction`);
@@ -7617,7 +7627,7 @@ app.post("/search", async (req, res) => {
         extractedCategories: extractedFromLLM, // Categories extracted from TOP 3 LLM-selected products
         type: 'complex-tier2' // Mark as complex query tier 2
       })).toString('base64');
-
+      
       console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 3 textual matches`);
       console.log(`[${requestId}] 📊 LLM-extracted categories (from 3 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
       if (extractedFromLLM.hardCategories?.length > 0) {
@@ -10196,5 +10206,5 @@ app.get("/product-clicks-by-query", async (req, res) => {
 
 });
 
- 
+
 // Function to detect exact text matches
