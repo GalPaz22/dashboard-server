@@ -1655,12 +1655,12 @@ function isHebrewQuery(query) {
 
 async function translateQuery(query, context) {
   const cacheKey = generateCacheKey('translate', query, context);
-  
+
   return withCache(cacheKey, async () => {
   try {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
-      
+
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.1,
@@ -1668,11 +1668,11 @@ async function translateQuery(query, context) {
         {
           role: "system",
           content:
-            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction. 
+            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction.
 Instructions:
 1. Translate the text from Hebrew to English.
 2. Remove any extraneous or stop words.
-3. Output only the essential keywords and phrases that will best represent the query context 
+3. Output only the essential keywords and phrases that will best represent the query context
 (remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
 Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
 Also:
@@ -1687,6 +1687,61 @@ Also:
     console.error("Error translating query:", error);
     throw error;
   }
+  }, 604800);
+}
+
+// Translate English brand/product names to Hebrew for better matching
+async function translateEnglishToHebrew(query, context) {
+  const cacheKey = generateCacheKey('translate-en-he', query, context);
+
+  return withCache(cacheKey, async () => {
+    try {
+      // Only translate if query is NOT Hebrew (i.e., it's English/Latin)
+      const hasHebrew = await isHebrew(query);
+      if (hasHebrew) return null; // No need to translate Hebrew queries
+
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        temperature: 0.1,
+        messages: [
+          {
+            role: "system",
+            content: `You are helping with Hebrew product search. Given an English brand name or product name, provide the Hebrew transliteration that would commonly be used in Israeli e-commerce.
+
+IMPORTANT: Only provide a Hebrew transliteration if:
+1. The query looks like a brand name or product name (not a generic word)
+2. There's a clear Hebrew transliteration commonly used
+
+Common transliterations for ${context || 'wine and spirits'}:
+- "balvini" or "balvenie" → "בלוויני" (Balvenie whisky)
+- "glenfiddich" → "גלנפידיך"
+- "macallan" → "מקאלן"
+- "johnnie walker" → "ג'וני ווקר"
+- "chivas" → "שיבאס"
+- "absolut" → "אבסולוט"
+- "smirnoff" → "סמירנוף"
+- "grey goose" → "גריי גוס"
+- "moet" → "מואט"
+- "veuve clicquot" → "וו קליקו"
+- "dom perignon" → "דום פריניון"
+
+If you can provide a Hebrew transliteration, output ONLY the Hebrew text.
+If the query is generic (like "vodka", "wine", "red") or you're not confident, output "NO_TRANSLATION".`
+          },
+          { role: "user", content: query },
+        ],
+      });
+
+      const result = response.choices[0]?.message?.content?.trim();
+      if (result === 'NO_TRANSLATION' || !result) {
+        return null;
+      }
+      console.log(`[TRANSLATE EN→HE] "${query}" → "${result}"`);
+      return result;
+    } catch (error) {
+      console.error("Error translating English to Hebrew:", error);
+      return null;
+    }
   }, 604800);
 }
 
@@ -4291,7 +4346,13 @@ app.get("/search/auto-load-more", async (req, res) => {
     const translatedQuery = await translateQuery(query, context);
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, hardFilters, categories, types);
-    
+
+    // Also get Hebrew translation for English brand names (e.g., "balvini" → "בלוויני")
+    const hebrewTranslation = await translateEnglishToHebrew(query, context);
+    if (hebrewTranslation) {
+      console.log(`[${requestId}] 🔤 English→Hebrew translation: "${query}" → "${hebrewTranslation}"`);
+    }
+
     // Get embedding
     const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
     
@@ -4345,52 +4406,77 @@ app.get("/search/auto-load-more", async (req, res) => {
       );
       } else {
         console.log(`[${requestId}] Using standard search`);
-        
+
         // Using user-specified or default limits (defined at the top of the endpoint)
         // searchLimit and vectorLimit are already defined above
-      
+
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
           cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray(),
         queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
           queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
+        )).toArray() : Promise.resolve([]),
+        // Also search with Hebrew translation if available (for English brand names like "balvini")
+        hebrewTranslation ? collection.aggregate(buildStandardSearchPipeline(
+          hebrewTranslation, hebrewTranslation, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray() : Promise.resolve([])
       ];
-      
-      const [fuzzyResults, vectorResults] = await Promise.all(searchPromises);
-      
+
+      const [fuzzyResults, vectorResults, hebrewFuzzyResults] = await Promise.all(searchPromises);
+
+      // Log Hebrew translation search results
+      if (hebrewTranslation && hebrewFuzzyResults.length > 0) {
+        console.log(`[${requestId}] 🔤 Hebrew translation search found ${hebrewFuzzyResults.length} products`);
+      }
+
       const documentRanks = new Map();
       fuzzyResults.forEach((doc, index) => {
-        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+        documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, hebrewRank: Infinity, doc });
       });
-      
+
       vectorResults.forEach((doc, index) => {
         const id = doc._id.toString();
         const existing = documentRanks.get(id);
         if (existing) {
           existing.vectorRank = index;
         } else {
-          documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+          documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, hebrewRank: Infinity, doc });
         }
       });
-      
+
+      // Merge Hebrew translation results - these get a high boost since they're direct brand name matches
+      hebrewFuzzyResults.forEach((doc, index) => {
+        const id = doc._id.toString();
+        const existing = documentRanks.get(id);
+        if (existing) {
+          existing.hebrewRank = index;
+        } else {
+          documentRanks.set(id, { fuzzyRank: Infinity, vectorRank: Infinity, hebrewRank: index, doc });
+        }
+      });
+
       combinedResults = Array.from(documentRanks.values())
         .map(data => {
           const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
+          // Give Hebrew translation matches a significant boost (they're brand name matches)
+          const hebrewBonus = data.hebrewRank < Infinity ? 50000 : 0;
+          const hebrewExactBonus = hebrewTranslation ? getExactMatchBonus(data.doc.name, hebrewTranslation, hebrewTranslation) : 0;
+          const totalExactMatchBonus = Math.max(exactMatchBonus, hebrewExactBonus + hebrewBonus);
           return {
             ...data.doc,
             rrf_score: calculateEnhancedRRFScore(
-              data.fuzzyRank, 
-              data.vectorRank, 
-              0, 
-              0, 
-              exactMatchBonus, 
+              Math.min(data.fuzzyRank, data.hebrewRank),
+              data.vectorRank,
+              0,
+              0,
+              totalExactMatchBonus,
               0
             ),
             softFilterMatch: false,
             softCategoryMatches: 0,
-            exactMatchBonus: exactMatchBonus // Store for sorting
+            exactMatchBonus: totalExactMatchBonus, // Store for sorting
+            hebrewTranslationMatch: data.hebrewRank < Infinity
           };
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
@@ -4764,22 +4850,45 @@ app.get("/search/load-more", async (req, res) => {
             
             // For each seed product, run ANN search using its embedding
             const similaritySearches = extractedCategories.topProductEmbeddings.map(async (productEmbed) => {
-              // Build filter for ANN search
+              // Build filter for ANN search - include ALL hard filters
               const annFilter = {
                 $and: [
                   { stockStatus: "instock" }
-                  // Exclude the seed product itself - handled after results to avoid index requirements
                 ]
               };
-              
+
               // Apply hard category filter if present
               if (categoryFilteredHardFilters.category) {
-                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
-                  ? categoryFilteredHardFilters.category 
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category)
+                  ? categoryFilteredHardFilters.category
                   : [categoryFilteredHardFilters.category];
                 annFilter.$and.push({ category: { $in: categoryArray } });
               }
-              
+
+              // Apply type filter if present
+              if (categoryFilteredHardFilters.type) {
+                if (Array.isArray(categoryFilteredHardFilters.type)) {
+                  annFilter.$and.push({ type: { $in: categoryFilteredHardFilters.type } });
+                } else {
+                  annFilter.$and.push({ type: categoryFilteredHardFilters.type });
+                }
+              }
+
+              // Apply price filters if present
+              if (categoryFilteredHardFilters.minPrice && categoryFilteredHardFilters.maxPrice) {
+                annFilter.$and.push({ price: { $gte: categoryFilteredHardFilters.minPrice, $lte: categoryFilteredHardFilters.maxPrice } });
+              } else if (categoryFilteredHardFilters.minPrice) {
+                annFilter.$and.push({ price: { $gte: categoryFilteredHardFilters.minPrice } });
+              } else if (categoryFilteredHardFilters.maxPrice) {
+                annFilter.$and.push({ price: { $lte: categoryFilteredHardFilters.maxPrice } });
+              }
+
+              if (categoryFilteredHardFilters.price) {
+                const price = categoryFilteredHardFilters.price;
+                const priceRange = price * 0.15;
+                annFilter.$and.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
+              }
+
               const pipeline = [
                 {
                   $vectorSearch: {
@@ -4800,7 +4909,7 @@ app.get("/search/load-more", async (req, res) => {
                   }
                 }
               ];
-              
+
               const results = await collection.aggregate(pipeline).toArray();
               // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
               return results.filter(r => r._id.toString() !== productEmbed._id.toString());
@@ -4916,10 +5025,15 @@ app.get("/search/load-more", async (req, res) => {
         });
       }
       
+    } else if (isComplexTier2 && extractedCategories) {
+      // COMPLEX TIER-2: Run fresh category-filtered search (no Redis dependency)
+      // This ensures tier 2 always works even without cached results
+      console.log(`[${requestId}] 🔄 Complex tier-2: Running direct category-filtered search`);
+      cachedResults = []; // Initialize empty - will be populated by category search below
     } else {
       // NORMAL PAGINATION: Try to get cached results from Redis
       const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(filters));
-      
+
       if (redisClient && redisReady) {
         try {
           const cached = await redisClient.get(cacheKey);
@@ -4931,9 +5045,9 @@ app.get("/search/load-more", async (req, res) => {
           console.error(`[${requestId}] Error retrieving cached results:`, error.message);
         }
       }
-      
+
       if (!cachedResults) {
-        return res.status(404).json({ 
+        return res.status(404).json({
           error: "Cached results not found. Please perform a new search.",
           requestId: requestId
         });
@@ -4942,7 +5056,7 @@ app.get("/search/load-more", async (req, res) => {
 
     // If extracted categories are available and this is not already a category-filtered request,
     // perform a category-filtered search to get additional products matching the same categories
-    if (!isCategoryFiltered && extractedCategories && (extractedCategories.hardCategories || extractedCategories.softCategories)) {
+    if ((!isCategoryFiltered && extractedCategories && (extractedCategories.hardCategories || extractedCategories.softCategories)) || isComplexTier2) {
       console.log(`[${requestId}] 🔍 Load-more: Found extracted categories from initial search, performing category-filtered search`);
       console.log(`[${requestId}] 📋 Extracted Filters:`);
       console.log(`[${requestId}]   • Hard categories: ${extractedCategories.hardCategories ? JSON.stringify(extractedCategories.hardCategories) : 'none'}`);
@@ -5004,22 +5118,45 @@ app.get("/search/load-more", async (req, res) => {
             
             // For each seed product, run ANN search using its embedding
             const similaritySearches = extractedCategories.topProductEmbeddings.map(async (productEmbed) => {
-              // Build filter for ANN search
+              // Build filter for ANN search - include ALL hard filters
               const annFilter = {
                 $and: [
                   { stockStatus: "instock" }
-                  // Exclude the seed product itself - handled after results to avoid index requirements
                 ]
               };
-              
+
               // Apply hard category filter if present
               if (categoryFilteredHardFilters.category) {
-                const categoryArray = Array.isArray(categoryFilteredHardFilters.category) 
-                  ? categoryFilteredHardFilters.category 
+                const categoryArray = Array.isArray(categoryFilteredHardFilters.category)
+                  ? categoryFilteredHardFilters.category
                   : [categoryFilteredHardFilters.category];
                 annFilter.$and.push({ category: { $in: categoryArray } });
               }
-              
+
+              // Apply type filter if present
+              if (categoryFilteredHardFilters.type) {
+                if (Array.isArray(categoryFilteredHardFilters.type)) {
+                  annFilter.$and.push({ type: { $in: categoryFilteredHardFilters.type } });
+                } else {
+                  annFilter.$and.push({ type: categoryFilteredHardFilters.type });
+                }
+              }
+
+              // Apply price filters if present
+              if (categoryFilteredHardFilters.minPrice && categoryFilteredHardFilters.maxPrice) {
+                annFilter.$and.push({ price: { $gte: categoryFilteredHardFilters.minPrice, $lte: categoryFilteredHardFilters.maxPrice } });
+              } else if (categoryFilteredHardFilters.minPrice) {
+                annFilter.$and.push({ price: { $gte: categoryFilteredHardFilters.minPrice } });
+              } else if (categoryFilteredHardFilters.maxPrice) {
+                annFilter.$and.push({ price: { $lte: categoryFilteredHardFilters.maxPrice } });
+              }
+
+              if (categoryFilteredHardFilters.price) {
+                const price = categoryFilteredHardFilters.price;
+                const priceRange = price * 0.15;
+                annFilter.$and.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
+              }
+
               const pipeline = [
                 {
                   $vectorSearch: {
@@ -5040,7 +5177,7 @@ app.get("/search/load-more", async (req, res) => {
                   }
                 }
               ];
-              
+
               const results = await collection.aggregate(pipeline).toArray();
               // Manually filter out the seed product here to avoid Atlas Search index requirements on _id
               return results.filter(r => r._id.toString() !== productEmbed._id.toString());
