@@ -7252,27 +7252,62 @@ app.post("/search", async (req, res) => {
       const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
       console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
       const reorderedProductIds = new Set(reorderedIds.map(id => id.toString()));
-      let remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
+      let remainingResults = [];
       
-      console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${reorderedIds.length} LLM-selected = ${remainingResults.length} remaining`);
+      console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${reorderedIds.length} LLM-selected`);
       
-      // CRITICAL: Filter remaining results by categories from LLM-selected products
-      // Extract categories from the top LLM-selected products to filter out irrelevant categories
-      if (orderedProducts.length > 0) {
-        const topProductCategories = new Set();
+      // CRITICAL: Re-run vector search with category filter from LLM-selected products
+      // This ensures vector search respects the category of the top results
+      if (orderedProducts.length > 0 && queryEmbedding) {
+        const topProductCategories = [];
         orderedProducts.slice(0, 3).forEach(product => {
           const categories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
-          categories.forEach(cat => topProductCategories.add(cat));
+          categories.forEach(cat => {
+            if (cat && !topProductCategories.includes(cat)) {
+              topProductCategories.push(cat);
+            }
+          });
         });
         
-        if (topProductCategories.size > 0) {
-          const beforeCategoryFilter = remainingResults.length;
-          remainingResults = remainingResults.filter(r => {
-            const productCategories = Array.isArray(r.category) ? r.category : (r.category ? [r.category] : []);
-            return productCategories.some(cat => topProductCategories.has(cat));
+        if (topProductCategories.length > 0) {
+          console.log(`[${requestId}] 🔄 Re-running vector search with category filter: [${topProductCategories.join(', ')}]`);
+          
+          // Build hard filters with extracted category
+          const categoryFilteredHardFilters = { ...hardFilters, category: topProductCategories };
+          
+          // Run new vector search with category filter
+          const categoryFilteredVectorResults = await collection.aggregate(
+            buildStandardVectorSearchPipeline(
+              queryEmbedding,
+              categoryFilteredHardFilters,
+              50, // Get more results for remaining slots
+              useOrLogic,
+              Array.from(reorderedProductIds) // Exclude already selected products
+            )
+          ).toArray();
+          
+          console.log(`[${requestId}] 🔄 Category-filtered vector search returned ${categoryFilteredVectorResults.length} results`);
+          
+          // Convert to combinedResults format with scoring
+          remainingResults = categoryFilteredVectorResults.map((doc, index) => {
+            const exactMatchBonus = getExactMatchBonus(doc.name, query, cleanedText);
+            const matchResult = calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, req.store.softCategoriesBoost);
+            
+            return {
+              ...doc,
+              rrf_score: calculateEnhancedRRFScore(Infinity, index, 0, 0, exactMatchBonus, matchResult.weightedScore),
+              softFilterMatch: matchResult.count > 0,
+              softCategoryMatches: matchResult.count,
+              exactMatchBonus: exactMatchBonus
+            };
           });
-          console.log(`[${requestId}] 🔍 Category filtering: ${beforeCategoryFilter} results -> ${remainingResults.length} after filtering by [${Array.from(topProductCategories).join(', ')}]`);
+        } else {
+          // No categories extracted, use original remaining results
+          remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
         }
+      } else {
+        // No vector search possible, use original remaining results
+        remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
       }
 
       // Construct finalResults and deduplicate
