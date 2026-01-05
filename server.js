@@ -5969,45 +5969,65 @@ app.post("/fast-search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // Step 1: Quick filter extraction with gemini-2.0-flash-exp (fastest model)
+    // Step 1: Quick filter extraction with gemini-2.5-flash using STORE's actual categories
     const filterExtractionStart = Date.now();
     let extractedFilters = { category: null, softCategory: [] };
-    
+
+    // Get store's actual categories and soft categories for better extraction
+    const storeCategories = req.store?.categories || "יין אדום,יין לבן,יין רוזה,בירה,וויסקי,ג'ין,וודקה,ורמוט,ליקר,רום,טקילה,קוניאק,ברנדי,שמפניה,קאווה,פרוסקו";
+    const storeSoftCategories = req.store?.softCategories || "ספרד,צרפת,איטליה,ישראל,ארגנטינה,צ'ילה,אוסטרליה,דרום אפריקה,פורטוגל,גרמניה,ניו זילנד,ארה\"ב,קליפורניה,בורדו,טוסקנה,ריוחה,מנדוזה,בורגונדי,שמפניה,פיימונט,מלבק,קברנה סוביניון,מרלו,שרדונה,סוביניון בלאן,פינו נואר,סירה,טמפרניו,סנג'יובזה,ריזלינג,פירותי,יבש,חצי יבש,מתוק,חצי מתוק,מבעבע,אורגני,כשר,פסח,בשר,דגים,עוף,גבינות,פסטה,סלט,קינוח";
+
     try {
-      const cacheKey = `fast-filters:${crypto.createHash('md5').update(query).digest('hex')}`;
+      // Include store info in cache key for store-specific results
+      const cacheKey = `fast-filters-v2:${dbName}:${crypto.createHash('md5').update(query + storeCategories + storeSoftCategories).digest('hex')}`;
       const cached = await getCachedValue(cacheKey);
-      
+
       if (cached) {
         extractedFilters = cached;
         console.log(`[${requestId}] ⚡ Cache hit for filters`);
       } else {
         const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const model = genAI.getGenerativeModel({ 
-          model: "gemini-2.5-flash", // Using gemini-2.0-flash-exp (gemini-2.5-flash not available yet)
+        const model = genAI.getGenerativeModel({
+          model: "gemini-2.5-flash",
           generationConfig: {
             temperature: 0,
-          
           }
         });
 
-        const prompt = `מהשאילתה "${query}" - חלץ:
-1. קטגוריה (אחת בלבד): יין אדום, יין לבן, בירה, וויסקי, ג'ין, וודקה, ורמוט, ליקר, רום, טקילה, קוניאק, ברנדי, שמפניה, קאווה, פרוסקו
-2. מאפיינים (עד 3): ארץ, אזור, סגנון, טעם, מאפיין
+        // Enhanced prompt with DOMAIN KNOWLEDGE and store's actual categories
+        const prompt = `אתה מומחה יין ואלכוהול. חלץ פילטרים מהשאילתה.
+
+שאילתה: "${query}"
+
+קטגוריות זמינות (בחר רק מהרשימה): ${storeCategories}
+מאפיינים זמינים (בחר רק מהרשימה): ${storeSoftCategories}
+
+כללים:
+1. קטגוריה - חייבת להיות בדיוק מהרשימה למעלה
+2. מאפיינים - השתמש בידע שלך למפות מושגים:
+   - "ספרדי/ספרד/Spain/Spanish" → "ספרד"
+   - "צרפתי/צרפת/France/French" → "צרפת"
+   - "איטלקי/איטליה/Italy/Italian" → "איטליה"
+   - "ישראלי/ישראל/Israeli" → "ישראל"
+   - מותגים: Torres/טורס/Codorniu/קודורניאו → "ספרד"
+   - אזורים: Rioja/ריוחה → "ריוחה" + "ספרד", Bordeaux/בורדו → "בורדו" + "צרפת"
 
 החזר JSON בלבד:
-{"category":"קטגוריה או null","softCategory":["מאפיין1","מאפיין2"]}
+{"category":"קטגוריה מהרשימה או null","softCategory":["מאפיין1","מאפיין2"]}
 
 דוגמאות:
-"יין לבן ישראלי" → {"category":"יין לבן","softCategory":["ישראל"]}
-"וויסקי סקוטי" → {"category":"וויסקי","softCategory":["סקוטלנד"]}
+"יין ספרדי" → {"category":null,"softCategory":["ספרד"]}
+"יין אדום צרפתי" → {"category":"יין אדום","softCategory":["צרפת"]}
+"ריוחה" → {"category":null,"softCategory":["ריוחה","ספרד"]}
+"וויסקי סקוטי" → {"category":"וויסקי","softCategory":[]}
 "בירה" → {"category":"בירה","softCategory":[]}`;
 
         const result = await model.generateContent(prompt);
         const text = result.response.text().trim();
-        console.log(`[${requestId}] LLM response:`, text);
-        
+        console.log(`[${requestId}] LLM filter response:`, text);
+
         const jsonMatch = text.match(/\{[\s\S]*\}/);
-        
+
         if (jsonMatch) {
           const parsed = JSON.parse(jsonMatch[0]);
           extractedFilters = {
@@ -6038,19 +6058,20 @@ app.post("/fast-search", async (req, res) => {
 
     const hasSoftFilters = softFilters.softCategory && softFilters.softCategory.length > 0;
 
-    // Step 3: Fast search with soft category support
+    // Step 3: Fast search with soft category support - GET MORE CANDIDATES for better LLM selection
     const searchStart = Date.now();
     const cleanedText = query.trim();
-    
+    const CANDIDATE_MULTIPLIER = 5; // Get 5x candidates for better selection pool
+
     // Get embedding
     const queryEmbedding = await getQueryEmbedding(cleanedText);
-    
+
     let combinedResults = [];
 
     if (hasSoftFilters && queryEmbedding) {
-      // Use soft category search for better results
+      // Use soft category search for better results - ENFORCE soft category filter for quality
       console.log(`[${requestId}] Using soft category search with filters:`, softFilters.softCategory);
-      
+
       const results = await executeExplicitSoftCategorySearch(
         collection,
         cleanedText,
@@ -6058,35 +6079,47 @@ app.post("/fast-search", async (req, res) => {
         hardFilters,
         softFilters,
         queryEmbedding,
-        FAST_LIMIT * 2, // Get more for better selection
-        FAST_LIMIT * 2,
+        FAST_LIMIT * CANDIDATE_MULTIPLIER, // Get more for better selection
+        FAST_LIMIT * CANDIDATE_MULTIPLIER,
         false, // useOrLogic
         false, // isImageMode
         cleanedText,
         [], // deliveredIds
         req.store.softCategoriesBoost || null,
         false, // skipTextualSearch
-        false  // enforceSoftCategoryFilter
+        true   // enforceSoftCategoryFilter - ENFORCE for better quality
       );
 
-      combinedResults = results.slice(0, FAST_LIMIT);
+      // Add soft category match info for LLM reordering
+      combinedResults = results.map(doc => {
+        const matchResult = calculateSoftCategoryMatches(
+          doc?.softCategory,
+          softFilters.softCategory,
+          req.store.softCategoriesBoost
+        );
+        return {
+          ...doc,
+          softCategoryMatches: matchResult.count,
+          softCategoryScore: matchResult.weightedScore
+        };
+      });
     } else {
-      // Standard text + vector search (parallel)
+      // Standard text + vector search (parallel) - with soft category scoring
       const [textResults, vectorResults] = await Promise.all([
         collection.aggregate(buildStandardSearchPipeline(
-          cleanedText, query, hardFilters, FAST_LIMIT * 2, false, false
+          cleanedText, query, hardFilters, FAST_LIMIT * CANDIDATE_MULTIPLIER, false, false
         )).toArray(),
         queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
-          queryEmbedding, hardFilters, FAST_LIMIT * 2, false
+          queryEmbedding, hardFilters, FAST_LIMIT * CANDIDATE_MULTIPLIER, false
         )).toArray() : Promise.resolve([])
       ]);
 
-      // Merge with RRF scoring
+      // Merge with RRF scoring + soft category boost
       const documentRanks = new Map();
       textResults.forEach((doc, index) => {
         documentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
       });
-      
+
       vectorResults.forEach((doc, index) => {
         const id = doc._id.toString();
         const existing = documentRanks.get(id);
@@ -6097,37 +6130,62 @@ app.post("/fast-search", async (req, res) => {
         }
       });
 
-      // Calculate scores
+      // Calculate scores with soft category matching (even without explicit soft filters)
       combinedResults = Array.from(documentRanks.values())
         .map(data => {
           const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedText);
+
+          // Calculate soft category match based on query words matching product's soft categories
+          let softCategoryMatches = 0;
+          if (data.doc.softCategory) {
+            const productSoftCats = Array.isArray(data.doc.softCategory)
+              ? data.doc.softCategory
+              : [data.doc.softCategory];
+            const queryLower = query.toLowerCase();
+            productSoftCats.forEach(cat => {
+              if (cat && queryLower.includes(cat.toLowerCase())) {
+                softCategoryMatches++;
+              }
+            });
+          }
+
+          const softCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 20000 : 0;
+
           return {
             ...data.doc,
             rrf_score: calculateEnhancedRRFScore(
-              data.fuzzyRank, 
-              data.vectorRank, 
-              0, 
-              0, 
+              data.fuzzyRank,
+              data.vectorRank,
+              0,
+              0,
               exactMatchBonus,
-              0
-            ),
-            exactMatchBonus: exactMatchBonus
+              softCategoryMatches
+            ) + softCategoryBoost,
+            exactMatchBonus: exactMatchBonus,
+            softCategoryMatches: softCategoryMatches
           };
         })
-        .sort((a, b) => b.rrf_score - a.rrf_score)
-        .slice(0, FAST_LIMIT);
+        .sort((a, b) => b.rrf_score - a.rrf_score);
+
+      // QUALITY FILTER: If we have strong exact matches, filter out weak fuzzy matches
+      const STRONG_MATCH_THRESHOLD = 50000;
+      const strongMatches = combinedResults.filter(r => (r.exactMatchBonus || 0) >= STRONG_MATCH_THRESHOLD);
+      if (strongMatches.length >= 3) {
+        console.log(`[${requestId}] 🎯 Found ${strongMatches.length} strong exact matches - filtering weak results`);
+        combinedResults = strongMatches;
+      }
     }
 
-    console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms - ${combinedResults.length} results`);
+    console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms - ${combinedResults.length} candidates`);
 
-    // Step 4: High-quality LLM reordering with descriptions
+    // Step 4: High-quality LLM reordering with descriptions and soft category context
     const reorderStart = Date.now();
     let finalResults = combinedResults;
-    
+
     if (combinedResults.length > 0) {
       try {
         const genAI = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
-        const model = genAI.getGenerativeModel({ 
+        const model = genAI.getGenerativeModel({
           model: "gemini-2.5-flash",
           generationConfig: {
             temperature: 0,
@@ -6135,35 +6193,55 @@ app.post("/fast-search", async (req, res) => {
           }
         });
 
-        // Create detailed product list with descriptions (top 20 for better selection)
-        const productsToReorder = combinedResults.slice(0, 20);
+        // Create detailed product list with descriptions AND soft categories (top 30 for better selection)
+        const productsToReorder = combinedResults.slice(0, 30);
         const productList = productsToReorder
           .map((p, i) => {
-            const desc = p.description ? p.description.substring(0, 150) : '';
-            return `${i + 1}. ${p.name}\n${desc}`;
+            const desc = p.description ? p.description.substring(0, 120) : '';
+            const softCats = p.softCategory
+              ? (Array.isArray(p.softCategory) ? p.softCategory.join(', ') : p.softCategory)
+              : '';
+            const category = p.category || '';
+            return `${i + 1}. ${p.name}${category ? ` [${category}]` : ''}${softCats ? ` (${softCats})` : ''}\n${desc}`;
           })
           .join('\n\n');
 
+        // Build context about what the user is looking for
+        const filterContext = [];
+        if (extractedFilters.category) {
+          filterContext.push(`קטגוריה: ${extractedFilters.category}`);
+        }
+        if (extractedFilters.softCategory && extractedFilters.softCategory.length > 0) {
+          filterContext.push(`מאפיינים חשובים: ${extractedFilters.softCategory.join(', ')}`);
+        }
+        const contextStr = filterContext.length > 0 ? `\nהמשתמש מחפש: ${filterContext.join(', ')}` : '';
+
         const prompt = `אתה מומחה יין ואלכוהול. דרג את המוצרים לפי רלוונטיות לשאילתה.
 
-שאילתה: "${query}"
+שאילתה: "${query}"${contextStr}
+
+קריטריונים לדירוג:
+1. התאמה ישירה לשאילתה (מותג, סוג, מקור)
+2. מוצר שהוא באמת יין/אלכוהול (לא אביזרים אלא אם ביקשו)
+3. מוצרים עם המאפיינים שהמשתמש ציין
 
 מוצרים:
 ${productList}
 
 החזר רק את 10 המספרים של המוצרים הכי רלוונטיים, מופרדים בפסיקים.
+אל תכלול מוצרים שאינם קשורים (כמו מקררים, דקנטרים אם מחפשים יין).
 דוגמה: 5,2,8,1,12,3,7,15,4,9`;
 
         const result = await model.generateContent(prompt);
         const text = result.response.text().trim();
         console.log(`[${requestId}] LLM reorder response: ${text}`);
-        
+
         // Parse the ranking
         const ranking = text.match(/\d+/g);
         if (ranking && ranking.length > 0) {
           const reorderedProducts = [];
           const usedIds = new Set();
-          
+
           // Add reordered products
           ranking.slice(0, FAST_LIMIT).forEach(rank => {
             const index = parseInt(rank) - 1;
@@ -6176,10 +6254,15 @@ ${productList}
               }
             }
           });
-          
+
           // Fill remaining slots with top-scored unranked products if needed
           if (reorderedProducts.length < FAST_LIMIT) {
-            productsToReorder.forEach(p => {
+            // Prioritize products with soft category matches
+            const remainingProducts = productsToReorder
+              .filter(p => !usedIds.has(p._id.toString()))
+              .sort((a, b) => (b.softCategoryMatches || 0) - (a.softCategoryMatches || 0));
+
+            remainingProducts.forEach(p => {
               const id = p._id.toString();
               if (!usedIds.has(id) && reorderedProducts.length < FAST_LIMIT) {
                 reorderedProducts.push(p);
@@ -6187,14 +6270,22 @@ ${productList}
               }
             });
           }
-          
+
           finalResults = reorderedProducts;
           console.log(`[${requestId}] ✅ LLM reordered ${finalResults.length} products in ${Date.now() - reorderStart}ms`);
         } else {
           console.log(`[${requestId}] ⚠️ Failed to parse LLM ranking, using original order`);
+          // Fall back to top products by soft category matches
+          finalResults = combinedResults
+            .sort((a, b) => (b.softCategoryMatches || 0) - (a.softCategoryMatches || 0))
+            .slice(0, FAST_LIMIT);
         }
       } catch (error) {
         console.log(`[${requestId}] ⚠️ LLM reordering failed: ${error.message}, using original order`);
+        // Fall back to top products by soft category matches
+        finalResults = combinedResults
+          .sort((a, b) => (b.softCategoryMatches || 0) - (a.softCategoryMatches || 0))
+          .slice(0, FAST_LIMIT);
       }
     }
 
