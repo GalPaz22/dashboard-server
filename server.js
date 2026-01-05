@@ -6178,6 +6178,36 @@ app.post("/fast-search", async (req, res) => {
 
     console.log(`[${requestId}] Search completed in ${Date.now() - searchStart}ms - ${combinedResults.length} candidates`);
 
+    // Step 3.5: Pre-filter irrelevant products based on query intent
+    // If searching for wine/alcohol, filter out accessories (refrigerators, decanters, glasses, etc.)
+    const queryLower = query.toLowerCase();
+    const isLookingForDrink = queryLower.includes('יין') || queryLower.includes('בירה') ||
+                              queryLower.includes('וויסקי') || queryLower.includes('ויסקי') ||
+                              queryLower.includes('אלכוהול') || queryLower.includes('משקה') ||
+                              queryLower.includes('wine') || queryLower.includes('beer') ||
+                              queryLower.includes('whisky') || queryLower.includes('vodka');
+
+    const accessoryKeywords = ['מקרר', 'דקנטר', 'כוס', 'כוסות', 'פותחן', 'מזיגה', 'סטנד', 'מעמד',
+                               'קירור', 'שומר', 'פקק', 'מדף', 'ארון', 'refrigerator', 'decanter',
+                               'glass', 'opener', 'rack', 'cooler', 'stopper'];
+
+    if (isLookingForDrink) {
+      const beforeFilter = combinedResults.length;
+      combinedResults = combinedResults.filter(p => {
+        const nameLower = (p.name || '').toLowerCase();
+        const isAccessory = accessoryKeywords.some(kw => nameLower.includes(kw));
+        // Keep if NOT an accessory, OR if it has a drink-related category
+        const hasDrinkCategory = p.category && (
+          p.category.includes('יין') || p.category.includes('בירה') ||
+          p.category.includes('וויסקי') || p.category.includes('משקה')
+        );
+        return !isAccessory || hasDrinkCategory;
+      });
+      if (combinedResults.length < beforeFilter) {
+        console.log(`[${requestId}] 🧹 Filtered out ${beforeFilter - combinedResults.length} accessories (looking for drinks)`);
+      }
+    }
+
     // Step 4: High-quality LLM reordering with descriptions and soft category context
     const reorderStart = Date.now();
     let finalResults = combinedResults;
