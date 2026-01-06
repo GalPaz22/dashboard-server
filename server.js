@@ -7593,6 +7593,15 @@ app.post("/search", async (req, res) => {
       }
 
       combinedResults.sort((a, b) => {
+        // 🎯 HIGHEST PRIORITY: LLM-selected products (highlight: true) come FIRST
+        // These are the top products the LLM chose based on visual + semantic relevance
+        const aIsLLMSelected = a.highlight === true;
+        const bIsLLMSelected = b.highlight === true;
+        
+        if (aIsLLMSelected !== bIsLLMSelected) {
+          return aIsLLMSelected ? -1 : 1; // LLM-selected products ALWAYS first
+        }
+        
         // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
         // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
         const aTextBonus = a.exactMatchBonus || 0;
