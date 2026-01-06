@@ -4919,7 +4919,13 @@ app.get("/search/load-more", async (req, res) => {
         let categoryFilteredResults;
         
         if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
-          // Use soft category search
+          // Use soft category search with custom tier2 boost map if available
+          const tier2BoostMap = extractedCategories.tier2BoostMap || req.store.softCategoriesBoost;
+          
+          if (extractedCategories.tier2BoostMap) {
+            console.log(`[${requestId}] 🎯 TIER-2: Using custom boost map:`, tier2BoostMap);
+          }
+          
           console.log(`[${requestId}] TIER-2 SOFT CATEGORY SEARCH: hardFilters=${JSON.stringify(categoryFilteredHardFilters)}, softFilters=${JSON.stringify(extractedCategories.softCategories)}`);
           categoryFilteredResults = await executeExplicitSoftCategorySearch(
             collection,
@@ -4934,7 +4940,7 @@ app.get("/search/load-more", async (req, res) => {
             false,
             cleanedText,
             [],
-            req.store.softCategoriesBoost,
+            tier2BoostMap, // 🎯 Use tier2 boost map with 100x for query-extracted, 10x for product-extracted
             true // skipTextualSearch = true for complex query tier-2
           );
 
@@ -5188,8 +5194,14 @@ app.get("/search/load-more", async (req, res) => {
         let categoryFilteredResults;
 
         if (extractedCategories.softCategories && extractedCategories.softCategories.length > 0) {
-          // Use soft category search
+          // Use soft category search with custom tier2 boost map if available
           const { syncMode } = req.store;
+          const tier2BoostMap = extractedCategories.tier2BoostMap || req.store.softCategoriesBoost;
+          
+          if (extractedCategories.tier2BoostMap) {
+            console.log(`[${requestId}] 🎯 LOAD-MORE: Using custom Tier 2 boost map:`, tier2BoostMap);
+          }
+          
           categoryFilteredResults = await executeExplicitSoftCategorySearch(
             collection,
             cleanedText,
@@ -5203,7 +5215,7 @@ app.get("/search/load-more", async (req, res) => {
             syncMode === 'image',
             cleanedText,
             [], // No exclusion since we're loading more
-            req.store.softCategoriesBoost,
+            tier2BoostMap, // 🎯 Use tier2 boost map with 100x for query-extracted, 10x for product-extracted
             true // skipTextualSearch = true for complex query tier-2 load-more
           );
 
@@ -8082,6 +8094,21 @@ app.post("/search", async (req, res) => {
           const uniqueLlmSoftCats = llmSoftCats.filter(cat => !initialSoftCats.includes(cat));
           
           extractedFromLLM.softCategories = [...initialSoftCats, ...uniqueLlmSoftCats];
+          
+          // 🎯 CREATE TIER 2 BOOST MAP for complex queries
+          // Query-extracted categories get 100x boost, product-extracted get 10x
+          const tier2SoftCategoryBoosts = {};
+          initialSoftCats.forEach(cat => {
+            tier2SoftCategoryBoosts[cat] = 100; // 🎯 QUERY-EXTRACTED: 100x boost
+          });
+          uniqueLlmSoftCats.forEach(cat => {
+            tier2SoftCategoryBoosts[cat] = 10; // Product-extracted: 10x boost
+          });
+          
+          // Store boost map in extractedCategories for use in Tier 2
+          extractedFromLLM.tier2BoostMap = tier2SoftCategoryBoosts;
+          
+          console.log(`[${requestId}] 🎯 COMPLEX TIER 2 BOOST MAP:`, tier2SoftCategoryBoosts);
         }
       }
 
@@ -8090,7 +8117,7 @@ app.post("/search", async (req, res) => {
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
-        extractedCategories: extractedFromLLM, // Categories extracted from TOP 3 LLM-selected products
+        extractedCategories: extractedFromLLM, // Categories + boost map for Tier 2
         type: 'complex-tier2' // Mark as complex query tier 2
       })).toString('base64');
       
