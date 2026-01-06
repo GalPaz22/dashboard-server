@@ -6942,6 +6942,18 @@ app.post("/search", async (req, res) => {
           console.log(`[${requestId}] Image mode detected - reducing text search boosts by 90%`);
         }
         
+        // 🎯 CREATE BOOST MAP for complex queries: query-extracted categories get 100x boost
+        const querySoftCats = Array.isArray(softFilters.softCategory) 
+          ? softFilters.softCategory 
+          : [softFilters.softCategory];
+        
+        const complexQueryBoostMap = {};
+        querySoftCats.forEach(cat => {
+          complexQueryBoostMap[cat] = 100; // 🎯 QUERY-EXTRACTED: 100x boost for initial results
+        });
+        
+        console.log(`[${requestId}] 🎯 COMPLEX QUERY BOOST MAP (initial search):`, complexQueryBoostMap);
+        
         combinedResults = await executeExplicitSoftCategorySearch(
           collection,
           cleanedTextForSearch,
@@ -6955,7 +6967,7 @@ app.post("/search", async (req, res) => {
           isImageModeWithSoftCategories,
           cleanedText,
           [],
-          req.store.softCategoriesBoost,
+          complexQueryBoostMap, // 🎯 Use 100x boost for query-extracted categories
           true // skipTextualSearch = true for complex queries (use only vectors + soft categories)
         );
           
