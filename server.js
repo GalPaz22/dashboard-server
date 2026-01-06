@@ -7716,8 +7716,11 @@ app.post("/search", async (req, res) => {
     }
 
     // Log results breakdown
-    const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2);
-    const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1);
+    // 🎯 WEIGHTED SCORE PRIORITY: Products with high weighted scores (e.g., query-extracted categories)
+    // should rank higher than products with multiple low-weight categories
+    const highWeightedProducts = combinedResults.filter(r => (r.softCategoryWeightedScore || 0) >= 100);
+    const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2 && (r.softCategoryWeightedScore || 0) < 100);
+    const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1 && (r.softCategoryWeightedScore || 0) < 100);
     const textMatchProducts = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 20000); // Use same threshold
 
     if (isSimpleResult) {
@@ -7725,8 +7728,9 @@ app.post("/search", async (req, res) => {
     } else {
       console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - not prioritized for complex queries`);
     }
-    console.log(`[${requestId}] Multi-category products (2+ matches): ${multiCategoryProducts.length} - ABSOLUTE PRIORITY`);
-    console.log(`[${requestId}] Single-category products: ${singleCategoryProducts.length}`);
+    console.log(`[${requestId}] 🎯 High-weighted products (score >= 100): ${highWeightedProducts.length} - QUERY-EXTRACTED CATEGORIES`);
+    console.log(`[${requestId}] Multi-category products (2+ matches, score < 100): ${multiCategoryProducts.length} - Lower priority`);
+    console.log(`[${requestId}] Single-category products (score < 100): ${singleCategoryProducts.length}`);
 
     const topResults = combinedResults.slice(0, 5);
     console.log(`[${requestId}] Top 5 results after sorting:`,
@@ -7734,8 +7738,10 @@ app.post("/search", async (req, res) => {
         name: p.name,
         textMatchBonus: p.exactMatchBonus || 0,
         softCategoryMatches: p.softCategoryMatches || 0,
+        softCategoryWeightedScore: p.softCategoryWeightedScore || 0, // 🎯 Show weighted score
         rrf_score: p.rrf_score,
         isMultiCategory: (p.softCategoryMatches || 0) >= 2,
+        isHighWeighted: (p.softCategoryWeightedScore || 0) >= 100, // 🎯 Query-extracted category indicator
         hasTextMatch: (p.exactMatchBonus || 0) >= 20000
       }))
     );
