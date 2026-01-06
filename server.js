@@ -3968,7 +3968,10 @@ async function executeExplicitSoftCategorySearch(
   const cleanedTextForExactMatch = originalCleanedText || cleanedTextForSearch;
 
   // FIRST: Find high-quality text matches that should be included regardless of soft categories
+  // BUT: Skip entirely if skipTextualSearch is true (complex queries, Tier 2)
   let highQualityTextMatches = [];
+  
+  if (!skipTextualSearch) {
   try {
     const textSearchPipeline = buildStandardSearchPipeline(cleanedTextForSearch, query, hardFilters, Math.max(searchLimit, 100), useOrLogic, isImageModeWithSoftCategories);
     const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
@@ -4002,6 +4005,9 @@ async function executeExplicitSoftCategorySearch(
     console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include`);
   } catch (error) {
     console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
+    }
+  } else {
+    console.log(`[SOFT SEARCH] ⚠️ SKIPPING high-quality text match search (skipTextualSearch = true)`);
   }
   
   // Check if this is a pure hard category search
