@@ -2916,8 +2916,11 @@ function calculateEnhancedRRFScore(fuzzyRank, vectorRank, softFilterBoost = 0, k
   const softBoost = softFilterBoost;
   
   // Progressive boosting: uses weighted score if provided (respects boost values)
-  // Higher boost scores (like 2 for "french") will rank higher than lower scores (like 1 for "fruity")
-  const multiCategoryBoost = softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 20000 : 0;
+  // 🎯 FIX: For large weighted scores (like our 100x query boost), use linear boosting 
+  // to avoid Infinity scores which break sorting. For small counts (1, 2, 3), use power boost.
+  const multiCategoryBoost = softCategoryMatches >= 10 
+    ? (softCategoryMatches * 50000) // Huge linear boost for query-extracted (weighted)
+    : (softCategoryMatches > 0 ? Math.pow(5, softCategoryMatches) * 20000 : 0);
   
   // Add keyword match bonus for strong text matches
   // Add MASSIVE exact match bonus to ensure exact matches appear first
@@ -7593,15 +7596,6 @@ app.post("/search", async (req, res) => {
       }
 
       combinedResults.sort((a, b) => {
-        // 🎯 HIGHEST PRIORITY: LLM-selected products (highlight: true) come FIRST
-        // These are the top products the LLM chose based on visual + semantic relevance
-        const aIsLLMSelected = a.highlight === true;
-        const bIsLLMSelected = b.highlight === true;
-        
-        if (aIsLLMSelected !== bIsLLMSelected) {
-          return aIsLLMSelected ? -1 : 1; // LLM-selected products ALWAYS first
-        }
-        
         // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
         // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
         const aTextBonus = a.exactMatchBonus || 0;
@@ -7809,10 +7803,20 @@ app.post("/search", async (req, res) => {
           
           console.log(`[${requestId}] 🔄 Category-filtered vector search returned ${categoryFilteredVectorResults.length} results (limit: 100)`);
           
-          // Convert to combinedResults format with STRONG vector scoring
+          // Convert to combinedResults format with QUERY-SPECIFIC boost map
+          const querySoftCats = Array.isArray(softFilters.softCategory) 
+            ? softFilters.softCategory 
+            : [softFilters.softCategory];
+          
+          const reRunBoostMap = {};
+          querySoftCats.forEach(cat => {
+            reRunBoostMap[cat] = 100; // 🎯 QUERY-EXTRACTED: 100x boost for re-run results
+          });
+
           remainingResults = categoryFilteredVectorResults.map((doc, index) => {
             const exactMatchBonus = getExactMatchBonus(doc.name, query, cleanedText);
-            const matchResult = calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, req.store.softCategoriesBoost);
+            // 🎯 Use reRunBoostMap instead of store default!
+            const matchResult = calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, reRunBoostMap);
             
             // ENHANCED: Give strong weight to vector rank (low index = high similarity)
             // Vector rank is PRIORITIZED over exact match for semantic searches
@@ -7827,7 +7831,7 @@ app.post("/search", async (req, res) => {
               vectorRank: index, // Store for debugging
               vectorBoost: vectorBoost // Store for debugging
             };
-          });
+          }).sort((a, b) => b.rrf_score - a.rrf_score); // 🎯 CRITICAL FIX: Sort by boosted score
         } else {
           // No categories extracted, use original remaining results
           remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
