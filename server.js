@@ -3736,11 +3736,11 @@ Soft Categories: ${productSoftCats.join(', ')}${matchIndicator ? `\n${matchIndic
 ---` 
              });
              imagesSent++; // Count successfully sent image
-          }
-        } catch (imageError) {
-          console.error(`Failed to fetch image for product ${product._id.toString()}:`, imageError);
-        }
-      }
+           }
+         } catch (imageError) {
+           console.error(`Failed to fetch image for product ${product._id.toString()}:`, imageError);
+         }
+       }
       
       console.log(`[IMAGE REORDER] Sent ${imagesSent} product images to LLM for reordering`);
 
@@ -7226,19 +7226,39 @@ app.post("/search", async (req, res) => {
               let categoryFilteredResults;
 
               // Combine LLM-extracted soft category with soft categories extracted from results
-              // This ensures the original user intent (e.g., "שמתאים לגבינות") is preserved
+              // PRIORITY ORDER: Query-extracted (LLM from user query) comes FIRST, then product-extracted
+              // This ensures the original user intent (e.g., "עגילי חישוק עבים") is prioritized highest
               const llmSoftCategories = softFilters.softCategory || [];
+              const llmSoftCategoriesArray = Array.isArray(llmSoftCategories) ? llmSoftCategories : [llmSoftCategories];
+              
+              // IMPORTANT: Put query-extracted categories FIRST for highest priority
               const combinedSoftCategories = [...new Set([
-                ...(Array.isArray(llmSoftCategories) ? llmSoftCategories : [llmSoftCategories]),
-                ...softCategoriesArray
+                ...llmSoftCategoriesArray,  // 🎯 QUERY-EXTRACTED (from user's search) - HIGHEST PRIORITY
+                ...softCategoriesArray       // Product-extracted (from LLM-selected products) - lower priority
               ])].filter(Boolean);
 
               if (combinedSoftCategories.length > 0 && queryEmbedding) {
                 // SIMPLE QUERY TIER 2: Only return products WITH matching soft categories from Tier 1
                 // Skip textual search, use ONLY vector search filtered by soft categories for semantic similarity
-                console.log(`[${requestId}] Using combined soft categories for Tier 2: LLM=${JSON.stringify(llmSoftCategories)}, extracted=${JSON.stringify(softCategoriesArray)}, combined=${JSON.stringify(combinedSoftCategories)}`);
-                console.log(`[${requestId}] 🎯 TIER 2 STRICT MODE: Will only return products WITH these soft categories`);
+                console.log(`[${requestId}] 🎯 TIER 2 SOFT CATEGORY PRIORITY:`);
+                console.log(`[${requestId}]   1️⃣  QUERY-EXTRACTED (highest priority): ${JSON.stringify(llmSoftCategoriesArray)}`);
+                console.log(`[${requestId}]   2️⃣  PRODUCT-EXTRACTED (from LLM results): ${JSON.stringify(softCategoriesArray)}`);
+                console.log(`[${requestId}]   ✅ COMBINED (in priority order): ${JSON.stringify(combinedSoftCategories)}`);
+                console.log(`[${requestId}] 🔒 TIER 2 STRICT MODE: Will only return products WITH these soft categories`);
                 
+                // 🎯 CREATE BOOST MAP: Query-extracted categories get 10x higher boost than product-extracted
+                const tier2SoftCategoryBoosts = {};
+                llmSoftCategoriesArray.forEach(cat => {
+                  tier2SoftCategoryBoosts[cat] = 100; // 🎯 QUERY-EXTRACTED: 100x boost
+                });
+                softCategoriesArray.forEach(cat => {
+                  if (!tier2SoftCategoryBoosts[cat]) { // Don't overwrite query-extracted boost
+                    tier2SoftCategoryBoosts[cat] = 10; // Product-extracted: 10x boost
+                  }
+                });
+                console.log(`[${requestId}] 🎯 TIER 2 BOOST MAP:`, tier2SoftCategoryBoosts);
+                
+                // Use custom tier2 boost map instead of default store boosts
                 categoryFilteredResults = await executeExplicitSoftCategorySearch(
                   collection,
                   cleanedText,
@@ -7252,7 +7272,7 @@ app.post("/search", async (req, res) => {
                   false,
                   cleanedText,
                   [],
-                  req.store.softCategoriesBoost,
+                  tier2SoftCategoryBoosts, // 🎯 Use custom boost map with 100x for query-extracted, 10x for product-extracted
                   true, // skipTextualSearch = true for simple query Tier 2 (vector only + soft category strict matching)
                   true  // enforceSoftCategoryFilter = true - Tier 2 products MUST match Tier 1 soft categories
                 );
@@ -7315,12 +7335,20 @@ app.post("/search", async (req, res) => {
                         existing.sources.push('product_similarity');
                         existing.similarityBoost = 8000; // Boost for matching both
                       } else {
+                        // Calculate soft category matches using tier2 boost map for similarity results
+                        const matchResult = calculateSoftCategoryMatches(
+                          p.softCategory,
+                          combinedSoftCategories,
+                          tier2SoftCategoryBoosts // 🎯 Use custom boost map
+                        );
+                        
                         resultMap.set(id, {
                           ...p,
                           sources: ['product_similarity'],
                           similarityBoost: 4000,
-                          softFilterMatch: false,
-                          softCategoryMatches: 0
+                          softFilterMatch: matchResult.count > 0,
+                          softCategoryMatches: matchResult.count,
+                          softCategoryWeightedScore: matchResult.weightedScore
                         });
                       }
                     });
