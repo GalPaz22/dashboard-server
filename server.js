@@ -3694,7 +3694,11 @@ Context: ${context}${softCategoryContext}
 
 Search Query Intent: "${sanitizedQuery}"` });
        
-       for (let i = 0; i < 2; i++) {
+       // Send up to 4 products with images that MATCH query-extracted categories
+       const maxImagesToSend = Math.min(4, productsWithImages.length);
+       let imagesSent = 0;
+       
+       for (let i = 0; i < productsWithImages.length && imagesSent < maxImagesToSend; i++) {
          const product = productsWithImages[i];
          
          try {
@@ -3731,11 +3735,14 @@ Soft Categories: ${productSoftCats.join(', ')}${matchIndicator ? `\n${matchIndic
 
 ---` 
              });
-           }
-         } catch (imageError) {
-           console.error(`Failed to fetch image for product ${product._id.toString()}:`, imageError);
-         }
-       }
+             imagesSent++; // Count successfully sent image
+          }
+        } catch (imageError) {
+          console.error(`Failed to fetch image for product ${product._id.toString()}:`, imageError);
+        }
+      }
+      
+      console.log(`[IMAGE REORDER] Sent ${imagesSent} product images to LLM for reordering`);
 
        const finalInstruction = explain 
          ? `Analyze the product images and descriptions above. Return JSON array of EXACTLY 4 most visually relevant products maximum.
