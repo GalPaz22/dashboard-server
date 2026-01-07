@@ -6021,16 +6021,12 @@ app.post("/fast-search", async (req, res) => {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - optimized for speed)`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products)`);
     
-    // SPEED OPTIMIZATIONS for fast-search:
-    // 1. Set limit to 5 (fewer results to process)
-    // 2. Disable progressive loading (no phase splitting)
-    // 3. Skip image LLM reordering (faster, still good quality)
+    // Simply call /search with limit=5 - that's the "fast" part!
+    // Same quality as main search, just fewer results = faster
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
-    req.body.disableImageReordering = true; // Skip heavy image LLM processing
-    req.body.fastMode = true; // Signal to /search to use fast mode optimizations
     
     // Temporarily override store limit
     const originalLimit = req.store.limit;
@@ -6103,8 +6099,8 @@ app.post("/simple-search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // STRICT exact word matching - only return results if ALL query words appear in product
-    // This ensures "zero results" triggers the AI takeover for better semantic search
+    // STRICT matching - only return results if ALL query words appear in product name
+    // Focuses on name only for stricter matching (description can be too broad)
     const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     
     if (queryWords.length === 0) {
@@ -6112,21 +6108,17 @@ app.post("/simple-search", async (req, res) => {
       return res.json({ products: [], count: 0, timing: Date.now() - searchStartTime });
     }
     
-    // Get all products and filter in memory for STRICT matching
-    const allProducts = await collection.find({}).limit(500).toArray();
+    // Search only in name and category for stricter matching
+    const results = await collection.find({
+      $and: queryWords.map(word => ({
+        $or: [
+          { name: { $regex: word, $options: 'i' } },
+          { category: { $regex: word, $options: 'i' } }
+        ]
+      }))
+    }).limit(limit).toArray();
     
-    const results = allProducts.filter(product => {
-      const searchableText = `${product.name || ''} ${product.description || ''} ${product.category || ''}`.toLowerCase();
-      
-      // ALL query words must appear as complete words in the searchable text
-      return queryWords.every(word => {
-        // Use word boundary regex for exact word matching
-        const wordRegex = new RegExp(`\\b${word}\\b`, 'i');
-        return wordRegex.test(searchableText);
-      });
-    }).slice(0, limit);
-    
-    console.log(`[${requestId}] 🔍 Simple search: query="${query}", words=${queryWords.join(',')}, found ${results.length} EXACT matches (from ${allProducts.length} products)`);
+    console.log(`[${requestId}] 🔍 Simple search: query="${query}", words=[${queryWords.join(',')}], found ${results.length} matches (ALL words must appear in name/category)`);
 
     const response = results.map(product => ({
       _id: product._id.toString(),
@@ -6174,14 +6166,8 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, fastMode, disableImageReordering } = req.body;
+  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
-  
-  // Fast mode optimizations - skip heavy processing for speed
-  const isFastMode = fastMode === true;
-  if (isFastMode) {
-    console.log(`[${requestId}] 🚀 FAST MODE enabled - optimizing for speed`);
-  }
 
   // Trim query to avoid classification issues with trailing/leading whitespace
   // Also normalize quote characters (Hebrew geresh ׳ → ASCII apostrophe ')
@@ -6195,8 +6181,7 @@ app.post("/search", async (req, res) => {
   // Use limit from user config (via API key), fallback to 5 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
-  // Fast mode: reduce vector search candidates for speed (1x instead of 3x)
-  const vectorLimit = isFastMode ? searchLimit : (searchLimit * 3); // FAST MODE: 1x, NORMAL: 3x
+  const vectorLimit = searchLimit * 3; // INCREASED: 3x for stronger semantic search
   
   console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (INCREASED for semantic power) (from user config: ${userLimit || 'default'})`);
   
@@ -7319,12 +7304,11 @@ app.post("/search", async (req, res) => {
       // Skip LLM reordering if circuit breaker is open
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI();
     
-      if (shouldUseLLMReranking && !isFastMode) {
+      if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
         
         try {
-          // Skip image reordering if disabled (faster)
-          const reorderFn = (syncMode === 'image' && !disableImageReordering) ? reorderImagesWithGPT : reorderResultsWithGPT;
+          const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
           
           // Always send all results to LLM for maximum flexibility
           // The LLM will use soft category context to make informed decisions
