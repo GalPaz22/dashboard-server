@@ -7,6 +7,12 @@ import dotenv from "dotenv";
 import { GoogleGenAI, Type, } from "@google/genai";
 import { createClient } from 'redis';
 import crypto from 'crypto';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+// ES modules compatibility
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 
 dotenv.config();
@@ -6386,6 +6392,64 @@ ${productList}
   }
 });
 
+// --- Simple keyword search (for demo/comparison) ---
+app.post("/simple-search", async (req, res) => {
+  const requestId = Math.random().toString(36).substr(2, 9);
+  const searchStartTime = Date.now();
+  const { query, limit = 12 } = req.body;
+  const { dbName, products: collectionName } = req.store;
+
+  console.log(`[${requestId}] 🔍 Simple keyword search: "${query}"`);
+
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+
+    // Simple text search - just basic MongoDB regex matching
+    // Much more lenient than AI search, returns anything with keyword
+    const searchRegex = new RegExp(query.split(' ').filter(w => w.length > 0).join('|'), 'i');
+    
+    const results = await collection.find({
+      $or: [
+        { name: searchRegex },
+        { description: searchRegex },
+        { category: searchRegex },
+        { softCategory: searchRegex }
+      ]
+    }).limit(limit).toArray();
+    
+    console.log(`[${requestId}] 🔍 Simple search: query="${query}", regex=${searchRegex}, found ${results.length} matches`);
+
+    const response = results.map(product => ({
+      _id: product._id.toString(),
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      type: product.type,
+      category: product.category,
+      softCategory: product.softCategory,
+      specialSales: product.specialSales,
+      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+      ItemID: product.ItemID
+    }));
+
+    console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results in ${Date.now() - searchStartTime}ms`);
+
+    res.json({
+      products: response,
+      count: response.length,
+      timing: Date.now() - searchStartTime
+    });
+  } catch (error) {
+    console.error(`[${requestId}] Simple search error:`, error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post("/search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
@@ -10028,6 +10092,20 @@ app.delete("/active-users/:visitor_id", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+/* =========================================================== *\
+   DEMO PAGES
+\* =========================================================== */
+
+// Serve main demo
+app.get("/", (req, res) => {
+  res.sendFile(path.join(__dirname, "demo.html"));
+});
+
+// Serve enrichment demo
+app.get("/demo-enrichment", (req, res) => {
+  res.sendFile(path.join(__dirname, "demo-enrichment.html"));
+});
+
 /* =========================================================== *\
    SERVER STARTUP
 \* =========================================================== */
