@@ -6021,11 +6021,16 @@ app.post("/fast-search", async (req, res) => {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - same as main search but limited)`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - optimized for speed)`);
     
-    // Simply call /search with limit=5 by modifying the request
+    // SPEED OPTIMIZATIONS for fast-search:
+    // 1. Set limit to 5 (fewer results to process)
+    // 2. Disable progressive loading (no phase splitting)
+    // 3. Skip image LLM reordering (faster, still good quality)
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
+    req.body.disableImageReordering = true; // Skip heavy image LLM processing
+    req.body.fastMode = true; // Signal to /search to use fast mode optimizations
     
     // Temporarily override store limit
     const originalLimit = req.store.limit;
@@ -6169,8 +6174,14 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
+  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, fastMode, disableImageReordering } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
+  
+  // Fast mode optimizations - skip heavy processing for speed
+  const isFastMode = fastMode === true;
+  if (isFastMode) {
+    console.log(`[${requestId}] 🚀 FAST MODE enabled - optimizing for speed`);
+  }
 
   // Trim query to avoid classification issues with trailing/leading whitespace
   // Also normalize quote characters (Hebrew geresh ׳ → ASCII apostrophe ')
@@ -6184,7 +6195,8 @@ app.post("/search", async (req, res) => {
   // Use limit from user config (via API key), fallback to 5 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
-  const vectorLimit = searchLimit * 3; // INCREASED: 3x for stronger semantic search
+  // Fast mode: reduce vector search candidates for speed (1x instead of 3x)
+  const vectorLimit = isFastMode ? searchLimit : (searchLimit * 3); // FAST MODE: 1x, NORMAL: 3x
   
   console.log(`[${requestId}] Search limits: fuzzy=${searchLimit}, vector=${vectorLimit} (INCREASED for semantic power) (from user config: ${userLimit || 'default'})`);
   
@@ -7307,11 +7319,12 @@ app.post("/search", async (req, res) => {
       // Skip LLM reordering if circuit breaker is open
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI();
     
-      if (shouldUseLLMReranking) {
+      if (shouldUseLLMReranking && !isFastMode) {
         console.log(`[${requestId}] Applying LLM reordering`);
         
         try {
-          const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
+          // Skip image reordering if disabled (faster)
+          const reorderFn = (syncMode === 'image' && !disableImageReordering) ? reorderImagesWithGPT : reorderResultsWithGPT;
           
           // Always send all results to LLM for maximum flexibility
           // The LLM will use soft category context to make informed decisions
