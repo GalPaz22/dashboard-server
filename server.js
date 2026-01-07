@@ -6009,7 +6009,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 // ============================================================================
 // FAST SEARCH ENDPOINT - Optimized for speed (~10 products, <500ms response)
 // ============================================================================
-app.post("/fast-search", async (req, res, next) => {
+app.post("/fast-search", async (req, res) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
   
@@ -6023,24 +6023,57 @@ app.post("/fast-search", async (req, res, next) => {
 
     console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - same as main search but limited)`);
     
-    // Use the same exact search logic as /search but with a smaller limit
-    // Simply override limit and pass through to the search endpoint below
+    // Simply call /search with limit=5 by modifying the request
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
     
-    // Save original store limit and override temporarily
+    // Temporarily override store limit
     const originalLimit = req.store.limit;
     req.store.limit = FAST_LIMIT;
     
-    // Continue to /search endpoint below (will be processed by the next matching route)
-    // We don't return here, just let it fall through
+    // Create a custom response handler to intercept /search response
+    const originalJson = res.json.bind(res);
+    let responseSent = false;
     
-    //  But we need a way to identify this as a fast-search for response formatting...
-    // Actually, let's just keep it simple and use /search with limit=5
-    // The client will just get modern format with 5 products - that's the "fast" part!
-    req.body._isFastSearch = true; // Mark this for logging purposes
+    res.json = function(data) {
+      if (responseSent) return;
+      responseSent = true;
+      
+      // Restore original limit
+      req.store.limit = originalLimit;
+      
+      // Extract products and ensure we only return FAST_LIMIT
+      const products = (data.products || []).slice(0, FAST_LIMIT);
+      const executionTime = Date.now() - searchStartTime;
+      
+      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products`);
+      
+      // Return in simplified format
+      return originalJson({
+        products: products,
+        metadata: {
+          query,
+          requestId,
+          executionTime,
+          isFastSearch: true
+        }
+      });
+    };
     
-    return next(); // Continue to main /search handler
+    // Now manually call the search logic
+    // We need to find and call the /search handler
+    // Let's use app._router to find it
+    const searchRoute = app._router.stack.find(layer => 
+      layer.route && layer.route.path === '/search' && layer.route.methods.post
+    );
+    
+    if (searchRoute && searchRoute.route) {
+      // Call the first handler (should be the main search handler)
+      const searchHandler = searchRoute.route.stack[0].handle;
+      return await searchHandler(req, res);
+    } else {
+      throw new Error('Could not find /search handler');
+    }
 
   } catch (error) {
     console.error(`[${requestId}] ⚡ Fast search error:`, error);
@@ -6065,20 +6098,30 @@ app.post("/simple-search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // Simple text search - just basic MongoDB regex matching
-    // Much more lenient than AI search, returns anything with keyword
-    const searchRegex = new RegExp(query.split(' ').filter(w => w.length > 0).join('|'), 'i');
+    // STRICT exact word matching - only return results if ALL query words appear in product
+    // This ensures "zero results" triggers the AI takeover for better semantic search
+    const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     
-    const results = await collection.find({
-      $or: [
-        { name: searchRegex },
-        { description: searchRegex },
-        { category: searchRegex },
-        { softCategory: searchRegex }
-      ]
-    }).limit(limit).toArray();
+    if (queryWords.length === 0) {
+      console.log(`[${requestId}] 🔍 Simple search: query too short, returning 0 results`);
+      return res.json({ products: [], count: 0, timing: Date.now() - searchStartTime });
+    }
     
-    console.log(`[${requestId}] 🔍 Simple search: query="${query}", regex=${searchRegex}, found ${results.length} matches`);
+    // Get all products and filter in memory for STRICT matching
+    const allProducts = await collection.find({}).limit(500).toArray();
+    
+    const results = allProducts.filter(product => {
+      const searchableText = `${product.name || ''} ${product.description || ''} ${product.category || ''}`.toLowerCase();
+      
+      // ALL query words must appear as complete words in the searchable text
+      return queryWords.every(word => {
+        // Use word boundary regex for exact word matching
+        const wordRegex = new RegExp(`\\b${word}\\b`, 'i');
+        return wordRegex.test(searchableText);
+      });
+    }).slice(0, limit);
+    
+    console.log(`[${requestId}] 🔍 Simple search: query="${query}", words=${queryWords.join(',')}, found ${results.length} EXACT matches (from ${allProducts.length} products)`);
 
     const response = results.map(product => ({
       _id: product._id.toString(),
