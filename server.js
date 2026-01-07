@@ -6009,7 +6009,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 // ============================================================================
 // FAST SEARCH ENDPOINT - Optimized for speed (~10 products, <500ms response)
 // ============================================================================
-app.post("/fast-search", async (req, res) => {
+app.post("/fast-search", async (req, res, next) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
   
