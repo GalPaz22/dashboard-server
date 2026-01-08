@@ -3420,7 +3420,8 @@ async function reorderResultsWithGPT(
   explain = true,
   context,
   softFilters = null,
-  maxResults = 25
+  maxResults = 25,
+  useFastLLM = false
 ) {
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
@@ -3533,8 +3534,11 @@ ${JSON.stringify(productData, null, 2)}`;
           },
         };
 
+    // Use fast model if requested (for /fast-search)
+    const modelName = useFastLLM ? "gemini-2.0-flash-exp" : "gemini-3-flash-preview";
+
     const response = await genAI.models.generateContent({
-      model: "gemini-3-flash-preview",
+      model: modelName,
       contents: userContent,
       config: { 
         systemInstruction, 
@@ -3596,7 +3600,8 @@ async function reorderImagesWithGPT(
   explain = true,
   context,
   softFilters = null,
-  maxResults = 25
+  maxResults = 25,
+  useFastLLM = false
 ) {
  try {
    if (!Array.isArray(alreadyDelivered)) {
@@ -3818,8 +3823,11 @@ PRIORITIZE query-matching products STRONGLY.`;
              },
            };
 
+      // Use fast model if requested (for /fast-search)
+      const modelName = useFastLLM ? "gemini-2.0-flash-exp" : "gemini-3-flash-preview";
+
        const response = await genAI.models.generateContent({
-         model: "gemini-3-flash-preview",
+        model: modelName,
          contents: contents,
 
          config: { 
@@ -6021,12 +6029,12 @@ app.post("/fast-search", async (req, res) => {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products)`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model)`);
     
-    // Simply call /search with limit=5 - that's the "fast" part!
-    // Same quality as main search, just fewer results = faster
+    // Use faster LLM model (gemini-2.5-flash-lite) for reordering
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
+    req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
     
     // Temporarily override store limit
     const originalLimit = req.store.limit;
@@ -6166,8 +6174,14 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories } = req.body;
+  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
+  
+  // Fast LLM mode for /fast-search - use lighter model
+  const shouldUseFastLLM = useFastLLM === true;
+  if (shouldUseFastLLM) {
+    console.log(`[${requestId}] 🚀 Using gemini-2.5-flash-lite for LLM reordering (faster)`);
+  }
 
   // Trim query to avoid classification issues with trailing/leading whitespace
   // Also normalize quote characters (Hebrew geresh ׳ → ASCII apostrophe ')
@@ -7314,7 +7328,7 @@ app.post("/search", async (req, res) => {
           // The LLM will use soft category context to make informed decisions
           console.log(`[${requestId}] Sending all ${combinedResults.length} products to LLM for re-ranking (limiting to ${searchLimit} results).`);
           
-          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, searchLimit);
+          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, searchLimit, shouldUseFastLLM);
           
           // Record success
           aiCircuitBreaker.recordSuccess();
