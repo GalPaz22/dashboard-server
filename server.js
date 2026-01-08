@@ -3535,7 +3535,7 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     // Use fast model if requested (for /fast-search)
-    const modelName = useFastLLM ? "gemini-2.0-flash-exp" : "gemini-3-flash-preview";
+    const modelName = useFastLLM ? "gemini-2.5-flash-lite" : "gemini-3-flash-preview";
 
     const response = await genAI.models.generateContent({
       model: modelName,
@@ -7326,9 +7326,11 @@ app.post("/search", async (req, res) => {
           
           // Always send all results to LLM for maximum flexibility
           // The LLM will use soft category context to make informed decisions
-          console.log(`[${requestId}] Sending all ${combinedResults.length} products to LLM for re-ranking (limiting to ${searchLimit} results).`);
+          // For fast mode, limit to 10 products for faster processing
+          const llmLimit = shouldUseFastLLM ? 10 : searchLimit;
+          console.log(`[${requestId}] Sending ${combinedResults.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
           
-          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, searchLimit, shouldUseFastLLM);
+          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM);
           
           // Record success
           aiCircuitBreaker.recordSuccess();
