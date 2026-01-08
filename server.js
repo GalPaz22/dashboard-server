@@ -3824,7 +3824,7 @@ PRIORITIZE query-matching products STRONGLY.`;
            };
 
       // Use fast model if requested (for /fast-search)
-      const modelName = useFastLLM ? "gemini-2.0-flash-exp" : "gemini-3-flash-preview";
+      const modelName = useFastLLM ? "gemini-2.5-flash-lite" : "gemini-3-flash-preview";
 
        const response = await genAI.models.generateContent({
         model: modelName,
@@ -6023,18 +6023,19 @@ app.post("/fast-search", async (req, res) => {
   
   try {
     let { query } = req.body;
-    const FAST_LIMIT = 5; // Always return exactly 5 products for speed
+    const FAST_LIMIT = 10; // Return 10 products (was 5) - more variety with Tier 2
     
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model)`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model + aggressive expansion)`);
     
     // Use faster LLM model (gemini-2.5-flash-lite) for reordering
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
     req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
+    req.body.fastSearchMode = true; // Signal for aggressive Tier 2 expansion with soft category + vector boost
     
     // Temporarily override store limit
     const originalLimit = req.store.limit;
@@ -6174,13 +6175,18 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM } = req.body;
+  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM, fastSearchMode } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
   // Fast LLM mode for /fast-search - use lighter model
   const shouldUseFastLLM = useFastLLM === true;
+  const isFastSearchMode = fastSearchMode === true;
+  
   if (shouldUseFastLLM) {
     console.log(`[${requestId}] 🚀 Using gemini-2.5-flash-lite for LLM reordering (faster)`);
+  }
+  if (isFastSearchMode) {
+    console.log(`[${requestId}] 🎯 FAST SEARCH MODE: Aggressive Tier 2 expansion with multi-category + vector boost`);
   }
 
   // Trim query to avoid classification issues with trailing/leading whitespace
