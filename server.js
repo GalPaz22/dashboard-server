@@ -751,12 +751,13 @@ async function authenticate(req, res, next) {
   }
 }
 
-// Apply authentication to all routes except test endpoints, health, and cache management
+// Apply authentication to all routes except test endpoints, health, cache management, and webhooks
 app.use((req, res, next) => {
   if (req.path.startsWith('/test-') ||
       req.path === '/health' ||
       req.path === '/clear-cache' ||
-      req.path.startsWith('/cache/')) {
+      req.path.startsWith('/cache/') ||
+      req.path.startsWith('/webhooks/')) {
     return next();
   }
   return authenticate(req, res, next);
