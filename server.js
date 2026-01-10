@@ -10602,9 +10602,12 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
 
     // Also check cart.attributes (some themes store it here)
     if (!sessionId && payload.cart && payload.cart.attributes) {
-      sessionId = payload.cart.attributes.session_id || payload.cart.attributes.tracking_session_id;
+      sessionId = payload.cart.attributes._semantix_session_id || 
+                  payload.cart.attributes.semantix_session_id ||
+                  payload.cart.attributes.session_id || 
+                  payload.cart.attributes.tracking_session_id;
       if (sessionId) {
-        console.log(`[${requestId}] 🎯 Found session_id in cart attributes: ${sessionId}`);
+        console.log(`[${requestId}] 🎯 Found session_id in cart.attributes: ${sessionId}`);
       }
     }
 
@@ -10814,7 +10817,7 @@ function verifyShopifyWebhook(payload, hmacHeader, secret) {
  * - days: Get checkouts from last N days (default: 30)
  * - limit: Max results (default: 100)
  */
-app.get("/checkout-events", authenticateAPIKey, async (req, res) => {
+app.get("/checkout-events", authenticate, async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const { session_id, days = 30, limit = 100 } = req.query;
   const { dbName } = req.store;
