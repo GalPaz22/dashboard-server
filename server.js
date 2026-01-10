@@ -5550,7 +5550,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       console.log(`[${requestId}] 🎯 enableSimpleCategoryExtraction is ON - extracting categories from query: "${query}"`);
       // Use custom system instruction from store config if available
       const customSystemInstruction = req.store?.filterExtractionSystemInstruction || null;
-      extractedFilters = await extractFiltersFromQueryEnhanced(translatedQuery || query, categories, types, softCategories, false, context, customSystemInstruction);
+      extractedFilters = await extractFiltersFromQueryEnhanced( query, categories, types, softCategories, false, context, customSystemInstruction);
 
       if (extractedFilters.category || extractedFilters.softCategory) {
         console.log(`[${requestId}] 🎯 SIMPLE QUERY CATEGORY EXTRACTION: category="${extractedFilters.category || 'none'}", softCategory="${extractedFilters.softCategory || 'none'}"`);
@@ -6443,7 +6443,7 @@ app.post("/search", async (req, res) => {
     // OPTIMIZATION: Skip filter extraction for simple queries to avoid false positives
     // Simple product name queries like "כרם שבו" or "סנסר לבן" shouldn't extract filters
     // CRITICAL: For simple queries, ALWAYS use empty filters to avoid using cached complex query filters
-    const queryForExtraction = translatedQuery || query;
+    const queryForExtraction = query;
     let enhancedFilters = {};
     
     if (categories) {
@@ -10533,6 +10533,348 @@ app.get("/product-clicks-by-query", async (req, res) => {
 
   }
 
+});
+
+// ============================================================
+// SHOPIFY WEBHOOK: Checkout/Order Created
+// ============================================================
+
+/**
+ * Shopify Webhook Handler for Order Creation
+ * 
+ * SETUP INSTRUCTIONS:
+ * 1. In Shopify Admin -> Settings -> Notifications -> Webhooks
+ * 2. Create webhook: "Order creation" 
+ * 3. URL: https://api.semantix-ai.com/webhooks/shopify/order-created
+ * 4. Format: JSON
+ * 
+ * PAYLOAD STRUCTURE:
+ * Shopify sends order data with line_items, customer info, etc.
+ * We match it to our tracking via session_id stored in order.note_attributes
+ * 
+ * IMPORTANT: 
+ * - To link orders to sessions, your Shopify checkout must include:
+ *   note_attributes: [{ name: "session_id", value: "sess-xxxxx" }]
+ * - This can be added via Shopify checkout customization or cart attributes
+ */
+
+app.post("/webhooks/shopify/order-created", express.raw({ type: 'application/json' }), async (req, res) => {
+  const requestId = Math.random().toString(36).substr(2, 9);
+  console.log(`[${requestId}] 🛒 Shopify Order Webhook Received`);
+
+  try {
+    // HMAC Verification (optional but recommended for production)
+    const hmacHeader = req.headers['x-shopify-hmac-sha256'];
+    const shopDomain = req.headers['x-shopify-shop-domain'];
+    
+    if (shopDomain) {
+      console.log(`[${requestId}] Shop: ${shopDomain}`);
+    }
+
+    // Parse the webhook payload
+    const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    
+    if (!payload || !payload.id) {
+      console.error(`[${requestId}] ❌ Invalid payload - missing order ID`);
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    const orderId = String(payload.id);
+    const orderNumber = payload.order_number || payload.name;
+    
+    console.log(`[${requestId}] Order ID: ${orderId}, Order Number: ${orderNumber}`);
+
+    // Extract session_id from note_attributes
+    let sessionId = null;
+    if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
+      const sessionAttr = payload.note_attributes.find(attr => attr.name === 'session_id' || attr.name === 'tracking_session_id');
+      if (sessionAttr) {
+        sessionId = sessionAttr.value;
+        console.log(`[${requestId}] 🎯 Found session_id: ${sessionId}`);
+      }
+    }
+
+    // Also check cart.attributes (some themes store it here)
+    if (!sessionId && payload.cart && payload.cart.attributes) {
+      sessionId = payload.cart.attributes.session_id || payload.cart.attributes.tracking_session_id;
+      if (sessionId) {
+        console.log(`[${requestId}] 🎯 Found session_id in cart attributes: ${sessionId}`);
+      }
+    }
+
+    if (!sessionId) {
+      console.warn(`[${requestId}] ⚠️ No session_id found in order - cannot link to search tracking`);
+    }
+
+    // Extract relevant order data
+    const orderData = {
+      order_id: orderId,
+      order_number: orderNumber,
+      session_id: sessionId,
+      created_at: payload.created_at || new Date().toISOString(),
+      total_price: parseFloat(payload.total_price) || 0,
+      subtotal_price: parseFloat(payload.subtotal_price) || 0,
+      total_tax: parseFloat(payload.total_tax) || 0,
+      currency: payload.currency || 'ILS',
+      
+      // Customer info
+      customer: payload.customer ? {
+        id: String(payload.customer.id),
+        email: payload.customer.email,
+        first_name: payload.customer.first_name,
+        last_name: payload.customer.last_name,
+        phone: payload.customer.phone
+      } : null,
+
+      // Line items (products purchased)
+      line_items: (payload.line_items || []).map(item => ({
+        product_id: String(item.product_id),
+        variant_id: String(item.variant_id),
+        title: item.title,
+        variant_title: item.variant_title,
+        quantity: item.quantity,
+        price: parseFloat(item.price),
+        sku: item.sku,
+        vendor: item.vendor
+      })),
+
+      // Shopify data
+      shopify_data: {
+        shop_domain: shopDomain,
+        financial_status: payload.financial_status,
+        fulfillment_status: payload.fulfillment_status,
+        tags: payload.tags,
+        note: payload.note
+      },
+
+      // Tracking metadata
+      webhook_received_at: new Date().toISOString(),
+      processed: false
+    };
+
+    console.log(`[${requestId}] 💰 Order: ${orderData.line_items.length} items, Total: ${orderData.currency}${orderData.total_price}`);
+
+    // Determine which DB to save to
+    let targetDbName = null;
+    let apiKey = null;
+
+    // Try to find matching store by shop domain
+    if (shopDomain) {
+      const client = await getMongoClient();
+      const usersDb = client.db('semantix');
+      const users = await usersDb.collection('users').find({ 'credentials.shopifyDomain': shopDomain }).toArray();
+      
+      if (users.length > 0) {
+        targetDbName = users[0].credentials.dbName;
+        apiKey = users[0].credentials.apiKey;
+        console.log(`[${requestId}] 🎯 Matched shop domain to DB: ${targetDbName}`);
+      }
+    }
+
+    // Fallback: if session_id exists, try to find it in existing tracking data
+    if (!targetDbName && sessionId) {
+      const client = await getMongoClient();
+      const usersDb = client.db('semantix');
+      const allUsers = await usersDb.collection('users').find({}).toArray();
+      
+      for (const user of allUsers) {
+        const userDbName = user.credentials?.dbName;
+        if (!userDbName) continue;
+        
+        const userDb = client.db(userDbName);
+        const clickCount = await userDb.collection('product_clicks').countDocuments({ session_id: sessionId }, { limit: 1 });
+        
+        if (clickCount > 0) {
+          targetDbName = userDbName;
+          apiKey = user.credentials.apiKey;
+          console.log(`[${requestId}] 🎯 Matched session_id to DB: ${targetDbName}`);
+          break;
+        }
+      }
+    }
+
+    // If no match, log to default tracking DB
+    if (!targetDbName) {
+      console.warn(`[${requestId}] ⚠️ Could not match order to specific store - using default tracking DB`);
+      targetDbName = 'semantix_tracking'; // Default tracking database
+    }
+
+    // Save to MongoDB
+    const client = await getMongoClient();
+    const db = client.db(targetDbName);
+    const collection = db.collection('checkout_events');
+
+    // Check if order already processed (prevent duplicates from Shopify retries)
+    const existingOrder = await collection.findOne({ order_id: orderId });
+    if (existingOrder) {
+      console.log(`[${requestId}] ℹ️ Order ${orderId} already exists - skipping duplicate`);
+      return res.status(200).json({ 
+        status: "duplicate", 
+        message: "Order already processed" 
+      });
+    }
+
+    // Insert order
+    const result = await collection.insertOne(orderData);
+    console.log(`[${requestId}] ✅ Checkout event saved: ${result.insertedId}`);
+
+    // Create index on session_id for faster lookups (if not exists)
+    await collection.createIndex({ session_id: 1 });
+    await collection.createIndex({ order_id: 1 }, { unique: true });
+    await collection.createIndex({ created_at: -1 });
+
+    // If we have session_id, try to match with search/click data
+    if (sessionId && targetDbName !== 'semantix_tracking') {
+      try {
+        const clicksCollection = db.collection('product_clicks');
+        const clicks = await clicksCollection.find({ session_id: sessionId }).toArray();
+        
+        if (clicks.length > 0) {
+          console.log(`[${requestId}] 🔗 Linked order to ${clicks.length} product clicks`);
+          
+          // Update checkout_event with matched products
+          const matchedProducts = clicks.map(c => ({
+            product_id: c.product_id,
+            product_name: c.product_name,
+            clicked_at: c.timestamp
+          }));
+
+          await collection.updateOne(
+            { _id: result.insertedId },
+            { 
+              $set: { 
+                matched_clicks: matchedProducts,
+                click_count: clicks.length,
+                processed: true
+              } 
+            }
+          );
+        }
+      } catch (linkError) {
+        console.error(`[${requestId}] ⚠️ Error linking clicks to order:`, linkError.message);
+      }
+    }
+
+    // Return success
+    res.status(200).json({ 
+      status: "success", 
+      order_id: orderId,
+      session_id: sessionId,
+      saved_to: targetDbName,
+      matched_clicks: sessionId ? true : false
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] ❌ Webhook processing error:`, error);
+    res.status(500).json({ 
+      error: "Webhook processing failed",
+      message: error.message 
+    });
+  }
+});
+
+// ============================================================
+// HMAC Verification Helper (optional, for production)
+// ============================================================
+
+/**
+ * Verifies Shopify webhook HMAC signature
+ * 
+ * Usage:
+ * const isValid = verifyShopifyWebhook(req.body, hmacHeader, SHOPIFY_WEBHOOK_SECRET);
+ * if (!isValid) return res.status(401).json({ error: "Unauthorized" });
+ */
+function verifyShopifyWebhook(payload, hmacHeader, secret) {
+  if (!hmacHeader || !secret) return false;
+  
+  const crypto = require('crypto');
+  const hash = crypto
+    .createHmac('sha256', secret)
+    .update(payload, 'utf8')
+    .digest('base64');
+  
+  return hash === hmacHeader;
+}
+
+// ============================================================
+// GET CHECKOUT EVENTS - Analytics Endpoint
+// ============================================================
+
+/**
+ * Retrieves checkout events for a specific session or time range
+ * 
+ * Query params:
+ * - session_id: Get all checkouts for a specific session
+ * - days: Get checkouts from last N days (default: 30)
+ * - limit: Max results (default: 100)
+ */
+app.get("/checkout-events", authenticateAPIKey, async (req, res) => {
+  const requestId = Math.random().toString(36).substr(2, 9);
+  const { session_id, days = 30, limit = 100 } = req.query;
+  const { dbName } = req.store;
+
+  console.log(`[${requestId}] 📊 Fetching checkout events - session_id: ${session_id || 'all'}, days: ${days}`);
+
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const collection = db.collection('checkout_events');
+
+    // Build query
+    const query = {};
+    
+    if (session_id) {
+      query.session_id = session_id;
+    }
+
+    // Time filter
+    if (days) {
+      const daysAgo = new Date();
+      daysAgo.setDate(daysAgo.getDate() - parseInt(days));
+      query.created_at = { $gte: daysAgo.toISOString() };
+    }
+
+    // Get checkouts
+    const checkouts = await collection
+      .find(query)
+      .sort({ created_at: -1 })
+      .limit(parseInt(limit))
+      .toArray();
+
+    console.log(`[${requestId}] ✅ Found ${checkouts.length} checkout events`);
+
+    // Calculate stats
+    const totalRevenue = checkouts.reduce((sum, c) => sum + (c.total_price || 0), 0);
+    const avgOrderValue = checkouts.length > 0 ? totalRevenue / checkouts.length : 0;
+
+    res.json({
+      count: checkouts.length,
+      total_revenue: totalRevenue.toFixed(2),
+      avg_order_value: avgOrderValue.toFixed(2),
+      currency: checkouts[0]?.currency || 'ILS',
+      checkouts: checkouts.map(c => ({
+        order_id: c.order_id,
+        order_number: c.order_number,
+        session_id: c.session_id,
+        created_at: c.created_at,
+        total_price: c.total_price,
+        items_count: c.line_items?.length || 0,
+        customer: c.customer ? {
+          email: c.customer.email,
+          name: `${c.customer.first_name || ''} ${c.customer.last_name || ''}`.trim()
+        } : null,
+        matched_clicks: c.matched_clicks || [],
+        click_count: c.click_count || 0
+      }))
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] ❌ Error fetching checkout events:`, error);
+    res.status(500).json({ 
+      error: "Failed to fetch checkout events",
+      message: error.message 
+    });
+  }
 });
 
 
