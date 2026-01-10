@@ -10558,7 +10558,7 @@ app.get("/product-clicks-by-query", async (req, res) => {
  * - This can be added via Shopify checkout customization or cart attributes
  */
 
-app.post("/webhooks/shopify/order-created", express.raw({ type: 'application/json' }), async (req, res) => {
+app.post("/webhooks/shopify/order-created", express.json({ limit: '10mb' }), async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   console.log(`[${requestId}] 🛒 Shopify Order Webhook Received`);
 
@@ -10572,7 +10572,7 @@ app.post("/webhooks/shopify/order-created", express.raw({ type: 'application/jso
     }
 
     // Parse the webhook payload
-    const payload = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    const payload = req.body;
     
     if (!payload || !payload.id) {
       console.error(`[${requestId}] ❌ Invalid payload - missing order ID`);
