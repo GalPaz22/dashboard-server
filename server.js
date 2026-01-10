@@ -10585,15 +10585,20 @@ app.post("/webhooks/shopify/order-created", express.json({ limit: '10mb' }), asy
     
     console.log(`[${requestId}] Order ID: ${orderId}, Order Number: ${orderNumber}`);
 
-    // Extract session_id from note_attributes
-    let sessionId = null;
-    if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
-      const sessionAttr = payload.note_attributes.find(attr => attr.name === 'session_id' || attr.name === 'tracking_session_id');
-      if (sessionAttr) {
-        sessionId = sessionAttr.value;
-        console.log(`[${requestId}] 🎯 Found session_id: ${sessionId}`);
-      }
-    }
+// Extract session_id from note_attributes
+let sessionId = null;
+if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
+  const sessionAttr = payload.note_attributes.find(attr => 
+      attr.name === '_semantix_session_id' || // This is the key your script sends!
+      attr.name === 'semantix_session_id' || 
+      attr.name === 'tracking_session_id'
+  );
+  
+  if (sessionAttr) {
+    sessionId = sessionAttr.value;
+    console.log(`[${requestId}] 🎯 Found session_id: ${sessionId}`);
+  }
+}
 
     // Also check cart.attributes (some themes store it here)
     if (!sessionId && payload.cart && payload.cart.attributes) {
