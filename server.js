@@ -4345,10 +4345,33 @@ async function executeExplicitSoftCategorySearch(
     console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
   }
 
-  // CRITICAL: Final sort by rrf_score to ensure text matches bubble up to top
+  // CRITICAL: Final sort - soft category matches ALWAYS come first
+  // When user searches for "Italian white wine", Italian wines must appear first - always
   // This is needed because we combine multiple arrays (textMatches, softCategory, nonSoftCategory, sweep)
-  // and they need to be properly ranked by score
-  filteredResults.sort((a, b) => b.rrf_score - a.rrf_score);
+  filteredResults.sort((a, b) => {
+    const aHasSoftMatch = a.softFilterMatch || false;
+    const bHasSoftMatch = b.softFilterMatch || false;
+    const aMatches = a.softCategoryMatches || 0;
+    const bMatches = b.softCategoryMatches || 0;
+
+    // PRIORITY 1: Soft category matches ALWAYS come first
+    if (aHasSoftMatch !== bHasSoftMatch) {
+      return aHasSoftMatch ? -1 : 1;
+    }
+
+    // PRIORITY 2: Multi-category matches rank higher
+    const aIsMultiCategory = aMatches >= 2;
+    const bIsMultiCategory = bMatches >= 2;
+    if (aIsMultiCategory !== bIsMultiCategory) {
+      return aIsMultiCategory ? -1 : 1;
+    }
+    if (aMatches !== bMatches) {
+      return bMatches - aMatches;
+    }
+
+    // PRIORITY 3: RRF score
+    return b.rrf_score - a.rrf_score;
+  });
   
   // Limit early to reduce processing latency in subsequent operations
   // Use searchLimit * 3 to provide enough variety while reducing overhead
@@ -4601,48 +4624,51 @@ app.get("/search/auto-load-more", async (req, res) => {
     }
     
     // Apply soft category sorting if needed
+    // CRITICAL: Soft category matches (e.g., "Italian") ALWAYS come first
+    // When user searches for "white Italian wine", Italian wines must appear first
     if (hasSoftFilters) {
       combinedResults.sort((a, b) => {
         const aMatches = a.softCategoryMatches || 0;
         const bMatches = b.softCategoryMatches || 0;
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
-        
-        // For simple queries: prioritize text keyword matches first
+
+        // PRIORITY 1: Soft category matches ALWAYS come first
+        // When user searches for "Italian white wine", Italian wines must be first - always
+        if (aHasSoftMatch !== bHasSoftMatch) {
+          return aHasSoftMatch ? -1 : 1;
+        }
+
+        // PRIORITY 2: Multi-category matches rank higher than single category
+        const aIsMultiCategory = aMatches >= 2;
+        const bIsMultiCategory = bMatches >= 2;
+
+        if (aIsMultiCategory !== bIsMultiCategory) {
+          return aIsMultiCategory ? -1 : 1;
+        }
+
+        if (aIsMultiCategory && bIsMultiCategory) {
+          if (aMatches !== bMatches) {
+            return bMatches - aMatches;
+          }
+        }
+
+        // PRIORITY 3: Text match quality (among same soft category status)
         const aHasTextMatch = (a.exactMatchBonus || 0) > 0;
         const bHasTextMatch = (b.exactMatchBonus || 0) > 0;
-        
-        // Text matches get highest priority for simple queries
+
         if (aHasTextMatch !== bHasTextMatch) {
           return aHasTextMatch ? -1 : 1;
         }
-        
-        // If both have text matches, sort by text match strength first
+
         if (aHasTextMatch && bHasTextMatch) {
           const textMatchDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
           if (textMatchDiff !== 0) {
             return textMatchDiff;
           }
         }
-        
-        const aIsMultiCategory = aMatches >= 2;
-        const bIsMultiCategory = bMatches >= 2;
-        
-        if (aIsMultiCategory !== bIsMultiCategory) {
-          return aIsMultiCategory ? -1 : 1;
-        }
-        
-        if (aIsMultiCategory && bIsMultiCategory) {
-          if (aMatches !== bMatches) {
-            return bMatches - aMatches;
-          }
-          return b.rrf_score - a.rrf_score;
-        }
-        
-        if (aHasSoftMatch !== bHasSoftMatch) {
-          return aHasSoftMatch ? -1 : 1;
-        }
-        
+
+        // PRIORITY 4: RRF score
         return b.rrf_score - a.rrf_score;
       });
     }
@@ -7372,21 +7398,63 @@ app.post("/search", async (req, res) => {
     // Log search results summary
     const softFilterMatches = combinedResults.filter(r => r.softFilterMatch).length;
     console.log(`[${requestId}] Results: ${combinedResults.length} total, ${softFilterMatches} soft filter matches`);
-    // TEXT MATCH PRIORITY SORTING: Text matches prioritized for simple queries
-    // Complex queries use regular RRF scoring
+    // SORTING LOGIC:
+    // - When soft filters exist (e.g., "Italian"): soft category matches ALWAYS come first
+    // - For simple queries without soft filters: text matches come first
     if (hasSoftFilters || isSimpleResult) {
-      if (isSimpleResult) {
-        console.log(`[${requestId}] Applying text-match-first sorting for simple query`);
-      } else if (hasSoftFilters) {
-        console.log(`[${requestId}] Applying binary soft category sorting for complex query`);
+      if (hasSoftFilters) {
+        console.log(`[${requestId}] Applying SOFT-CATEGORY-FIRST sorting - soft category matches will ALWAYS appear first`);
+      } else if (isSimpleResult) {
+        console.log(`[${requestId}] Applying text-match-first sorting for simple query (no soft filters)`);
       }
 
       combinedResults.sort((a, b) => {
-        // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
-        // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
         const aTextBonus = a.exactMatchBonus || 0;
         const bTextBonus = b.exactMatchBonus || 0;
-        const aIsTier1 = aTextBonus >= 8000; 
+        const aMatches = a.softCategoryMatches || 0;
+        const bMatches = b.softCategoryMatches || 0;
+        const aHasSoftMatch = a.softFilterMatch || false;
+        const bHasSoftMatch = b.softFilterMatch || false;
+
+        // WHEN SOFT FILTERS EXIST: Soft category matches ALWAYS come first
+        // When user searches for "white Italian wine", Italian wines must appear first - always
+        if (hasSoftFilters) {
+          // PRIORITY 1: Soft category matches ALWAYS come first
+          if (aHasSoftMatch !== bHasSoftMatch) {
+            return aHasSoftMatch ? -1 : 1;
+          }
+
+          // PRIORITY 2: Multi-category products rank higher
+          const aIsMultiCategory = aMatches >= 2;
+          const bIsMultiCategory = bMatches >= 2;
+          if (aIsMultiCategory !== bIsMultiCategory) {
+            return aIsMultiCategory ? -1 : 1;
+          }
+          if (aMatches !== bMatches) {
+            return bMatches - aMatches;
+          }
+
+          // PRIORITY 3: Among same soft category status, prefer text matches
+          const aIsTier1 = aTextBonus >= 8000;
+          const bIsTier1 = bTextBonus >= 8000;
+          if (aIsTier1 !== bIsTier1) {
+            return aIsTier1 ? -1 : 1;
+          }
+          if (aIsTier1 && bIsTier1) {
+            const textMatchDiff = bTextBonus - aTextBonus;
+            if (textMatchDiff !== 0) {
+              return textMatchDiff;
+            }
+          }
+
+          // PRIORITY 4: RRF score
+          return b.rrf_score - a.rrf_score;
+        }
+
+        // SIMPLE QUERIES WITHOUT SOFT FILTERS: Text matches come first
+        // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
+        // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
+        const aIsTier1 = aTextBonus >= 8000;
         const bIsTier1 = bTextBonus >= 8000;
 
         // Check if either is a "Tier 1" match (high quality text match)
@@ -7403,15 +7471,10 @@ app.post("/search", async (req, res) => {
         // This catches partial matches that are still better than generic soft category matches
         const aHasSomeMatch = aTextBonus >= 2000;
         const bHasSomeMatch = bTextBonus >= 2000;
-        
+
         if (isSimpleResult && (aHasSomeMatch !== bHasSomeMatch)) {
           return aHasSomeMatch ? -1 : 1;
         }
-
-        const aMatches = a.softCategoryMatches || 0;
-        const bMatches = b.softCategoryMatches || 0;
-        const aHasSoftMatch = a.softFilterMatch || false;
-        const bHasSoftMatch = b.softFilterMatch || false;
 
         // For simple queries: text keyword matches have ABSOLUTE PRIORITY - regardless of soft categories
         if (isSimpleResult) {
@@ -7442,36 +7505,11 @@ app.post("/search", async (req, res) => {
             return b.rrf_score - a.rrf_score;
           }
 
-          // If neither has text match, continue with soft category logic below (if applicable)
-          // For simple queries without soft filters, just sort by score
-          if (!hasSoftFilters) {
-            return b.rrf_score - a.rrf_score;
-          }
-        }
-        
-        // ABSOLUTE PRIORITY: Multi-category products (2+ matches) always first (after text matches for simple queries)
-        const aIsMultiCategory = aMatches >= 2;
-        const bIsMultiCategory = bMatches >= 2;
-        
-        if (aIsMultiCategory !== bIsMultiCategory) {
-          return aIsMultiCategory ? -1 : 1; // Multi-category products always win
-        }
-        
-        // Within multi-category products, sort by number of matches (more matches first)
-        if (aIsMultiCategory && bIsMultiCategory) {
-          if (aMatches !== bMatches) {
-            return bMatches - aMatches; // More matches first within multi-category
-          }
-          // Within same match count, sort by score
+          // If neither has text match, just sort by score
           return b.rrf_score - a.rrf_score;
         }
-        
-        // For single-category or non-soft products: soft match wins over non-soft
-        if (aHasSoftMatch !== bHasSoftMatch) {
-          return aHasSoftMatch ? -1 : 1;
-        }
-        
-        // Within same soft match status, sort by score
+
+        // Fallback: sort by score
         return b.rrf_score - a.rrf_score;
       });
 
