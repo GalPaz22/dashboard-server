@@ -7773,8 +7773,9 @@ app.post("/search", async (req, res) => {
 
       finalResults = uniqueCombinedResults.map((r) => {
         // For simple queries: flag products with strong text matches (threshold: 20000+)
+        // Also preserve highTextMatch if already set (e.g., from fast search path)
         const exactMatchBonus = r.exactMatchBonus || 0;
-        const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
+        const isHighTextMatch = r.highTextMatch === true || (isSimpleResult && exactMatchBonus >= 20000);
 
         // Highlighting logic for simple queries:
         // - Only highlight high-quality text matches (exactMatchBonus >= 20000)
