@@ -6955,26 +6955,6 @@ app.post("/search", async (req, res) => {
               };
 
               console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search`);
-            } else if (isFastSearchMode && highQualityTextMatches.length > 0) {
-              // FAST SEARCH MODE: When text matches found, skip Tier 2 expansion - only boost the text matches
-              console.log(`[${requestId}] ⚡ FAST SEARCH: ${highQualityTextMatches.length} text matches found - SKIPPING Tier 2 expansion (boost only)`);
-
-              // Mark all as high text matches
-              highQualityTextMatches.forEach(match => {
-                match.highTextMatch = true;
-              });
-
-              combinedResults = highQualityTextMatches.slice(0, searchLimit);
-
-              // Set metadata for client tier info
-              extractedCategoriesMetadata = {
-                hardCategories: [],
-                softCategories: [],
-                textMatchCount: combinedResults.length,
-                categoryFiltered: false // No Tier 2 expansion in fast search
-              };
-
-              console.log(`[${requestId}] ⚡ FAST SEARCH: Returning ${combinedResults.length} text matches without Tier 2 expansion`);
             } else {
               // CRITICAL: For very strong exact matches, extract categories from TOP 2 results ONLY
               // This prevents fuzzy noise (e.g., "סלמי" when searching "סלרי") from polluting category extraction
