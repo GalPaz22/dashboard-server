@@ -6202,7 +6202,7 @@ app.post("/search", async (req, res) => {
     queryLength: req.body?.query?.length || 0
   });
 
-  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM, fastSearchMode } = req.body;
+  let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM, fastSearchMode, session_id } = req.body;
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
   // Fast LLM mode for /fast-search - use lighter model
@@ -7807,9 +7807,59 @@ app.post("/search", async (req, res) => {
       });
     }
 
+    // =========================================================
+    // PERSONALIZATION: Apply profile-based boosting
+    // =========================================================
+    let userProfile = null;
+    if (session_id) {
+      try {
+        userProfile = await getUserProfileForBoosting(dbName, session_id);
+        if (userProfile) {
+          console.log(`[${requestId}] 👤 PERSONALIZATION: Loaded profile for session ${session_id}`);
+          console.log(`[${requestId}] 👤 Profile has ${Object.keys(userProfile.preferences?.softCategories || {}).length} learned categories`);
+
+          // Apply profile boost to each result
+          finalResults = finalResults.map(product => {
+            const profileBoost = calculateProfileBoost(product, userProfile);
+            return {
+              ...product,
+              profileBoost,
+              originalScore: product.searchScore || product.score || 0,
+              boostedScore: (product.searchScore || product.score || 0) + profileBoost
+            };
+          });
+
+          // Re-sort by boosted score (higher is better)
+          // Only re-sort if there are meaningful boosts to apply
+          const hasBoosts = finalResults.some(p => (p.profileBoost || 0) > 0);
+          if (hasBoosts) {
+            // Sort by boosted score, but preserve exact match priority
+            finalResults.sort((a, b) => {
+              // Exact matches (highlight=true) always come first
+              if (a.highlight && !b.highlight) return -1;
+              if (!a.highlight && b.highlight) return 1;
+              // Then sort by boosted score
+              return (b.boostedScore || 0) - (a.boostedScore || 0);
+            });
+            console.log(`[${requestId}] 👤 PERSONALIZATION: Re-ranked ${finalResults.length} results with profile boost`);
+            console.log(`[${requestId}] 👤 Top 3 after personalization:`, finalResults.slice(0, 3).map(p => ({
+              name: p.name,
+              profileBoost: p.profileBoost,
+              highlight: p.highlight
+            })));
+          }
+        } else {
+          console.log(`[${requestId}] 👤 No profile found for session ${session_id}`);
+        }
+      } catch (profileError) {
+        console.error(`[${requestId}] 👤 Error loading profile:`, profileError.message);
+        // Continue without personalization
+      }
+    }
+
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
-    
+
     // Log all queries (both simple and complex)
     try {
         await logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult);
@@ -9872,6 +9922,437 @@ app.delete("/active-users/:visitor_id", async (req, res) => {
     res.status(500).json({ error: "Server error" });
   }
 });
+
+/* =========================================================== *\
+   USER PERSONALIZATION SYSTEM
+
+   Learns user preferences from:
+   - Clicks (weight: 1)
+   - Add to cart (weight: 3)
+   - Purchases (weight: 5)
+
+   Stores soft category preferences and price range to boost
+   relevant products in search results.
+\* =========================================================== */
+
+// Weight constants for preference learning
+const INTERACTION_WEIGHTS = {
+  click: 1,
+  cart: 3,
+  purchase: 5
+};
+
+/**
+ * Calculate preference score for a soft category based on interaction history
+ */
+function calculateCategoryScore(categoryData) {
+  if (!categoryData) return 0;
+  return (
+    (categoryData.clicks || 0) * INTERACTION_WEIGHTS.click +
+    (categoryData.carts || 0) * INTERACTION_WEIGHTS.cart +
+    (categoryData.purchases || 0) * INTERACTION_WEIGHTS.purchase
+  );
+}
+
+/**
+ * Calculate boost score for a product based on user profile preferences
+ * Returns a value between 0-100000 that can be added to product score
+ */
+function calculateProfileBoost(product, userProfile) {
+  if (!userProfile || !userProfile.preferences) return 0;
+
+  let boost = 0;
+  const prefs = userProfile.preferences;
+
+  // 1. Soft category boost
+  if (prefs.softCategories && product.softCategory) {
+    const productCats = Array.isArray(product.softCategory)
+      ? product.softCategory
+      : [product.softCategory];
+
+    for (const cat of productCats) {
+      const catData = prefs.softCategories[cat];
+      if (catData) {
+        const score = calculateCategoryScore(catData);
+        // Exponential boost for highly preferred categories
+        boost += Math.min(score * 1000, 30000);
+      }
+    }
+  }
+
+  // 2. Price range boost - products in preferred range get boost
+  if (prefs.priceRange && prefs.priceRange.count >= 3 && product.price) {
+    const price = parseFloat(product.price);
+    const { min, max, avg } = prefs.priceRange;
+
+    // Strong boost for products near user's average price preference
+    if (price >= min && price <= max) {
+      // Closer to average = higher boost
+      const distanceFromAvg = Math.abs(price - avg);
+      const range = max - min || 1;
+      const proximityScore = 1 - (distanceFromAvg / range);
+      boost += Math.round(proximityScore * 20000);
+    }
+  }
+
+  return boost;
+}
+
+/**
+ * POST /profile/init
+ * Initialize a new user profile with session_id
+ */
+app.post("/profile/init", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { dbName } = store;
+    const { session_id } = req.body;
+
+    if (!session_id) {
+      return res.status(400).json({ error: "Missing required field: session_id" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const profilesCollection = db.collection('user_profiles');
+
+    // Check if profile already exists
+    const existingProfile = await profilesCollection.findOne({ session_id });
+
+    if (existingProfile) {
+      console.log(`[PROFILE] Profile already exists for session: ${session_id}`);
+      return res.status(200).json({
+        success: true,
+        message: 'Profile already exists',
+        profile: existingProfile,
+        is_new: false
+      });
+    }
+
+    // Create new empty profile
+    const newProfile = {
+      session_id,
+      preferences: {
+        softCategories: {},
+        priceRange: {
+          min: null,
+          max: null,
+          avg: null,
+          sum: 0,
+          count: 0
+        }
+      },
+      stats: {
+        totalClicks: 0,
+        totalCarts: 0,
+        totalPurchases: 0,
+        totalSpent: 0
+      },
+      created_at: new Date(),
+      updated_at: new Date()
+    };
+
+    await profilesCollection.insertOne(newProfile);
+
+    // Create indexes
+    await profilesCollection.createIndex({ session_id: 1 }, { unique: true });
+    await profilesCollection.createIndex({ updated_at: -1 });
+
+    console.log(`[PROFILE] ✨ New profile created for session: ${session_id}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Profile created',
+      profile: newProfile,
+      is_new: true
+    });
+
+  } catch (error) {
+    console.error("[PROFILE] Error initializing profile:", error);
+    res.status(500).json({ error: "Server error", details: error.message });
+  }
+});
+
+/**
+ * POST /profile/track-interaction
+ * Update user profile based on product interaction
+ * Learns soft categories and price preferences from user behavior
+ */
+app.post("/profile/track-interaction", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { dbName } = store;
+    const { session_id, product_id, interaction_type, product_data } = req.body;
+
+    // Validate required fields
+    if (!session_id || !interaction_type) {
+      return res.status(400).json({
+        error: "Missing required fields: session_id and interaction_type"
+      });
+    }
+
+    // Validate interaction type
+    if (!['click', 'cart', 'purchase'].includes(interaction_type)) {
+      return res.status(400).json({
+        error: "Invalid interaction_type. Must be: click, cart, or purchase"
+      });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const profilesCollection = db.collection('user_profiles');
+    const productsCollection = db.collection('products');
+
+    // Get product data - either from request or fetch from DB
+    let product = product_data;
+    if (!product && product_id) {
+      // Build query conditions, handling ObjectId gracefully
+      const queryConditions = [
+        { ItemID: parseInt(product_id) },
+        { ItemID: product_id.toString() },
+        { id: parseInt(product_id) },
+        { id: product_id.toString() }
+      ];
+
+      // Only add ObjectId condition if it's a valid 24-char hex string
+      if (typeof product_id === 'string' && /^[a-f\d]{24}$/i.test(product_id)) {
+        try {
+          queryConditions.push({ _id: new ObjectId(product_id) });
+        } catch (e) {
+          // Invalid ObjectId, skip this condition
+        }
+      }
+
+      product = await productsCollection.findOne({ $or: queryConditions });
+    }
+
+    if (!product) {
+      console.warn(`[PROFILE] Product not found for tracking: ${product_id}`);
+      return res.status(404).json({ error: "Product not found" });
+    }
+
+    // Extract soft categories from product
+    const softCategories = Array.isArray(product.softCategory)
+      ? product.softCategory
+      : (product.softCategory ? [product.softCategory] : []);
+
+    const price = parseFloat(product.price) || 0;
+
+    // Build update operations
+    const updateOps = {
+      $set: { updated_at: new Date() },
+      $setOnInsert: {
+        session_id,
+        created_at: new Date(),
+        preferences: {
+          softCategories: {},
+          priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
+        },
+        stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+      }
+    };
+
+    // Increment interaction count
+    const statField = interaction_type === 'click' ? 'totalClicks'
+                    : interaction_type === 'cart' ? 'totalCarts'
+                    : 'totalPurchases';
+    updateOps.$inc = { [`stats.${statField}`]: 1 };
+
+    // For purchases, also track spent amount
+    if (interaction_type === 'purchase' && price > 0) {
+      updateOps.$inc['stats.totalSpent'] = price;
+    }
+
+    // First, upsert to ensure profile exists
+    await profilesCollection.updateOne(
+      { session_id },
+      updateOps,
+      { upsert: true }
+    );
+
+    // Now update soft category preferences
+    const categoryField = interaction_type === 'click' ? 'clicks'
+                        : interaction_type === 'cart' ? 'carts'
+                        : 'purchases';
+
+    for (const category of softCategories) {
+      if (category && category.trim()) {
+        await profilesCollection.updateOne(
+          { session_id },
+          {
+            $inc: { [`preferences.softCategories.${category}.${categoryField}`]: 1 }
+          }
+        );
+      }
+    }
+
+    // Update price range preferences
+    if (price > 0) {
+      // Get current profile to calculate new average
+      const profile = await profilesCollection.findOne({ session_id });
+      const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
+
+      const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
+      const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
+      const newSum = (priceRange.sum || 0) + price;
+      const newCount = (priceRange.count || 0) + 1;
+      const newAvg = newSum / newCount;
+
+      await profilesCollection.updateOne(
+        { session_id },
+        {
+          $set: {
+            'preferences.priceRange.min': newMin,
+            'preferences.priceRange.max': newMax,
+            'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
+            'preferences.priceRange.sum': newSum,
+            'preferences.priceRange.count': newCount
+          }
+        }
+      );
+    }
+
+    // Get updated profile
+    const updatedProfile = await profilesCollection.findOne({ session_id });
+
+    console.log(`[PROFILE] 📊 Tracked ${interaction_type} for session: ${session_id}, product: ${product.name || product_id}`);
+    console.log(`[PROFILE] Categories learned: ${softCategories.join(', ') || 'none'}, Price: ${price}`);
+
+    res.status(200).json({
+      success: true,
+      message: `${interaction_type} tracked successfully`,
+      session_id,
+      product_name: product.name,
+      categories_learned: softCategories,
+      price_tracked: price,
+      profile_summary: {
+        total_interactions: (updatedProfile.stats?.totalClicks || 0) +
+                           (updatedProfile.stats?.totalCarts || 0) +
+                           (updatedProfile.stats?.totalPurchases || 0),
+        top_categories: Object.entries(updatedProfile.preferences?.softCategories || {})
+          .map(([cat, data]) => ({ category: cat, score: calculateCategoryScore(data) }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, 5),
+        price_range: updatedProfile.preferences?.priceRange
+      }
+    });
+
+  } catch (error) {
+    console.error("[PROFILE] Error tracking interaction:", error);
+    res.status(500).json({ error: "Server error", details: error.message });
+  }
+});
+
+/**
+ * GET /profile/:session_id
+ * Retrieve user profile with preference analysis
+ */
+app.get("/profile/:session_id", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { dbName } = store;
+    const { session_id } = req.params;
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const profilesCollection = db.collection('user_profiles');
+
+    const profile = await profilesCollection.findOne({ session_id });
+
+    if (!profile) {
+      return res.status(404).json({
+        error: "Profile not found",
+        session_id
+      });
+    }
+
+    // Calculate top categories with scores
+    const topCategories = Object.entries(profile.preferences?.softCategories || {})
+      .map(([category, data]) => ({
+        category,
+        score: calculateCategoryScore(data),
+        clicks: data.clicks || 0,
+        carts: data.carts || 0,
+        purchases: data.purchases || 0
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    console.log(`[PROFILE] Retrieved profile for session: ${session_id}`);
+
+    res.status(200).json({
+      success: true,
+      profile: {
+        session_id: profile.session_id,
+        preferences: profile.preferences,
+        stats: profile.stats,
+        created_at: profile.created_at,
+        updated_at: profile.updated_at
+      },
+      analysis: {
+        top_categories: topCategories.slice(0, 10),
+        total_categories_learned: topCategories.length,
+        preference_strength: topCategories.length > 0
+          ? (topCategories[0].score > 10 ? 'strong' : topCategories[0].score > 5 ? 'moderate' : 'weak')
+          : 'none',
+        price_preference: profile.preferences?.priceRange?.count >= 3
+          ? `${profile.preferences.priceRange.min}-${profile.preferences.priceRange.max} (avg: ${profile.preferences.priceRange.avg})`
+          : 'insufficient data'
+      }
+    });
+
+  } catch (error) {
+    console.error("[PROFILE] Error retrieving profile:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * Helper function to get user profile for search boosting
+ * Returns null if no profile exists (graceful degradation)
+ */
+async function getUserProfileForBoosting(dbName, sessionId) {
+  if (!sessionId) return null;
+
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const profile = await db.collection('user_profiles').findOne({ session_id: sessionId });
+
+    // Only return profile if it has meaningful data
+    if (profile && profile.preferences) {
+      const hasCategories = Object.keys(profile.preferences.softCategories || {}).length > 0;
+      const hasPriceData = (profile.preferences.priceRange?.count || 0) >= 2;
+
+      if (hasCategories || hasPriceData) {
+        return profile;
+      }
+    }
+
+    return null;
+  } catch (error) {
+    console.error("[PROFILE] Error fetching profile for boosting:", error);
+    return null;
+  }
+}
+
 /* =========================================================== *\
    DEMO PAGES
 \* =========================================================== */
@@ -10820,15 +11301,108 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
       } catch (linkError) {
         console.error(`[${requestId}] ⚠️ Error linking clicks to order:`, linkError.message);
       }
+
+      // =========================================================
+      // PERSONALIZATION: Update user profile with purchase data
+      // =========================================================
+      try {
+        const profilesCollection = db.collection('user_profiles');
+        const productsCollection = db.collection('products');
+
+        console.log(`[${requestId}] 👤 PERSONALIZATION: Updating profile from ${orderData.line_items.length} purchased items`);
+
+        for (const lineItem of orderData.line_items) {
+          // Find product in our catalog to get soft categories
+          const product = await productsCollection.findOne({
+            $or: [
+              { ItemID: parseInt(lineItem.product_id) },
+              { ItemID: lineItem.product_id.toString() },
+              { name: lineItem.title }
+            ]
+          });
+
+          if (product) {
+            const softCategories = Array.isArray(product.softCategory)
+              ? product.softCategory
+              : (product.softCategory ? [product.softCategory] : []);
+            const price = parseFloat(lineItem.price) || 0;
+
+            // Update profile stats
+            await profilesCollection.updateOne(
+              { session_id: sessionId },
+              {
+                $set: { updated_at: new Date() },
+                $inc: {
+                  'stats.totalPurchases': 1,
+                  'stats.totalSpent': price * lineItem.quantity
+                },
+                $setOnInsert: {
+                  session_id: sessionId,
+                  created_at: new Date(),
+                  preferences: {
+                    softCategories: {},
+                    priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
+                  },
+                  stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+                }
+              },
+              { upsert: true }
+            );
+
+            // Update soft category preferences (purchases have highest weight)
+            for (const category of softCategories) {
+              if (category && category.trim()) {
+                await profilesCollection.updateOne(
+                  { session_id: sessionId },
+                  { $inc: { [`preferences.softCategories.${category}.purchases`]: lineItem.quantity } }
+                );
+              }
+            }
+
+            // Update price range
+            if (price > 0) {
+              const profile = await profilesCollection.findOne({ session_id: sessionId });
+              const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
+
+              const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
+              const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
+              const newSum = (priceRange.sum || 0) + price;
+              const newCount = (priceRange.count || 0) + 1;
+              const newAvg = newSum / newCount;
+
+              await profilesCollection.updateOne(
+                { session_id: sessionId },
+                {
+                  $set: {
+                    'preferences.priceRange.min': newMin,
+                    'preferences.priceRange.max': newMax,
+                    'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
+                    'preferences.priceRange.sum': newSum,
+                    'preferences.priceRange.count': newCount
+                  }
+                }
+              );
+            }
+
+            console.log(`[${requestId}] 👤 Updated profile with purchase: ${product.name}, categories: [${softCategories.join(', ')}]`);
+          }
+        }
+
+        console.log(`[${requestId}] 👤 PERSONALIZATION: Profile updated successfully from purchase`);
+      } catch (profileError) {
+        console.error(`[${requestId}] 👤 Error updating profile from purchase:`, profileError.message);
+        // Continue - profile update is not critical
+      }
     }
 
     // Return success
-    res.status(200).json({ 
-      status: "success", 
+    res.status(200).json({
+      status: "success",
       order_id: orderId,
       session_id: sessionId,
       saved_to: targetDbName,
-      matched_clicks: sessionId ? true : false
+      matched_clicks: sessionId ? true : false,
+      profile_updated: sessionId ? true : false
     });
 
   } catch (error) {
