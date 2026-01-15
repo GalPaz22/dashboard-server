@@ -11415,25 +11415,423 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
 });
 
 // ============================================================
+// WOOCOMMERCE WEBHOOK - Order Created
+// ============================================================
+
+/**
+ * WooCommerce Order Created Webhook
+ *
+ * Setup in WooCommerce:
+ * 1. Go to WooCommerce → Settings → Advanced → Webhooks
+ * 2. Add webhook:
+ *    - Name: Semantix Order Tracking
+ *    - Status: Active
+ *    - Topic: Order created
+ *    - Delivery URL: https://api.semantix-ai.com/webhooks/woocommerce/order-created
+ *    - Secret: (your secret key)
+ *
+ * To pass session_id, add this to your theme's functions.php or use a plugin:
+ *
+ * // Save session_id from cookie to order meta
+ * add_action('woocommerce_checkout_update_order_meta', function($order_id) {
+ *     if (isset($_COOKIE['_semantix_session_id'])) {
+ *         update_post_meta($order_id, '_semantix_session_id', sanitize_text_field($_COOKIE['_semantix_session_id']));
+ *     }
+ * });
+ */
+app.post("/webhooks/woocommerce/order-created", express.json({ limit: '10mb' }), async (req, res) => {
+  const requestId = `woo-${Math.random().toString(36).substr(2, 9)}`;
+  console.log(`[${requestId}] 🛒 WooCommerce Order Webhook Received`);
+
+  try {
+    const payload = req.body;
+
+    if (!payload || !payload.id) {
+      console.error(`[${requestId}] ❌ Invalid payload - missing order ID`);
+      return res.status(400).json({ error: "Invalid payload" });
+    }
+
+    const orderId = String(payload.id);
+    const orderNumber = payload.number || payload.order_key;
+
+    console.log(`[${requestId}] Order ID: ${orderId}, Order Number: ${orderNumber}`);
+
+    // Extract session_id from meta_data
+    let sessionId = null;
+    if (payload.meta_data && Array.isArray(payload.meta_data)) {
+      const sessionMeta = payload.meta_data.find(meta =>
+        meta.key === '_semantix_session_id' ||
+        meta.key === 'semantix_session_id'
+      );
+      if (sessionMeta) {
+        sessionId = sessionMeta.value;
+        console.log(`[${requestId}] 🎯 Found session_id in meta_data: ${sessionId}`);
+      }
+    }
+
+    if (!sessionId) {
+      console.warn(`[${requestId}] ⚠️ No session_id found in WooCommerce order`);
+    }
+
+    // Extract line items
+    const lineItems = (payload.line_items || []).map(item => ({
+      product_id: String(item.product_id),
+      variation_id: item.variation_id ? String(item.variation_id) : null,
+      title: item.name,
+      quantity: item.quantity,
+      price: parseFloat(item.price),
+      sku: item.sku
+    }));
+
+    // Build order data
+    const orderData = {
+      order_id: orderId,
+      order_number: orderNumber,
+      session_id: sessionId,
+      platform: 'woocommerce',
+      created_at: payload.date_created || new Date().toISOString(),
+      total_price: parseFloat(payload.total) || 0,
+      currency: payload.currency || 'ILS',
+      customer: payload.billing ? {
+        email: payload.billing.email,
+        first_name: payload.billing.first_name,
+        last_name: payload.billing.last_name,
+        phone: payload.billing.phone
+      } : null,
+      line_items: lineItems,
+      webhook_received_at: new Date().toISOString(),
+      processed: false
+    };
+
+    console.log(`[${requestId}] 💰 WooCommerce Order: ${lineItems.length} items, Total: ${orderData.currency}${orderData.total_price}`);
+
+    // Find matching store by API key in header or by session matching
+    const apiKey = req.get("x-api-key");
+    let targetDbName = null;
+
+    if (apiKey) {
+      const store = await getStoreConfigByApiKey(apiKey);
+      if (store) {
+        targetDbName = store.dbName;
+        console.log(`[${requestId}] 🎯 Matched by API key to DB: ${targetDbName}`);
+      }
+    }
+
+    // Fallback: find by session_id in existing data
+    if (!targetDbName && sessionId) {
+      const client = await getMongoClient();
+      const usersDb = client.db('semantix');
+      const allUsers = await usersDb.collection('users').find({}).toArray();
+
+      for (const user of allUsers) {
+        const userDbName = user.credentials?.dbName;
+        if (!userDbName) continue;
+
+        const userDb = client.db(userDbName);
+        const clickCount = await userDb.collection('product_clicks').countDocuments({ session_id: sessionId }, { limit: 1 });
+
+        if (clickCount > 0) {
+          targetDbName = userDbName;
+          console.log(`[${requestId}] 🎯 Matched session_id to DB: ${targetDbName}`);
+          break;
+        }
+      }
+    }
+
+    if (!targetDbName) {
+      console.warn(`[${requestId}] ⚠️ Could not match WooCommerce order to store`);
+      targetDbName = 'semantix_tracking';
+    }
+
+    // Save to MongoDB
+    const client = await getMongoClient();
+    const db = client.db(targetDbName);
+    const collection = db.collection('checkout_events');
+
+    // Check for duplicates
+    const existingOrder = await collection.findOne({ order_id: orderId, platform: 'woocommerce' });
+    if (existingOrder) {
+      console.log(`[${requestId}] ℹ️ WooCommerce order ${orderId} already exists`);
+      return res.status(200).json({ status: "duplicate" });
+    }
+
+    // Insert order
+    const result = await collection.insertOne(orderData);
+    console.log(`[${requestId}] ✅ WooCommerce checkout event saved: ${result.insertedId}`);
+
+    // Update user profile if session exists
+    if (sessionId && targetDbName !== 'semantix_tracking') {
+      try {
+        const profilesCollection = db.collection('user_profiles');
+        const productsCollection = db.collection('products');
+
+        console.log(`[${requestId}] 👤 Updating profile from ${lineItems.length} WooCommerce items`);
+
+        for (const lineItem of lineItems) {
+          const product = await productsCollection.findOne({
+            $or: [
+              { ItemID: parseInt(lineItem.product_id) },
+              { ItemID: lineItem.product_id },
+              { sku: lineItem.sku },
+              { name: lineItem.title }
+            ]
+          });
+
+          if (product) {
+            const softCategories = Array.isArray(product.softCategory)
+              ? product.softCategory
+              : (product.softCategory ? [product.softCategory] : []);
+            const price = lineItem.price || 0;
+
+            await profilesCollection.updateOne(
+              { session_id: sessionId },
+              {
+                $set: { updated_at: new Date() },
+                $inc: {
+                  'stats.totalPurchases': lineItem.quantity,
+                  'stats.totalSpent': price * lineItem.quantity
+                },
+                $setOnInsert: {
+                  session_id: sessionId,
+                  created_at: new Date(),
+                  preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
+                  stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+                }
+              },
+              { upsert: true }
+            );
+
+            for (const category of softCategories) {
+              if (category && category.trim()) {
+                await profilesCollection.updateOne(
+                  { session_id: sessionId },
+                  { $inc: { [`preferences.softCategories.${category}.purchases`]: lineItem.quantity } }
+                );
+              }
+            }
+
+            console.log(`[${requestId}] 👤 WooCommerce profile update: ${product.name}`);
+          }
+        }
+      } catch (profileError) {
+        console.error(`[${requestId}] 👤 WooCommerce profile update error:`, profileError.message);
+      }
+    }
+
+    res.status(200).json({
+      status: "success",
+      order_id: orderId,
+      platform: "woocommerce",
+      session_id: sessionId,
+      profile_updated: !!sessionId
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] ❌ WooCommerce webhook error:`, error);
+    res.status(500).json({ error: "Webhook processing failed", message: error.message });
+  }
+});
+
+// ============================================================
+// GENERIC PURCHASE TRACKING - For any platform (open source)
+// ============================================================
+
+/**
+ * POST /profile/track-purchase
+ * Generic endpoint for tracking purchases from ANY e-commerce platform
+ *
+ * Use this for:
+ * - Custom/homegrown e-commerce
+ * - Magento, PrestaShop, OpenCart
+ * - Any system where you control the checkout flow
+ *
+ * Simply call this endpoint after a successful purchase
+ */
+app.post("/profile/track-purchase", async (req, res) => {
+  const requestId = `purchase-${Math.random().toString(36).substr(2, 9)}`;
+
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { dbName } = store;
+    const {
+      session_id,
+      order_id,
+      items,           // Array of { product_id, quantity, price, name? }
+      total_price,
+      currency = 'ILS',
+      customer,        // Optional: { email, name, phone }
+      platform = 'custom'
+    } = req.body;
+
+    // Validate required fields
+    if (!session_id) {
+      return res.status(400).json({ error: "Missing required field: session_id" });
+    }
+
+    if (!items || !Array.isArray(items) || items.length === 0) {
+      return res.status(400).json({ error: "Missing required field: items (array of purchased products)" });
+    }
+
+    console.log(`[${requestId}] 🛒 Generic purchase tracking: ${items.length} items, session: ${session_id}`);
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const profilesCollection = db.collection('user_profiles');
+    const productsCollection = db.collection('products');
+    const checkoutCollection = db.collection('checkout_events');
+
+    // Save checkout event
+    const checkoutData = {
+      order_id: order_id || `order-${Date.now()}`,
+      session_id,
+      platform,
+      created_at: new Date().toISOString(),
+      total_price: parseFloat(total_price) || items.reduce((sum, i) => sum + (i.price * i.quantity), 0),
+      currency,
+      customer: customer || null,
+      line_items: items.map(item => ({
+        product_id: String(item.product_id),
+        title: item.name || null,
+        quantity: item.quantity || 1,
+        price: parseFloat(item.price) || 0
+      })),
+      webhook_received_at: new Date().toISOString()
+    };
+
+    await checkoutCollection.insertOne(checkoutData);
+    console.log(`[${requestId}] ✅ Checkout event saved`);
+
+    // Update user profile for each item
+    let categoriesLearned = [];
+    let productsTracked = 0;
+
+    for (const item of items) {
+      // Find product in catalog
+      const queryConditions = [
+        { ItemID: parseInt(item.product_id) },
+        { ItemID: String(item.product_id) },
+        { id: parseInt(item.product_id) },
+        { id: String(item.product_id) }
+      ];
+
+      if (item.sku) {
+        queryConditions.push({ sku: item.sku });
+      }
+      if (item.name) {
+        queryConditions.push({ name: item.name });
+      }
+
+      const product = await productsCollection.findOne({ $or: queryConditions });
+
+      const softCategories = product
+        ? (Array.isArray(product.softCategory) ? product.softCategory : (product.softCategory ? [product.softCategory] : []))
+        : [];
+
+      const price = parseFloat(item.price) || (product ? parseFloat(product.price) : 0) || 0;
+      const quantity = item.quantity || 1;
+
+      // Update profile stats
+      await profilesCollection.updateOne(
+        { session_id },
+        {
+          $set: { updated_at: new Date() },
+          $inc: {
+            'stats.totalPurchases': quantity,
+            'stats.totalSpent': price * quantity
+          },
+          $setOnInsert: {
+            session_id,
+            created_at: new Date(),
+            preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
+            stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+          }
+        },
+        { upsert: true }
+      );
+
+      // Update soft category preferences
+      for (const category of softCategories) {
+        if (category && category.trim()) {
+          await profilesCollection.updateOne(
+            { session_id },
+            { $inc: { [`preferences.softCategories.${category}.purchases`]: quantity } }
+          );
+          if (!categoriesLearned.includes(category)) {
+            categoriesLearned.push(category);
+          }
+        }
+      }
+
+      // Update price range
+      if (price > 0) {
+        const profile = await profilesCollection.findOne({ session_id });
+        const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
+
+        const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
+        const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
+        const newSum = (priceRange.sum || 0) + price;
+        const newCount = (priceRange.count || 0) + 1;
+
+        await profilesCollection.updateOne(
+          { session_id },
+          {
+            $set: {
+              'preferences.priceRange.min': newMin,
+              'preferences.priceRange.max': newMax,
+              'preferences.priceRange.avg': Math.round((newSum / newCount) * 100) / 100,
+              'preferences.priceRange.sum': newSum,
+              'preferences.priceRange.count': newCount
+            }
+          }
+        );
+      }
+
+      productsTracked++;
+    }
+
+    console.log(`[${requestId}] 👤 Profile updated: ${productsTracked} products, ${categoriesLearned.length} categories`);
+
+    res.status(200).json({
+      success: true,
+      message: "Purchase tracked successfully",
+      session_id,
+      order_id: checkoutData.order_id,
+      products_tracked: productsTracked,
+      categories_learned: categoriesLearned,
+      total_spent: checkoutData.total_price
+    });
+
+  } catch (error) {
+    console.error(`[${requestId}] ❌ Purchase tracking error:`, error);
+    res.status(500).json({ error: "Server error", details: error.message });
+  }
+});
+
+// ============================================================
 // HMAC Verification Helper (optional, for production)
 // ============================================================
 
 /**
  * Verifies Shopify webhook HMAC signature
- * 
+ *
  * Usage:
  * const isValid = verifyShopifyWebhook(req.body, hmacHeader, SHOPIFY_WEBHOOK_SECRET);
  * if (!isValid) return res.status(401).json({ error: "Unauthorized" });
  */
 function verifyShopifyWebhook(payload, hmacHeader, secret) {
   if (!hmacHeader || !secret) return false;
-  
-  const crypto = require('crypto');
+
   const hash = crypto
     .createHmac('sha256', secret)
     .update(payload, 'utf8')
     .digest('base64');
-  
+
   return hash === hmacHeader;
 }
 
