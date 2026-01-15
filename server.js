@@ -8667,13 +8667,100 @@ app.post("/search-to-cart", async (req, res) => {
         console.error("Error recording query complexity feedback:", complexityError);
       }
     }
-    
+
+    // =========================================================
+    // PERSONALIZATION: Auto-update profile from cart event
+    // =========================================================
+    let profileUpdated = false;
+    let categoriesLearned = [];
+
+    if (document.event_type === 'add_to_cart' && document.product_id && document.session_id) {
+      try {
+        const productsCollection = db.collection('products');
+        const profilesCollection = db.collection('user_profiles');
+
+        const product = await productsCollection.findOne({
+          $or: [
+            { ItemID: parseInt(document.product_id) },
+            { ItemID: document.product_id.toString() },
+            { id: parseInt(document.product_id) },
+            { id: document.product_id.toString() }
+          ]
+        });
+
+        if (product) {
+          const softCategories = Array.isArray(product.softCategory)
+            ? product.softCategory
+            : (product.softCategory ? [product.softCategory] : []);
+          const price = parseFloat(product.price) || 0;
+
+          // Update profile stats (cart weight = 3)
+          await profilesCollection.updateOne(
+            { session_id: document.session_id },
+            {
+              $set: { updated_at: new Date() },
+              $inc: { 'stats.totalCarts': 1 },
+              $setOnInsert: {
+                session_id: document.session_id,
+                created_at: new Date(),
+                preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
+                stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+              }
+            },
+            { upsert: true }
+          );
+
+          // Update soft category preferences
+          for (const category of softCategories) {
+            if (category && category.trim()) {
+              await profilesCollection.updateOne(
+                { session_id: document.session_id },
+                { $inc: { [`preferences.softCategories.${category}.carts`]: 1 } }
+              );
+              categoriesLearned.push(category);
+            }
+          }
+
+          // Update price range
+          if (price > 0) {
+            const profile = await profilesCollection.findOne({ session_id: document.session_id });
+            const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
+
+            const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
+            const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
+            const newSum = (priceRange.sum || 0) + price;
+            const newCount = (priceRange.count || 0) + 1;
+
+            await profilesCollection.updateOne(
+              { session_id: document.session_id },
+              {
+                $set: {
+                  'preferences.priceRange.min': newMin,
+                  'preferences.priceRange.max': newMax,
+                  'preferences.priceRange.avg': Math.round((newSum / newCount) * 100) / 100,
+                  'preferences.priceRange.sum': newSum,
+                  'preferences.priceRange.count': newCount
+                }
+              }
+            );
+          }
+
+          profileUpdated = true;
+          console.log(`[SEARCH-TO-CART] 👤 Profile updated from cart: categories=[${categoriesLearned.join(', ')}]`);
+        }
+      } catch (profileError) {
+        console.error("[SEARCH-TO-CART] Profile update error:", profileError.message);
+      }
+    }
+
     res.status(201).json({
       success: true,
       message: `${document.event_type} event saved successfully`,
       id: insertResult.insertedId,
       collection: targetCollection.collectionName,
-      complexity_feedback_recorded: true
+      complexity_feedback_recorded: true,
+      profile_updated: profileUpdated,
+      categories_learned: categoriesLearned
     });
     
   } catch (error) {
@@ -10719,20 +10806,99 @@ app.post("/product-click", async (req, res) => {
 
     console.log(`[PRODUCT CLICK] Tracked: session=${session_id}, product=${product_id}, query="${clickDocument.search_query || 'none'}"`);
 
- 
+    // =========================================================
+    // PERSONALIZATION: Auto-update profile from click
+    // =========================================================
+    let profileUpdated = false;
+    let categoriesLearned = [];
+
+    try {
+      const productsCollection = db.collection('products');
+      const profilesCollection = db.collection('user_profiles');
+
+      // Find the product to get its soft categories and price
+      const product = await productsCollection.findOne({
+        $or: [
+          { ItemID: parseInt(product_id) },
+          { ItemID: product_id.toString() },
+          { id: parseInt(product_id) },
+          { id: product_id.toString() }
+        ]
+      });
+
+      if (product) {
+        const softCategories = Array.isArray(product.softCategory)
+          ? product.softCategory
+          : (product.softCategory ? [product.softCategory] : []);
+        const price = parseFloat(product.price) || 0;
+
+        // Update profile stats
+        await profilesCollection.updateOne(
+          { session_id },
+          {
+            $set: { updated_at: new Date() },
+            $inc: { 'stats.totalClicks': 1 },
+            $setOnInsert: {
+              session_id,
+              created_at: new Date(),
+              preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
+              stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+            }
+          },
+          { upsert: true }
+        );
+
+        // Update soft category preferences (clicks weight = 1)
+        for (const category of softCategories) {
+          if (category && category.trim()) {
+            await profilesCollection.updateOne(
+              { session_id },
+              { $inc: { [`preferences.softCategories.${category}.clicks`]: 1 } }
+            );
+            categoriesLearned.push(category);
+          }
+        }
+
+        // Update price range
+        if (price > 0) {
+          const profile = await profilesCollection.findOne({ session_id });
+          const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
+
+          const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
+          const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
+          const newSum = (priceRange.sum || 0) + price;
+          const newCount = (priceRange.count || 0) + 1;
+
+          await profilesCollection.updateOne(
+            { session_id },
+            {
+              $set: {
+                'preferences.priceRange.min': newMin,
+                'preferences.priceRange.max': newMax,
+                'preferences.priceRange.avg': Math.round((newSum / newCount) * 100) / 100,
+                'preferences.priceRange.sum': newSum,
+                'preferences.priceRange.count': newCount
+              }
+            }
+          );
+        }
+
+        profileUpdated = true;
+        console.log(`[PRODUCT CLICK] 👤 Profile updated: categories=[${categoriesLearned.join(', ')}]`);
+      }
+    } catch (profileError) {
+      console.error("[PRODUCT CLICK] Profile update error:", profileError.message);
+      // Continue - profile update is not critical
+    }
 
     res.status(201).json({
-
       success: true,
-
       message: "Product click tracked successfully",
-
       click_id: insertResult.insertedId,
-
       product_name: clickDocument.product_name,
-
-      search_query: clickDocument.search_query
-
+      search_query: clickDocument.search_query,
+      profile_updated: profileUpdated,
+      categories_learned: categoriesLearned
     });
 
  
