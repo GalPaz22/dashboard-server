@@ -584,6 +584,10 @@ app.post("/add-to-cart", async (req, res) => {
 
     await cartEventsCollection.insertOne(cartEvent);
 
+    // ALSO TRACK IN USER PROFILE for personalization
+    trackUserProfileInteraction(db, sessionId, productId, 'cart', null)
+      .catch(err => console.error("[PROFILE] background cart tracking error:", err));
+
     return res.status(200).json({ message: "Add to cart event logged successfully" });
   } catch (error) {
     console.error("Error logging add to cart event:", error);
@@ -612,6 +616,10 @@ app.post("/log-product-click", async (req, res) => {
     };
 
     await clickEventsCollection.insertOne(clickEvent);
+
+    // ALSO TRACK IN USER PROFILE for personalization
+    trackUserProfileInteraction(db, sessionId, productId, 'click', null)
+      .catch(err => console.error("[PROFILE] background click tracking error:", err));
 
     return res.status(200).json({ message: "Product click event logged successfully" });
   } catch (error) {
@@ -4632,7 +4640,7 @@ app.get("/search/auto-load-more", async (req, res) => {
         const bMatches = b.softCategoryMatches || 0;
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
-
+        
         // PRIORITY 1: Soft category matches ALWAYS come first
         // When user searches for "Italian white wine", Italian wines must be first - always
         if (aHasSoftMatch !== bHasSoftMatch) {
@@ -4642,11 +4650,11 @@ app.get("/search/auto-load-more", async (req, res) => {
         // PRIORITY 2: Multi-category matches rank higher than single category
         const aIsMultiCategory = aMatches >= 2;
         const bIsMultiCategory = bMatches >= 2;
-
+        
         if (aIsMultiCategory !== bIsMultiCategory) {
           return aIsMultiCategory ? -1 : 1;
         }
-
+        
         if (aIsMultiCategory && bIsMultiCategory) {
           if (aMatches !== bMatches) {
             return bMatches - aMatches;
@@ -7474,7 +7482,7 @@ app.post("/search", async (req, res) => {
         // SIMPLE QUERIES WITHOUT SOFT FILTERS: Text matches come first
         // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
         // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
-        const aIsTier1 = aTextBonus >= 8000;
+        const aIsTier1 = aTextBonus >= 8000; 
         const bIsTier1 = bTextBonus >= 8000;
 
         // Check if either is a "Tier 1" match (high quality text match)
@@ -7491,7 +7499,7 @@ app.post("/search", async (req, res) => {
         // This catches partial matches that are still better than generic soft category matches
         const aHasSomeMatch = aTextBonus >= 2000;
         const bHasSomeMatch = bTextBonus >= 2000;
-
+        
         if (isSimpleResult && (aHasSomeMatch !== bHasSomeMatch)) {
           return aHasSomeMatch ? -1 : 1;
         }
@@ -7526,7 +7534,7 @@ app.post("/search", async (req, res) => {
           }
 
           // If neither has text match, just sort by score
-          return b.rrf_score - a.rrf_score;
+            return b.rrf_score - a.rrf_score;
         }
 
         // Fallback: sort by score
@@ -7859,7 +7867,7 @@ app.post("/search", async (req, res) => {
 
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
-
+    
     // Log all queries (both simple and complex)
     try {
         await logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult);
@@ -8431,7 +8439,7 @@ app.post("/search-to-cart", async (req, res) => {
         targetCollection = db.collection('checkout_events');
         break;
         case 'active_user_profile':
-        targetCollection = db.collection('user_profiles');
+        targetCollection = db.collection('profiles');
         break;
       case 'add_to_cart':
         targetCollection = db.collection('cart');
@@ -8677,7 +8685,7 @@ app.post("/search-to-cart", async (req, res) => {
     if (document.event_type === 'add_to_cart' && document.product_id && document.session_id) {
       try {
         const productsCollection = db.collection('products');
-        const profilesCollection = db.collection('user_profiles');
+        const profilesCollection = db.collection('profiles');
 
         const product = await productsCollection.findOne({
           $or: [
@@ -8703,8 +8711,7 @@ app.post("/search-to-cart", async (req, res) => {
               $setOnInsert: {
                 session_id: document.session_id,
                 created_at: new Date(),
-                preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
-                stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+                preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } }
               }
             },
             { upsert: true }
@@ -8752,7 +8759,7 @@ app.post("/search-to-cart", async (req, res) => {
         console.error("[SEARCH-TO-CART] Profile update error:", profileError.message);
       }
     }
-
+    
     res.status(201).json({
       success: true,
       message: `${document.event_type} event saved successfully`,
@@ -10042,6 +10049,136 @@ function calculateCategoryScore(categoryData) {
 }
 
 /**
+ * Helper to track user interactions and update their profile
+ */
+async function trackUserProfileInteraction(db, sessionId, productId, interactionType, productData = null) {
+  if (!sessionId || !interactionType) return null;
+
+  try {
+    const profilesCollection = db.collection('profiles');
+    const productsCollection = db.collection('products');
+
+    // Get product data - either from request or fetch from DB
+    let product = productData;
+    if (!product && productId) {
+      // Build query conditions, handling ObjectId gracefully
+      const queryConditions = [
+        { ItemID: parseInt(productId) },
+        { ItemID: productId.toString() },
+        { id: parseInt(productId) },
+        { id: productId.toString() }
+      ];
+
+      // Only add ObjectId condition if it's a valid 24-char hex string
+      if (typeof productId === 'string' && /^[a-f\d]{24}$/i.test(productId)) {
+        try {
+          queryConditions.push({ _id: new ObjectId(productId) });
+        } catch (e) {
+          // Invalid ObjectId, skip this condition
+        }
+      }
+
+      product = await productsCollection.findOne({ $or: queryConditions });
+    }
+
+    if (!product) {
+      console.warn(`[PROFILE] Product not found for tracking: ${productId}`);
+      return null;
+    }
+
+    // Extract soft categories from product
+    const softCategories = Array.isArray(product.softCategory)
+      ? product.softCategory
+      : (product.softCategory ? [product.softCategory] : []);
+
+    const price = parseFloat(product.price) || 0;
+
+    // Build update operations
+    const updateOps = {
+      $set: { updated_at: new Date() },
+      $setOnInsert: {
+        session_id: sessionId,
+        created_at: new Date(),
+        preferences: {
+          softCategories: {},
+          priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
+        }
+      },
+      $inc: {}
+    };
+
+    // Increment interaction count
+    const statField = interactionType === 'click' ? 'totalClicks'
+                    : interactionType === 'cart' ? 'totalCarts'
+                    : 'totalPurchases';
+    
+    updateOps.$inc[`stats.${statField}`] = 1;
+
+    // For purchases, also track spent amount
+    if (interactionType === 'purchase' && price > 0) {
+      updateOps.$inc['stats.totalSpent'] = price;
+    }
+
+    // Initialize OTHER stats to 0 if inserting, to maintain structure
+    // (Removed to avoid MongoDB upsert conflicts with $inc)
+
+    // First, upsert to ensure profile exists
+    await profilesCollection.updateOne(
+      { session_id: sessionId },
+      updateOps,
+      { upsert: true }
+    );
+
+    // Now update soft category preferences
+    const categoryField = interactionType === 'click' ? 'clicks'
+                        : interactionType === 'cart' ? 'carts'
+                        : 'purchases';
+
+    for (const category of softCategories) {
+      if (category && category.trim()) {
+        await profilesCollection.updateOne(
+          { session_id: sessionId },
+          {
+            $inc: { [`preferences.softCategories.${category}.${categoryField}`]: 1 }
+          }
+        );
+      }
+    }
+
+    // Update price range preferences
+    if (price > 0) {
+      // Get current profile to calculate new average
+      const profile = await profilesCollection.findOne({ session_id: sessionId });
+      const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
+
+      const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
+      const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
+      const newSum = (priceRange.sum || 0) + price;
+      const newCount = (priceRange.count || 0) + 1;
+      const newAvg = newSum / newCount;
+
+      await profilesCollection.updateOne(
+        { session_id: sessionId },
+        {
+          $set: {
+            'preferences.priceRange.min': newMin,
+            'preferences.priceRange.max': newMax,
+            'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
+            'preferences.priceRange.sum': newSum,
+            'preferences.priceRange.count': newCount
+          }
+        }
+      );
+    }
+
+    return true;
+  } catch (error) {
+    console.error("[PROFILE] Error in trackUserProfileInteraction:", error);
+    return null;
+  }
+}
+
+/**
  * Calculate boost score for a product based on user profile preferences
  * Returns a value between 0-100000 that can be added to product score
  */
@@ -10107,7 +10244,7 @@ app.post("/profile/init", async (req, res) => {
 
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
-    const profilesCollection = db.collection('user_profiles');
+    const profilesCollection = db.collection('profiles');
 
     // Check if profile already exists
     const existingProfile = await profilesCollection.findOne({ session_id });
@@ -10199,141 +10336,25 @@ app.post("/profile/track-interaction", async (req, res) => {
 
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
-    const profilesCollection = db.collection('user_profiles');
-    const productsCollection = db.collection('products');
 
-    // Get product data - either from request or fetch from DB
-    let product = product_data;
-    if (!product && product_id) {
-      // Build query conditions, handling ObjectId gracefully
-      const queryConditions = [
-        { ItemID: parseInt(product_id) },
-        { ItemID: product_id.toString() },
-        { id: parseInt(product_id) },
-        { id: product_id.toString() }
-      ];
+    // Use the helper function
+    const success = await trackUserProfileInteraction(db, session_id, product_id, interaction_type, product_data);
 
-      // Only add ObjectId condition if it's a valid 24-char hex string
-      if (typeof product_id === 'string' && /^[a-f\d]{24}$/i.test(product_id)) {
-        try {
-          queryConditions.push({ _id: new ObjectId(product_id) });
-        } catch (e) {
-          // Invalid ObjectId, skip this condition
-        }
-      }
-
-      product = await productsCollection.findOne({ $or: queryConditions });
+    if (!success) {
+      return res.status(404).json({ error: "Product or profile update failed" });
     }
 
-    if (!product) {
-      console.warn(`[PROFILE] Product not found for tracking: ${product_id}`);
-      return res.status(404).json({ error: "Product not found" });
-    }
-
-    // Extract soft categories from product
-    const softCategories = Array.isArray(product.softCategory)
-      ? product.softCategory
-      : (product.softCategory ? [product.softCategory] : []);
-
-    const price = parseFloat(product.price) || 0;
-
-    // Build update operations
-    const updateOps = {
-      $set: { updated_at: new Date() },
-      $setOnInsert: {
-        session_id,
-        created_at: new Date(),
-        preferences: {
-          softCategories: {},
-          priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
-        },
-        stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
-      }
-    };
-
-    // Increment interaction count
-    const statField = interaction_type === 'click' ? 'totalClicks'
-                    : interaction_type === 'cart' ? 'totalCarts'
-                    : 'totalPurchases';
-    updateOps.$inc = { [`stats.${statField}`]: 1 };
-
-    // For purchases, also track spent amount
-    if (interaction_type === 'purchase' && price > 0) {
-      updateOps.$inc['stats.totalSpent'] = price;
-    }
-
-    // First, upsert to ensure profile exists
-    await profilesCollection.updateOne(
-      { session_id },
-      updateOps,
-      { upsert: true }
-    );
-
-    // Now update soft category preferences
-    const categoryField = interaction_type === 'click' ? 'clicks'
-                        : interaction_type === 'cart' ? 'carts'
-                        : 'purchases';
-
-    for (const category of softCategories) {
-      if (category && category.trim()) {
-        await profilesCollection.updateOne(
-          { session_id },
-          {
-            $inc: { [`preferences.softCategories.${category}.${categoryField}`]: 1 }
-          }
-        );
-      }
-    }
-
-    // Update price range preferences
-    if (price > 0) {
-      // Get current profile to calculate new average
-      const profile = await profilesCollection.findOne({ session_id });
-      const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
-
-      const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
-      const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
-      const newSum = (priceRange.sum || 0) + price;
-      const newCount = (priceRange.count || 0) + 1;
-      const newAvg = newSum / newCount;
-
-      await profilesCollection.updateOne(
-        { session_id },
-        {
-          $set: {
-            'preferences.priceRange.min': newMin,
-            'preferences.priceRange.max': newMax,
-            'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
-            'preferences.priceRange.sum': newSum,
-            'preferences.priceRange.count': newCount
-          }
-        }
-      );
-    }
-
-    // Get updated profile
+    // Get updated profile to return
+    const profilesCollection = db.collection('profiles');
     const updatedProfile = await profilesCollection.findOne({ session_id });
 
-    console.log(`[PROFILE] 📊 Tracked ${interaction_type} for session: ${session_id}, product: ${product.name || product_id}`);
-    console.log(`[PROFILE] Categories learned: ${softCategories.join(', ') || 'none'}, Price: ${price}`);
+    console.log(`[PROFILE] 📊 Tracked ${interaction_type} for session: ${session_id}`);
 
     res.status(200).json({
       success: true,
       message: `${interaction_type} tracked successfully`,
       session_id,
-      product_name: product.name,
-      categories_learned: softCategories,
-      price_tracked: price,
-      profile_summary: {
-        total_interactions: (updatedProfile.stats?.totalClicks || 0) +
-                           (updatedProfile.stats?.totalCarts || 0) +
-                           (updatedProfile.stats?.totalPurchases || 0),
-        top_categories: Object.entries(updatedProfile.preferences?.softCategories || {})
-          .map(([cat, data]) => ({ category: cat, score: calculateCategoryScore(data) }))
-          .sort((a, b) => b.score - a.score)
-          .slice(0, 5),
-        price_range: updatedProfile.preferences?.priceRange
-      }
+      profile: updatedProfile
     });
 
   } catch (error) {
@@ -10360,7 +10381,7 @@ app.get("/profile/:session_id", async (req, res) => {
 
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
-    const profilesCollection = db.collection('user_profiles');
+    const profilesCollection = db.collection('profiles');
 
     const profile = await profilesCollection.findOne({ session_id });
 
@@ -10421,7 +10442,7 @@ async function getUserProfileForBoosting(dbName, sessionId) {
   try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
-    const profile = await db.collection('user_profiles').findOne({ session_id: sessionId });
+    const profile = await db.collection('profiles').findOne({ session_id: sessionId });
 
     // Only return profile if it has meaningful data
     if (profile && profile.preferences) {
@@ -10799,106 +10820,23 @@ app.post("/product-click", async (req, res) => {
  
 
     // Insert the click
-
     const insertResult = await clicksCollection.insertOne(clickDocument);
-
- 
 
     console.log(`[PRODUCT CLICK] Tracked: session=${session_id}, product=${product_id}, query="${clickDocument.search_query || 'none'}"`);
 
     // =========================================================
     // PERSONALIZATION: Auto-update profile from click
     // =========================================================
-    let profileUpdated = false;
-    let categoriesLearned = [];
-
-    try {
-      const productsCollection = db.collection('products');
-      const profilesCollection = db.collection('user_profiles');
-
-      // Find the product to get its soft categories and price
-      const product = await productsCollection.findOne({
-        $or: [
-          { ItemID: parseInt(product_id) },
-          { ItemID: product_id.toString() },
-          { id: parseInt(product_id) },
-          { id: product_id.toString() }
-        ]
-      });
-
-      if (product) {
-        const softCategories = Array.isArray(product.softCategory)
-          ? product.softCategory
-          : (product.softCategory ? [product.softCategory] : []);
-        const price = parseFloat(product.price) || 0;
-
-        // Update profile stats
-        await profilesCollection.updateOne(
-          { session_id },
-          {
-            $set: { updated_at: new Date() },
-            $inc: { 'stats.totalClicks': 1 },
-            $setOnInsert: {
-              session_id,
-              created_at: new Date(),
-              preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
-              stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
-            }
-          },
-          { upsert: true }
-        );
-
-        // Update soft category preferences (clicks weight = 1)
-        for (const category of softCategories) {
-          if (category && category.trim()) {
-            await profilesCollection.updateOne(
-              { session_id },
-              { $inc: { [`preferences.softCategories.${category}.clicks`]: 1 } }
-            );
-            categoriesLearned.push(category);
-          }
-        }
-
-        // Update price range
-        if (price > 0) {
-          const profile = await profilesCollection.findOne({ session_id });
-          const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
-
-          const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
-          const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
-          const newSum = (priceRange.sum || 0) + price;
-          const newCount = (priceRange.count || 0) + 1;
-
-          await profilesCollection.updateOne(
-            { session_id },
-            {
-              $set: {
-                'preferences.priceRange.min': newMin,
-                'preferences.priceRange.max': newMax,
-                'preferences.priceRange.avg': Math.round((newSum / newCount) * 100) / 100,
-                'preferences.priceRange.sum': newSum,
-                'preferences.priceRange.count': newCount
-              }
-            }
-          );
-        }
-
-        profileUpdated = true;
-        console.log(`[PRODUCT CLICK] 👤 Profile updated: categories=[${categoriesLearned.join(', ')}]`);
-      }
-    } catch (profileError) {
-      console.error("[PRODUCT CLICK] Profile update error:", profileError.message);
-      // Continue - profile update is not critical
-    }
+    trackUserProfileInteraction(db, session_id, product_id, 'click', null)
+      .then(() => console.log(`[PRODUCT CLICK] 👤 Profile auto-updated for session: ${session_id}`))
+      .catch(err => console.error("[PRODUCT CLICK] Profile update error:", err.message));
 
     res.status(201).json({
       success: true,
       message: "Product click tracked successfully",
       click_id: insertResult.insertedId,
       product_name: clickDocument.product_name,
-      search_query: clickDocument.search_query,
-      profile_updated: profileUpdated,
-      categories_learned: categoriesLearned
+      search_query: clickDocument.search_query
     });
 
  
@@ -11464,100 +11402,27 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
             }
           );
         }
+
+        // =========================================================
+        // PERSONALIZATION: Update profile for each item purchased
+        // =========================================================
+        const lineItems = orderData.line_items || [];
+        let productsTracked = 0;
+        
+        // Process in background using the unified helper
+        Promise.all(lineItems.map(item => 
+          trackUserProfileInteraction(db, sessionId, item.product_id, 'purchase', null)
+            .then(success => { if (success) productsTracked++; })
+        )).then(() => {
+          if (productsTracked > 0) {
+            console.log(`[${requestId}] 👤 Profile updated for ${productsTracked} purchased items`);
+          }
+        }).catch(err => {
+          console.error(`[${requestId}] 👤 Profile update error:`, err);
+        });
+
       } catch (linkError) {
         console.error(`[${requestId}] ⚠️ Error linking clicks to order:`, linkError.message);
-      }
-
-      // =========================================================
-      // PERSONALIZATION: Update user profile with purchase data
-      // =========================================================
-      try {
-        const profilesCollection = db.collection('user_profiles');
-        const productsCollection = db.collection('products');
-
-        console.log(`[${requestId}] 👤 PERSONALIZATION: Updating profile from ${orderData.line_items.length} purchased items`);
-
-        for (const lineItem of orderData.line_items) {
-          // Find product in our catalog to get soft categories
-          const product = await productsCollection.findOne({
-            $or: [
-              { ItemID: parseInt(lineItem.product_id) },
-              { ItemID: lineItem.product_id.toString() },
-              { name: lineItem.title }
-            ]
-          });
-
-          if (product) {
-            const softCategories = Array.isArray(product.softCategory)
-              ? product.softCategory
-              : (product.softCategory ? [product.softCategory] : []);
-            const price = parseFloat(lineItem.price) || 0;
-
-            // Update profile stats
-            await profilesCollection.updateOne(
-              { session_id: sessionId },
-              {
-                $set: { updated_at: new Date() },
-                $inc: {
-                  'stats.totalPurchases': 1,
-                  'stats.totalSpent': price * lineItem.quantity
-                },
-                $setOnInsert: {
-                  session_id: sessionId,
-                  created_at: new Date(),
-                  preferences: {
-                    softCategories: {},
-                    priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
-                  },
-                  stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
-                }
-              },
-              { upsert: true }
-            );
-
-            // Update soft category preferences (purchases have highest weight)
-            for (const category of softCategories) {
-              if (category && category.trim()) {
-                await profilesCollection.updateOne(
-                  { session_id: sessionId },
-                  { $inc: { [`preferences.softCategories.${category}.purchases`]: lineItem.quantity } }
-                );
-              }
-            }
-
-            // Update price range
-            if (price > 0) {
-              const profile = await profilesCollection.findOne({ session_id: sessionId });
-              const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
-
-              const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
-              const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
-              const newSum = (priceRange.sum || 0) + price;
-              const newCount = (priceRange.count || 0) + 1;
-              const newAvg = newSum / newCount;
-
-              await profilesCollection.updateOne(
-                { session_id: sessionId },
-                {
-                  $set: {
-                    'preferences.priceRange.min': newMin,
-                    'preferences.priceRange.max': newMax,
-                    'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
-                    'preferences.priceRange.sum': newSum,
-                    'preferences.priceRange.count': newCount
-                  }
-                }
-              );
-            }
-
-            console.log(`[${requestId}] 👤 Updated profile with purchase: ${product.name}, categories: [${softCategories.join(', ')}]`);
-          }
-        }
-
-        console.log(`[${requestId}] 👤 PERSONALIZATION: Profile updated successfully from purchase`);
-      } catch (profileError) {
-        console.error(`[${requestId}] 👤 Error updating profile from purchase:`, profileError.message);
-        // Continue - profile update is not critical
       }
     }
 
@@ -11728,7 +11593,7 @@ app.post("/webhooks/woocommerce/order-created", express.json({ limit: '10mb' }),
     // Update user profile if session exists
     if (sessionId && targetDbName !== 'semantix_tracking') {
       try {
-        const profilesCollection = db.collection('user_profiles');
+        const profilesCollection = db.collection('profiles');
         const productsCollection = db.collection('products');
 
         console.log(`[${requestId}] 👤 Updating profile from ${lineItems.length} WooCommerce items`);
@@ -11760,8 +11625,7 @@ app.post("/webhooks/woocommerce/order-created", express.json({ limit: '10mb' }),
                 $setOnInsert: {
                   session_id: sessionId,
                   created_at: new Date(),
-                  preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
-                  stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
+                  preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } }
                 }
               },
               { upsert: true }
@@ -11848,7 +11712,7 @@ app.post("/profile/track-purchase", async (req, res) => {
 
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
-    const profilesCollection = db.collection('user_profiles');
+    const profilesCollection = db.collection('profiles');
     const productsCollection = db.collection('products');
     const checkoutCollection = db.collection('checkout_events');
 
@@ -11873,104 +11737,27 @@ app.post("/profile/track-purchase", async (req, res) => {
     await checkoutCollection.insertOne(checkoutData);
     console.log(`[${requestId}] ✅ Checkout event saved`);
 
-    // Update user profile for each item
-    let categoriesLearned = [];
+    // =========================================================
+    // PERSONALIZATION: Update profile for each item purchased
+    // =========================================================
     let productsTracked = 0;
-
-    for (const item of items) {
-      // Find product in catalog
-      const queryConditions = [
-        { ItemID: parseInt(item.product_id) },
-        { ItemID: String(item.product_id) },
-        { id: parseInt(item.product_id) },
-        { id: String(item.product_id) }
-      ];
-
-      if (item.sku) {
-        queryConditions.push({ sku: item.sku });
-      }
-      if (item.name) {
-        queryConditions.push({ name: item.name });
-      }
-
-      const product = await productsCollection.findOne({ $or: queryConditions });
-
-      const softCategories = product
-        ? (Array.isArray(product.softCategory) ? product.softCategory : (product.softCategory ? [product.softCategory] : []))
-        : [];
-
-      const price = parseFloat(item.price) || (product ? parseFloat(product.price) : 0) || 0;
-      const quantity = item.quantity || 1;
-
-      // Update profile stats
-      await profilesCollection.updateOne(
-        { session_id },
-        {
-          $set: { updated_at: new Date() },
-          $inc: {
-            'stats.totalPurchases': quantity,
-            'stats.totalSpent': price * quantity
-          },
-          $setOnInsert: {
-            session_id,
-            created_at: new Date(),
-            preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } },
-            stats: { totalClicks: 0, totalCarts: 0, totalPurchases: 0, totalSpent: 0 }
-          }
-        },
-        { upsert: true }
-      );
-
-      // Update soft category preferences
-      for (const category of softCategories) {
-        if (category && category.trim()) {
-          await profilesCollection.updateOne(
-            { session_id },
-            { $inc: { [`preferences.softCategories.${category}.purchases`]: quantity } }
-          );
-          if (!categoriesLearned.includes(category)) {
-            categoriesLearned.push(category);
-          }
-        }
-      }
-
-      // Update price range
-      if (price > 0) {
-        const profile = await profilesCollection.findOne({ session_id });
-        const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
-
-        const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
-        const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
-        const newSum = (priceRange.sum || 0) + price;
-        const newCount = (priceRange.count || 0) + 1;
-
-        await profilesCollection.updateOne(
-          { session_id },
-          {
-            $set: {
-              'preferences.priceRange.min': newMin,
-              'preferences.priceRange.max': newMax,
-              'preferences.priceRange.avg': Math.round((newSum / newCount) * 100) / 100,
-              'preferences.priceRange.sum': newSum,
-              'preferences.priceRange.count': newCount
-            }
-          }
-        );
-      }
-
-      productsTracked++;
-    }
-
-    console.log(`[${requestId}] 👤 Profile updated: ${productsTracked} products, ${categoriesLearned.length} categories`);
+    
+    // Process items in background/parallel to not block response
+    Promise.all(items.map(item => 
+      trackUserProfileInteraction(db, session_id, item.product_id, 'purchase', null)
+        .then(success => { if (success) productsTracked++; })
+    )).then(() => {
+      console.log(`[${requestId}] 👤 Profile updated for ${productsTracked} purchased items`);
+    }).catch(err => {
+      console.error(`[${requestId}] 👤 Profile update error:`, err);
+    });
 
     res.status(200).json({
       success: true,
       message: "Purchase tracked successfully",
       session_id,
       order_id: checkoutData.order_id,
-      products_tracked: productsTracked,
-      categories_learned: categoriesLearned,
-      total_spent: checkoutData.total_price
+      total_price: checkoutData.total_price
     });
 
   } catch (error) {
