@@ -4863,7 +4863,7 @@ app.get("/search/load-more", async (req, res) => {
       });
     }
     
-    const { query, filters, offset, timestamp, type, extractedCategories } = paginationData;
+    const { query, filters, offset, timestamp, type, extractedCategories, session_id } = paginationData;
     
     // Check if token is expired (24 hours)
     const tokenAge = Date.now() - timestamp;
@@ -5478,7 +5478,35 @@ app.get("/search/load-more", async (req, res) => {
     }
     
     // Get the requested slice
-    const paginatedResults = cachedResults.slice(startIndex, endIndex);
+    let paginatedResults = cachedResults.slice(startIndex, endIndex);
+    
+    // =========================================================
+    // PERSONALIZATION: Apply profile-based boosting for load-more
+    // =========================================================
+    if (session_id) {
+      try {
+        const { dbName } = req.store;
+        const userProfile = await getUserProfileForBoosting(dbName, session_id);
+        if (userProfile) {
+          console.log(`[${requestId}] 👤 PERSONALIZATION: Applying profile boost to load-more results`);
+          paginatedResults = paginatedResults.map(product => {
+            const profileBoost = calculateProfileBoost(product, userProfile);
+            return {
+              ...product,
+              profileBoost,
+              boostedScore: (product.rrf_score || 0) + profileBoost
+            };
+          });
+
+          // Re-sort current batch by boosted score
+          if (paginatedResults.some(p => (p.profileBoost || 0) > 0)) {
+            paginatedResults.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+          }
+        }
+      } catch (profileError) {
+        console.error(`[${requestId}] 👤 Error loading profile for load-more:`, profileError.message);
+      }
+    }
     
     // Create next pagination token if there's more
     const nextToken = hasMore ? Buffer.from(JSON.stringify({
@@ -5486,7 +5514,8 @@ app.get("/search/load-more", async (req, res) => {
       filters,
       offset: nextOffset,
       timestamp: timestamp, // Keep original timestamp
-      extractedCategories: extractedCategories // Include extracted categories for subsequent load-more
+      extractedCategories: extractedCategories, // Include extracted categories for subsequent load-more
+      session_id: session_id // 👤 Maintain personalization context
     })).toString('base64') : null;
     
     console.log(`[${requestId}] Returning ${paginatedResults.length} products (${startIndex}-${endIndex} of ${cachedResults.length})`);
@@ -5767,6 +5796,22 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     console.log(`[${requestId}] Phase 1: Extracted ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
 
+    // =========================================================
+    // PERSONALIZATION: Load profile for Phase 1
+    // =========================================================
+    const { session_id } = req.body;
+    let userProfile = null;
+    if (session_id) {
+      try {
+        userProfile = await getUserProfileForBoosting(dbName, session_id);
+        if (userProfile) {
+          console.log(`[${requestId}] 👤 PERSONALIZATION: Loaded profile for session ${session_id} in Phase 1`);
+        }
+      } catch (profileError) {
+        console.error(`[${requestId}] 👤 Error loading profile for Phase 1:`, profileError.message);
+      }
+    }
+
     // CRITICAL: Filter Tier 1 results by extracted hard categories (if enabled via firstMatchCategory flag)
     // This ensures all Phase 1 results match the category of the top textual match
     let filteredTextMatches = highQualityTextMatches;
@@ -5790,28 +5835,47 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     }
 
     // Return filtered text matches
-    const response = filteredTextMatches.slice(0, searchLimit).map(product => ({
-      _id: product._id.toString(),
-      id: product.id,
-      name: product.name,
-      description: product.description,
-      price: product.price,
-      image: product.image,
-      url: product.url,
-      type: product.type,
-      specialSales: product.specialSales,
-      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-      ItemID: product.ItemID,
-      highlight: true, // Text matches are highlighted
-      softFilterMatch: false,
-      softCategoryMatches: 0,
-      simpleSearch: false,
-      filterOnly: false,
-      highTextMatch: true, // Mark as text match
-      explanation: null
-    }));
+    let response = filteredTextMatches.map(product => {
+      let profileBoost = 0;
+      if (userProfile) {
+        profileBoost = calculateProfileBoost(product, userProfile);
+      }
+      
+      return {
+        ...product,
+        _id: product._id.toString(),
+        id: product.id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        type: product.type,
+        specialSales: product.specialSales,
+        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+        ItemID: product.ItemID,
+        highlight: true, // Text matches are highlighted
+        softFilterMatch: false,
+        softCategoryMatches: 0,
+        simpleSearch: false,
+        filterOnly: false,
+        highTextMatch: true, // Mark as text match
+        explanation: null,
+        profileBoost: profileBoost,
+        boostedScore: (product.exactMatchBonus || 0) + profileBoost
+      };
+    });
 
-    const hasMore = filteredTextMatches.length > searchLimit;
+    // PERSONALIZATION: Re-sort by boosted score if profile is active
+    if (userProfile && response.some(p => p.profileBoost > 0)) {
+      console.log(`[${requestId}] 👤 PERSONALIZATION: Re-sorting Phase 1 results by boosted score`);
+      response.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+    }
+
+    const totalFound = response.length;
+    response = response.slice(0, searchLimit);
+
+    const hasMore = totalFound > searchLimit;
     const hasCategoryFiltering = (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0);
     
     // If we have more text matches but no category filtering, provide a nextToken
@@ -5823,7 +5887,8 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         filters: extractedFilters,
         offset: searchLimit,
         timestamp: Date.now(),
-        type: 'text-matches-only'
+        type: 'text-matches-only',
+        session_id: session_id // 👤 Personalization context
       })).toString('base64');
     }
 
@@ -5888,6 +5953,23 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     const softCategoriesArray = extractedCategories.softCategories || [];
 
     console.log(`[${requestId}] Phase 2: Filtering by ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories`);
+
+    // =========================================================
+    // PERSONALIZATION: Load profile for Phase 2
+    // =========================================================
+    const { session_id } = req.body;
+    let userProfile = null;
+    if (session_id) {
+      try {
+        userProfile = await getUserProfileForBoosting(dbName, session_id);
+        if (userProfile) {
+          console.log(`[${requestId}] 👤 PERSONALIZATION: Loaded profile for session ${session_id} in Phase 2`);
+        }
+      } catch (profileError) {
+        console.error(`[${requestId}] 👤 Error loading profile for Phase 2:`, profileError.message);
+      }
+    }
+
     console.log(`[${requestId}] Excluding ${excludeIds.length} products already shown in Phase 1`);
     console.log(`[${requestId}] Hard categories: ${JSON.stringify(hardCategoriesArray)}`);
     console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
@@ -5974,32 +6056,51 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     }
 
     // Return category-filtered results
-    const response = (categoryFilteredResults || []).slice(0, searchLimit).map(product => ({
-      _id: product._id.toString(),
-      id: product.id,
-      name: product.name,
-      description: product.description,
-      price: product.price,
-      image: product.image,
-      url: product.url,
-      type: product.type,
-      category: product.category,
-      specialSales: product.specialSales,
-      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-      ItemID: product.ItemID,
-      highlight: false,
-      softFilterMatch: product.softFilterMatch || false,
-      softCategoryMatches: product.softCategoryMatches || 0,
-      rrf_score: product.rrf_score || 0,
-      simpleSearch: false,
-      filterOnly: false,
-      softCategoryExpansion: true, // Mark as category-filtered
-      explanation: null
-    }));
+    let response = (categoryFilteredResults || []).map(product => {
+      let profileBoost = 0;
+      if (userProfile) {
+        profileBoost = calculateProfileBoost(product, userProfile);
+      }
+
+      return {
+        ...product,
+        _id: product._id.toString(),
+        id: product.id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        type: product.type,
+        category: product.category,
+        specialSales: product.specialSales,
+        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+        ItemID: product.ItemID,
+        highlight: false,
+        softFilterMatch: product.softFilterMatch || false,
+        softCategoryMatches: product.softCategoryMatches || 0,
+        rrf_score: product.rrf_score || 0,
+        simpleSearch: false,
+        filterOnly: false,
+        softCategoryExpansion: true, // Mark as category-filtered
+        explanation: null,
+        profileBoost: profileBoost,
+        boostedScore: (product.rrf_score || 0) + profileBoost
+      };
+    });
+
+    // PERSONALIZATION: Re-sort by boosted score if profile is active
+    if (userProfile && response.some(p => p.profileBoost > 0)) {
+      console.log(`[${requestId}] 👤 PERSONALIZATION: Re-sorting Phase 2 results by boosted score`);
+      response.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+    }
+
+    const totalFound = response.length;
+    response = response.slice(0, searchLimit);
 
     console.log(`[${requestId}] Phase 2: Returning ${response.length} category-filtered results`);
 
-    const hasMore = (categoryFilteredResults || []).length > searchLimit;
+    const hasMore = totalFound > searchLimit;
     const nextToken = hasMore ? Buffer.from(JSON.stringify({
       query,
       filters: categoryFilteredHardFilters,
@@ -7810,7 +7911,8 @@ app.post("/search", async (req, res) => {
           simpleSearch: true, // Mark as simple search result
           filterOnly: !!r.filterOnly,
           highTextMatch: isHighTextMatch, // Flag for tier separation (Tier 1)
-          softCategoryExpansion: !!r.softCategoryExpansion // Flag for soft category related products (Tier 2)
+          softCategoryExpansion: !!r.softCategoryExpansion, // Flag for soft category related products (Tier 2)
+          searchScore: r.exactMatchBonus || r.rrf_score || r.score || 0 // 🎯 CRITICAL: Capture the actual score for personalization
         };
       });
     }
@@ -8057,7 +8159,8 @@ app.post("/search", async (req, res) => {
         offset: limitedResults.length,
         timestamp: Date.now(),
         extractedCategories: extractedFromLLM, // Categories + boost map for Tier 2
-        type: 'complex-tier2' // Mark as complex query tier 2
+        type: 'complex-tier2', // Mark as complex query tier 2
+        session_id: session_id // 👤 Personalization context
       })).toString('base64');
       
       console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 3 textual matches`);
@@ -8149,7 +8252,8 @@ app.post("/search", async (req, res) => {
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
-        extractedCategories: extractedForSimple // Include extracted categories for load-more
+        extractedCategories: extractedForSimple, // Include extracted categories for load-more
+        session_id: session_id // 👤 Personalization context
       })).toString('base64');
     }
     
