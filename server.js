@@ -7898,6 +7898,8 @@ app.post("/search", async (req, res) => {
 
     // =========================================================
     // PERSONALIZATION: Apply profile-based boosting
+    // IMPORTANT: Personalization ONLY reorders within textual results
+    // Non-textual results (category expansion) maintain their original order
     // =========================================================
     let userProfile = null;
     if (session_id) {
@@ -7907,57 +7909,38 @@ app.post("/search", async (req, res) => {
           console.log(`[${requestId}] 👤 PERSONALIZATION: Loaded profile for session ${session_id}`);
           console.log(`[${requestId}] 👤 Profile has ${Object.keys(userProfile.preferences?.softCategories || {}).length} learned categories`);
 
-          // Apply profile boost to each result
-          finalResults = finalResults.map(product => {
-            const profileBoost = calculateProfileBoost(product, userProfile);
-            return {
-              ...product,
-              profileBoost,
-              originalScore: product.searchScore || product.score || 0,
-              boostedScore: (product.searchScore || product.score || 0) + profileBoost
-            };
-          });
+          // STEP 1: Separate textual results from non-textual results
+          // Textual results = products that match the search text (highTextMatch OR high exactMatchBonus)
+          const textualResults = finalResults.filter(p => p.highTextMatch || (p.searchScore || 0) >= 1000);
+          const nonTextualResults = finalResults.filter(p => !p.highTextMatch && (p.searchScore || 0) < 1000);
 
-          // Re-sort by boosted score (higher is better)
-          // Only re-sort if there are meaningful boosts to apply
-          const hasBoosts = finalResults.some(p => (p.profileBoost || 0) > 0);
-          if (hasBoosts) {
-            // Sort by boosted score, but PRESERVE TEXT MATCH PRIORITY
-            // Personalization should only reorder within the same text match tier
-            // Never let a non-matching product appear before a matching product
-            finalResults.sort((a, b) => {
-              const aTextBonus = a.searchScore || 0;
-              const bTextBonus = b.searchScore || 0;
+          console.log(`[${requestId}] 👤 PERSONALIZATION: ${textualResults.length} textual results, ${nonTextualResults.length} non-textual results`);
 
-              // Define text match tiers based on exactMatchBonus
-              // Tier 1: High text matches (>= 8000) - strong keyword matches
-              // Tier 2: Medium text matches (>= 1000) - partial matches
-              // Tier 3: Low/no text matches (< 1000) - semantic/category matches
-              const getTier = (bonus) => {
-                if (bonus >= 8000) return 1;  // High text match
-                if (bonus >= 1000) return 2;  // Medium text match
-                return 3;                      // Low/no text match
+          // STEP 2: Apply personalization ONLY to textual results
+          if (textualResults.length > 0) {
+            const personalizedTextual = textualResults.map(product => {
+              const profileBoost = calculateProfileBoost(product, userProfile);
+              return {
+                ...product,
+                profileBoost,
+                boostedScore: (product.searchScore || 0) + profileBoost
               };
-
-              const aTier = getTier(aTextBonus);
-              const bTier = getTier(bTextBonus);
-
-              // PRIORITY 1: Text match tier - higher tier (lower number) comes first
-              // This ensures "פלטר" products ALWAYS come before "כישור"
-              if (aTier !== bTier) {
-                return aTier - bTier;
-              }
-
-              // PRIORITY 2: Within the same tier, apply personalization
-              // Sort by boosted score (text score + profile boost)
-              return (b.boostedScore || 0) - (a.boostedScore || 0);
             });
-            console.log(`[${requestId}] 👤 PERSONALIZATION: Re-ranked ${finalResults.length} results with profile boost (preserving text match priority)`);
-            console.log(`[${requestId}] 👤 Top 3 after personalization:`, finalResults.slice(0, 3).map(p => ({
+
+            // Sort textual results by boosted score
+            const hasBoosts = personalizedTextual.some(p => (p.profileBoost || 0) > 0);
+            if (hasBoosts) {
+              personalizedTextual.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+              console.log(`[${requestId}] 👤 PERSONALIZATION: Re-ranked ${personalizedTextual.length} textual results`);
+            }
+
+            // STEP 3: Combine - textual results first, then non-textual
+            finalResults = [...personalizedTextual, ...nonTextualResults];
+
+            console.log(`[${requestId}] 👤 PERSONALIZATION: Top 3 textual results:`, personalizedTextual.slice(0, 3).map(p => ({
               name: p.name,
-              profileBoost: p.profileBoost,
               searchScore: p.searchScore,
-              highlight: p.highlight
+              profileBoost: p.profileBoost
             })));
           }
         } else {
