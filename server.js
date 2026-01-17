@@ -5843,23 +5843,23 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       
       return {
         ...product,
-        _id: product._id.toString(),
-        id: product.id,
-        name: product.name,
-        description: product.description,
-        price: product.price,
-        image: product.image,
-        url: product.url,
-        type: product.type,
-        specialSales: product.specialSales,
-        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-        ItemID: product.ItemID,
-        highlight: true, // Text matches are highlighted
-        softFilterMatch: false,
-        softCategoryMatches: 0,
-        simpleSearch: false,
-        filterOnly: false,
-        highTextMatch: true, // Mark as text match
+      _id: product._id.toString(),
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      type: product.type,
+      specialSales: product.specialSales,
+      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+      ItemID: product.ItemID,
+      highlight: true, // Text matches are highlighted
+      softFilterMatch: false,
+      softCategoryMatches: 0,
+      simpleSearch: false,
+      filterOnly: false,
+      highTextMatch: true, // Mark as text match
         explanation: null,
         profileBoost: profileBoost,
         boostedScore: (product.exactMatchBonus || 0) + profileBoost
@@ -5867,9 +5867,37 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     });
 
     // PERSONALIZATION: Re-sort by boosted score if profile is active
+    // BUT preserve strong text match hierarchy (exact matches stay on top)
     if (userProfile && response.some(p => p.profileBoost > 0)) {
-      console.log(`[${requestId}] 👤 PERSONALIZATION: Re-sorting Phase 1 results by boosted score`);
-      response.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+      console.log(`[${requestId}] 👤 PERSONALIZATION: Re-sorting Phase 1 results by boosted score (preserving text match hierarchy)`);
+      
+      // Define text match quality tiers
+      const EXACT_MATCH_THRESHOLD = 50000; // Very strong exact matches
+      const STRONG_MATCH_THRESHOLD = 20000; // Strong matches
+      const GOOD_MATCH_THRESHOLD = 5000;   // Good matches
+      
+      // Group products by text match quality
+      const exactMatches = response.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD);
+      const strongMatches = response.filter(p => (p.exactMatchBonus || 0) >= STRONG_MATCH_THRESHOLD && (p.exactMatchBonus || 0) < EXACT_MATCH_THRESHOLD);
+      const goodMatches = response.filter(p => (p.exactMatchBonus || 0) >= GOOD_MATCH_THRESHOLD && (p.exactMatchBonus || 0) < STRONG_MATCH_THRESHOLD);
+      const weakMatches = response.filter(p => (p.exactMatchBonus || 0) < GOOD_MATCH_THRESHOLD);
+      
+      // Sort each tier: PRIMARY by exactMatchBonus (text quality), SECONDARY by profileBoost (personalization)
+      const sortByTextThenPersonalization = (a, b) => {
+        const textDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+        if (textDiff !== 0) return textDiff; // Text match quality is PRIMARY
+        return (b.profileBoost || 0) - (a.profileBoost || 0); // Personalization is SECONDARY (tie-breaker)
+      };
+      
+      exactMatches.sort(sortByTextThenPersonalization);
+      strongMatches.sort(sortByTextThenPersonalization);
+      goodMatches.sort(sortByTextThenPersonalization);
+      weakMatches.sort(sortByTextThenPersonalization);
+      
+      // Recombine: exact matches first, then strong, then good, then weak
+      response = [...exactMatches, ...strongMatches, ...goodMatches, ...weakMatches];
+      
+      console.log(`[${requestId}] 👤 PERSONALIZATION: Sorted into tiers - Exact: ${exactMatches.length}, Strong: ${strongMatches.length}, Good: ${goodMatches.length}, Weak: ${weakMatches.length}`);
     }
 
     const totalFound = response.length;
@@ -6064,25 +6092,25 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 
       return {
         ...product,
-        _id: product._id.toString(),
-        id: product.id,
-        name: product.name,
-        description: product.description,
-        price: product.price,
-        image: product.image,
-        url: product.url,
-        type: product.type,
-        category: product.category,
-        specialSales: product.specialSales,
-        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-        ItemID: product.ItemID,
-        highlight: false,
-        softFilterMatch: product.softFilterMatch || false,
-        softCategoryMatches: product.softCategoryMatches || 0,
-        rrf_score: product.rrf_score || 0,
-        simpleSearch: false,
-        filterOnly: false,
-        softCategoryExpansion: true, // Mark as category-filtered
+      _id: product._id.toString(),
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      type: product.type,
+      category: product.category,
+      specialSales: product.specialSales,
+      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+      ItemID: product.ItemID,
+      highlight: false,
+      softFilterMatch: product.softFilterMatch || false,
+      softCategoryMatches: product.softCategoryMatches || 0,
+      rrf_score: product.rrf_score || 0,
+      simpleSearch: false,
+      filterOnly: false,
+      softCategoryExpansion: true, // Mark as category-filtered
         explanation: null,
         profileBoost: profileBoost,
         boostedScore: (product.rrf_score || 0) + profileBoost
@@ -6090,6 +6118,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     });
 
     // PERSONALIZATION: Re-sort by boosted score if profile is active
+    // Phase 2 uses RRF scores, so personalization can be more aggressive here
     if (userProfile && response.some(p => p.profileBoost > 0)) {
       console.log(`[${requestId}] 👤 PERSONALIZATION: Re-sorting Phase 2 results by boosted score`);
       response.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
@@ -7604,11 +7633,15 @@ app.post("/search", async (req, res) => {
               return aIsMarkedTextMatch ? -1 : 1; // Marked text matches first
             }
 
-            // Within same type, sort by text match strength
+            // Within same type (both marked as highTextMatch), sort by text match strength
+            // CRITICAL: This ensures "צויה סאקה" (63k) stays above "יין צובה" (60k)
             const textMatchDiff = bTextBonus - aTextBonus;
             if (textMatchDiff !== 0) {
               return textMatchDiff;
             }
+            
+            // If exactMatchBonus is equal, maintain original order (stable sort)
+            return 0;
             // Within same text match strength, still prioritize by score
             return b.rrf_score - a.rrf_score;
           }
@@ -7891,7 +7924,8 @@ app.post("/search", async (req, res) => {
           filterOnly: !!r.filterOnly,
           highTextMatch: isHighTextMatch, // Flag for tier separation (Tier 1)
           softCategoryExpansion: !!r.softCategoryExpansion, // Flag for soft category related products (Tier 2)
-          searchScore: r.exactMatchBonus || r.rrf_score || r.score || 0 // 🎯 CRITICAL: Capture the actual score for personalization
+          exactMatchBonus: r.exactMatchBonus || r.textMatchBonus || 0, // 🎯 CRITICAL: Preserve text match bonus (may be named textMatchBonus in two-step search)
+          searchScore: r.exactMatchBonus || r.textMatchBonus || r.rrf_score || r.score || 0 // Overall score for sorting
         };
       });
     }
@@ -7910,13 +7944,16 @@ app.post("/search", async (req, res) => {
           console.log(`[${requestId}] 👤 Profile has ${Object.keys(userProfile.preferences?.softCategories || {}).length} learned categories`);
 
           // STEP 1: Separate textual results from non-textual results
-          // Textual results = products that match the search text (highTextMatch OR high exactMatchBonus)
-          const textualResults = finalResults.filter(p => p.highTextMatch || (p.searchScore || 0) >= 1000);
-          const nonTextualResults = finalResults.filter(p => !p.highTextMatch && (p.searchScore || 0) < 1000);
+          // Textual results = products that match the search text (highTextMatch OR have exactMatchBonus)
+          // CRITICAL: Use exactMatchBonus (not searchScore) to identify TRUE textual matches
+          // searchScore can be high for Tier 2 (category expansion) results, but they should NOT be treated as textual
+          const textualResults = finalResults.filter(p => p.highTextMatch || (p.exactMatchBonus || 0) > 0);
+          const nonTextualResults = finalResults.filter(p => !p.highTextMatch && (p.exactMatchBonus || 0) === 0);
 
           console.log(`[${requestId}] 👤 PERSONALIZATION: ${textualResults.length} textual results, ${nonTextualResults.length} non-textual results`);
 
           // STEP 2: Apply personalization ONLY to textual results
+          // BUT preserve strong text match hierarchy (exact matches stay on top)
           if (textualResults.length > 0) {
             const personalizedTextual = textualResults.map(product => {
               const profileBoost = calculateProfileBoost(product, userProfile);
@@ -7927,21 +7964,62 @@ app.post("/search", async (req, res) => {
               };
             });
 
-            // Sort textual results by boosted score
+            // Sort textual results by boosted score, but preserve text match tiers
             const hasBoosts = personalizedTextual.some(p => (p.profileBoost || 0) > 0);
             if (hasBoosts) {
-              personalizedTextual.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
-              console.log(`[${requestId}] 👤 PERSONALIZATION: Re-ranked ${personalizedTextual.length} textual results`);
+              // CRITICAL: Use exactMatchBonus (not searchScore) to determine text match quality
+              // searchScore can be artificially high for semantic/RRF matches (e.g., 1e+73)
+              // Only products with actual text matches (exactMatchBonus > 0) should be protected
+              
+              // Separate TRUE textual matches from semantic matches
+              const trueTextMatches = personalizedTextual.filter(p => (p.exactMatchBonus || 0) > 0);
+              const semanticMatches = personalizedTextual.filter(p => (p.exactMatchBonus || 0) === 0);
+              
+              // Define text match quality tiers (for TRUE text matches only)
+              const EXACT_MATCH_THRESHOLD = 50000; // Very strong exact matches (e.g., "פלטר" when searching "פלטר")
+              const STRONG_MATCH_THRESHOLD = 20000; // Strong matches
+              const GOOD_MATCH_THRESHOLD = 5000;   // Good matches
+              
+              // Group TRUE text matches by quality
+              const exactMatches = trueTextMatches.filter(p => (p.exactMatchBonus || 0) >= EXACT_MATCH_THRESHOLD);
+              const strongMatches = trueTextMatches.filter(p => (p.exactMatchBonus || 0) >= STRONG_MATCH_THRESHOLD && (p.exactMatchBonus || 0) < EXACT_MATCH_THRESHOLD);
+              const goodMatches = trueTextMatches.filter(p => (p.exactMatchBonus || 0) >= GOOD_MATCH_THRESHOLD && (p.exactMatchBonus || 0) < STRONG_MATCH_THRESHOLD);
+              const weakMatches = trueTextMatches.filter(p => (p.exactMatchBonus || 0) < GOOD_MATCH_THRESHOLD && (p.exactMatchBonus || 0) > 0);
+              
+              // Sort each tier: PRIMARY by exactMatchBonus (text quality), SECONDARY by profileBoost (personalization)
+              // This ensures "צויה סאקה" (63k) stays above "יין צובה" (60k) even if the latter has higher profileBoost
+              const sortByTextThenPersonalization = (a, b) => {
+                const textDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+                if (textDiff !== 0) return textDiff; // Text match quality is PRIMARY
+                return (b.profileBoost || 0) - (a.profileBoost || 0); // Personalization is SECONDARY (tie-breaker)
+              };
+              
+              exactMatches.sort(sortByTextThenPersonalization);
+              strongMatches.sort(sortByTextThenPersonalization);
+              goodMatches.sort(sortByTextThenPersonalization);
+              weakMatches.sort(sortByTextThenPersonalization);
+              
+              // Semantic matches can be freely reordered by personalization
+              semanticMatches.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+              
+              // Recombine: TRUE text matches first (by tier), then semantic matches
+              const rerankedTextual = [...exactMatches, ...strongMatches, ...goodMatches, ...weakMatches, ...semanticMatches];
+              
+              console.log(`[${requestId}] 👤 PERSONALIZATION: Text match tiers - Exact: ${exactMatches.length}, Strong: ${strongMatches.length}, Good: ${goodMatches.length}, Weak: ${weakMatches.length}, Semantic: ${semanticMatches.length}`);
+              
+              // STEP 3: Combine - textual results first, then non-textual
+              finalResults = [...rerankedTextual, ...nonTextualResults];
+              
+              console.log(`[${requestId}] 👤 PERSONALIZATION: Top 3 results:`, rerankedTextual.slice(0, 3).map(p => ({
+                name: p.name,
+                exactMatchBonus: p.exactMatchBonus || 0,
+                searchScore: p.searchScore,
+                profileBoost: p.profileBoost
+              })));
+            } else {
+              // No boosts, keep original order
+              finalResults = [...personalizedTextual, ...nonTextualResults];
             }
-
-            // STEP 3: Combine - textual results first, then non-textual
-            finalResults = [...personalizedTextual, ...nonTextualResults];
-
-            console.log(`[${requestId}] 👤 PERSONALIZATION: Top 3 textual results:`, personalizedTextual.slice(0, 3).map(p => ({
-              name: p.name,
-              searchScore: p.searchScore,
-              profileBoost: p.profileBoost
-            })));
           }
         } else {
           console.log(`[${requestId}] 👤 No profile found for session ${session_id}`);
