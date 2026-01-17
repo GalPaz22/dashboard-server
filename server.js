@@ -3430,7 +3430,8 @@ async function reorderResultsWithGPT(
   context,
   softFilters = null,
   maxResults = 25,
-  useFastLLM = false
+  useFastLLM = false,
+  userProfile = null // 👤 PERSONALIZATION: User profile for personalized ranking
 ) {
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
@@ -3458,6 +3459,28 @@ async function reorderResultsWithGPT(
       const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
       softCategoryContext = `\n\nExtracted Soft Categories: ${softCats.join(', ')} - These represent the user's preferences and should be prioritized in ranking.`;
     }
+    
+    // 👤 PERSONALIZATION: Build user profile context for LLM
+    let personalizationContext = "";
+    if (userProfile && userProfile.preferences) {
+      const topCategories = Object.entries(userProfile.preferences.softCategories || {})
+        .sort((a, b) => {
+          const scoreA = (a[1].clicks || 0) * 3 + (a[1].carts || 0) * 5 + (a[1].purchases || 0) * 10;
+          const scoreB = (b[1].clicks || 0) * 3 + (b[1].carts || 0) * 5 + (b[1].purchases || 0) * 10;
+          return scoreB - scoreA;
+        })
+        .slice(0, 5)
+        .map(([cat]) => cat);
+      
+      if (topCategories.length > 0) {
+        personalizationContext = `\n\n👤 USER PREFERENCES (personalization): This user has shown interest in: ${topCategories.join(', ')}. Consider these preferences when ranking, but prioritize query relevance first.`;
+      }
+      
+      if (userProfile.preferences.priceRange && userProfile.preferences.priceRange.count >= 3) {
+        const { min, max, avg } = userProfile.preferences.priceRange;
+        personalizationContext += `\nPrice preference: ₪${min}-${max} (avg: ₪${avg}).`;
+      }
+    }
 
     const systemInstruction = explain 
       ? `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
@@ -3477,7 +3500,7 @@ STRICT RULES:
 - You must NEVER add custom text, formatting, or additional content
 - Explanations must be factual and based on the product description and the search query intent. Maximum 15 words.
 
-Context: ${context}${softCategoryContext}
+Context: ${context}${softCategoryContext}${personalizationContext}
 
 Return JSON array with objects containing:
 1. '_id': Product ID (string)
@@ -3497,7 +3520,7 @@ STRICT RULES:
 - You must ONLY return valid JSON in the exact format specified
 - If there are less than 4 relevant products, return only the relevant ones. If there are no relevant products, return an empty array.
 
-Context: ${context}${softCategoryContext}
+Context: ${context}${softCategoryContext}${personalizationContext}
 
 Return JSON array with objects containing only:
 1. '_id': Product ID (string)
@@ -3610,7 +3633,8 @@ async function reorderImagesWithGPT(
   context,
   softFilters = null,
   maxResults = 25,
-  useFastLLM = false
+  useFastLLM = false,
+  userProfile = null // 👤 PERSONALIZATION: User profile for personalized ranking
 ) {
  try {
    if (!Array.isArray(alreadyDelivered)) {
@@ -3626,7 +3650,7 @@ async function reorderImagesWithGPT(
    const productsWithImages = limitedResults.filter(product => product.image && product.image.trim() !== '');
 
    if (productsWithImages.length === 0) {
-     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
+     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults, useFastLLM, userProfile);
    }
 
    // Sort products with images to prioritize QUERY-EXTRACTED soft category matches
@@ -3686,13 +3710,35 @@ async function reorderImagesWithGPT(
      try {
        const contents = [];
        
-       // Build soft category context with EMPHASIS on query-extracted categories
+      // Build soft category context with EMPHASIS on query-extracted categories
        let softCategoryContext = "";
        if (softFilters && softFilters.softCategory) {
          const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
-         softCategoryContext = `\n\n🎯 QUERY-EXTRACTED Soft Categories: ${softCats.join(', ')}
+        softCategoryContext = `\n\n🎯 QUERY-EXTRACTED Soft Categories: ${softCats.join(', ')}
 These are the MOST IMPORTANT categories - they come directly from the user's search query.
 Products marked "✓ MATCHES QUERY CATEGORIES" should be STRONGLY PRIORITIZED.`;
+      }
+      
+      // 👤 PERSONALIZATION: Build user profile context for LLM
+      let personalizationContext = "";
+      if (userProfile && userProfile.preferences) {
+        const topCategories = Object.entries(userProfile.preferences.softCategories || {})
+          .sort((a, b) => {
+            const scoreA = (a[1].clicks || 0) * 3 + (a[1].carts || 0) * 5 + (a[1].purchases || 0) * 10;
+            const scoreB = (b[1].clicks || 0) * 3 + (b[1].carts || 0) * 5 + (b[1].purchases || 0) * 10;
+            return scoreB - scoreA;
+          })
+          .slice(0, 5)
+          .map(([cat]) => cat);
+        
+        if (topCategories.length > 0) {
+          personalizationContext = `\n\n👤 USER PREFERENCES (personalization): This user has shown interest in: ${topCategories.join(', ')}. Consider these preferences when ranking, but prioritize query relevance first.`;
+        }
+        
+        if (userProfile.preferences.priceRange && userProfile.preferences.priceRange.count >= 3) {
+          const { min, max, avg } = userProfile.preferences.priceRange;
+          personalizationContext += `\nPrice preference: ₪${min}-${max} (avg: ₪${avg}).`;
+        }
        }
        
        contents.push({ text: `You are an advanced AI model for e-commerce product ranking with image analysis. Your ONLY task is to analyze product visual relevance and return a JSON array.
@@ -3713,7 +3759,7 @@ STRICT PRIORITY RULES:
 - You must NEVER add custom text, formatting, or additional content
 - Focus on visual elements that match the search intent
 
-Context: ${context}${softCategoryContext}
+Context: ${context}${softCategoryContext}${personalizationContext}
 
 Search Query Intent: "${sanitizedQuery}"` });
        
@@ -6722,6 +6768,18 @@ app.post("/search", async (req, res) => {
         return cat;
       });
     }
+    
+    // 👤 PERSONALIZATION: Track query-extracted categories in user profile
+    // This learns from what users SEARCH FOR, not just what they click/buy
+    if (session_id && (hardFilters.category || softFilters.softCategory)) {
+      trackQueryCategories(db, session_id, hardFilters.category, softFilters.softCategory)
+        .then(() => {
+          console.log(`[${requestId}] 👤 QUERY TRACKING: Saved search categories to profile (hard: ${hardFilters.category || 'none'}, soft: ${softFilters.softCategory || 'none'})`);
+        })
+        .catch(err => {
+          console.error(`[${requestId}] 👤 Error tracking query categories:`, err.message);
+        });
+    }
 
     let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
     if (hardFilters.category) {
@@ -7484,6 +7542,42 @@ app.post("/search", async (req, res) => {
         }
       }
 
+      // 👤 PERSONALIZATION: Load user profile once for both pre-LLM reranking and LLM context
+      let llmUserProfile = null;
+      if (session_id && isComplexQueryResult) {
+        try {
+          llmUserProfile = await getUserProfileForBoosting(dbName, session_id);
+          if (llmUserProfile) {
+            console.log(`[${requestId}] 👤 PERSONALIZATION: Loaded profile for complex query (session: ${session_id})`);
+            
+            // Apply profileBoost to ALL results BEFORE sending to LLM
+            // This ensures the LLM receives the top 25 personalized products, not just top 25 by RRF
+            combinedResults = combinedResults.map(product => {
+              const profileBoost = calculateProfileBoost(product, llmUserProfile);
+              return {
+                ...product,
+                profileBoost,
+                boostedScore: (product.rrf_score || 0) + profileBoost
+              };
+            });
+            
+            // Re-sort by boosted score - LLM will now receive the BEST personalized products first
+            if (combinedResults.some(p => (p.profileBoost || 0) > 0)) {
+              combinedResults.sort((a, b) => (b.boostedScore || b.rrf_score || 0) - (a.boostedScore || a.rrf_score || 0));
+              console.log(`[${requestId}] 👤 PERSONALIZATION: Re-sorted ${combinedResults.length} results by boosted score`);
+              console.log(`[${requestId}] 👤 Top 3 personalized products:`, combinedResults.slice(0, 3).map(p => ({
+                name: p.name,
+                rrf_score: p.rrf_score,
+                profileBoost: p.profileBoost,
+                boostedScore: p.boostedScore
+              })));
+            }
+          }
+        } catch (profileError) {
+          console.error(`[${requestId}] 👤 Error loading/applying personalization:`, profileError.message);
+        }
+      }
+
       // LLM reordering only for complex queries (not just any query with soft filters)
       // Skip LLM reordering if circuit breaker is open
       const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI();
@@ -7492,6 +7586,7 @@ app.post("/search", async (req, res) => {
         console.log(`[${requestId}] Applying LLM reordering`);
         
         try {
+          
           const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
           
           // Always send all results to LLM for maximum flexibility
@@ -7500,7 +7595,7 @@ app.post("/search", async (req, res) => {
           const llmLimit = shouldUseFastLLM ? 10 : searchLimit;
           console.log(`[${requestId}] Sending ${combinedResults.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
           
-          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM);
+          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile);
           
           // Record success
           aiCircuitBreaker.recordSuccess();
@@ -10209,6 +10304,7 @@ const INTERACTION_WEIGHTS = {
 function calculateCategoryScore(categoryData) {
   if (!categoryData) return 0;
   return (
+    (categoryData.searches || 0) * 1 +      // 👤 Searches show interest (weight: 1)
     (categoryData.clicks || 0) * INTERACTION_WEIGHTS.click +
     (categoryData.carts || 0) * INTERACTION_WEIGHTS.cart +
     (categoryData.purchases || 0) * INTERACTION_WEIGHTS.purchase
@@ -10341,6 +10437,91 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
     return true;
   } catch (error) {
     console.error("[PROFILE] Error in trackUserProfileInteraction:", error);
+    return null;
+  }
+}
+
+/**
+ * Track query-extracted categories in user profile
+ * This learns from what users SEARCH FOR, not just what they click/buy
+ * @param {Object} db - MongoDB database instance
+ * @param {string} sessionId - User session ID
+ * @param {Array|string} hardCategories - Hard categories extracted from query (e.g., "wine", "whisky")
+ * @param {Array|string} softCategories - Soft categories extracted from query (e.g., "italian", "red wine", "malbec")
+ */
+async function trackQueryCategories(db, sessionId, hardCategories = null, softCategories = null) {
+  if (!sessionId) return null;
+  
+  // Normalize to arrays
+  const hardCats = hardCategories 
+    ? (Array.isArray(hardCategories) ? hardCategories : [hardCategories])
+    : [];
+  const softCats = softCategories
+    ? (Array.isArray(softCategories) ? softCategories : [softCategories])
+    : [];
+  
+  // Skip if no categories to track
+  if (hardCats.length === 0 && softCats.length === 0) {
+    return null;
+  }
+  
+  try {
+    const profilesCollection = db.collection('profiles');
+    
+    // Ensure profile exists
+    await profilesCollection.updateOne(
+      { session_id: sessionId },
+      {
+        $set: { updated_at: new Date() },
+        $setOnInsert: {
+          session_id: sessionId,
+          created_at: new Date(),
+          preferences: {
+            softCategories: {},
+            priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
+          },
+          "stats.totalClicks": 0,
+          "stats.totalCarts": 0,
+          "stats.totalPurchases": 0,
+          "stats.totalSpent": 0,
+          "stats.totalSearches": 0
+        }
+      },
+      { upsert: true }
+    );
+    
+    // Increment search count
+    await profilesCollection.updateOne(
+      { session_id: sessionId },
+      { $inc: { 'stats.totalSearches': 1 } }
+    );
+    
+    // Track soft categories from query
+    // We use 'searches' field to differentiate from clicks/carts/purchases
+    for (const category of softCats) {
+      if (category && category.trim()) {
+        await profilesCollection.updateOne(
+          { session_id: sessionId },
+          {
+            $inc: { [`preferences.softCategories.${category}.searches`]: 1 }
+          }
+        );
+      }
+    }
+    
+    // Track hard categories from query (store in a separate field for potential future use)
+    if (hardCats.length > 0) {
+      await profilesCollection.updateOne(
+        { session_id: sessionId },
+        {
+          $addToSet: { 'preferences.searchedHardCategories': { $each: hardCats } }
+        }
+      );
+    }
+    
+    return true;
+  } catch (error) {
+    console.error("[PROFILE] Error in trackQueryCategories:", error);
     return null;
   }
 }
