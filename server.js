@@ -7922,18 +7922,41 @@ app.post("/search", async (req, res) => {
           // Only re-sort if there are meaningful boosts to apply
           const hasBoosts = finalResults.some(p => (p.profileBoost || 0) > 0);
           if (hasBoosts) {
-            // Sort by boosted score, but preserve exact match priority
+            // Sort by boosted score, but PRESERVE TEXT MATCH PRIORITY
+            // Personalization should only reorder within the same text match tier
+            // Never let a non-matching product appear before a matching product
             finalResults.sort((a, b) => {
-              // Exact matches (highlight=true) always come first
-              if (a.highlight && !b.highlight) return -1;
-              if (!a.highlight && b.highlight) return 1;
-              // Then sort by boosted score
+              const aTextBonus = a.searchScore || 0;
+              const bTextBonus = b.searchScore || 0;
+
+              // Define text match tiers based on exactMatchBonus
+              // Tier 1: High text matches (>= 8000) - strong keyword matches
+              // Tier 2: Medium text matches (>= 1000) - partial matches
+              // Tier 3: Low/no text matches (< 1000) - semantic/category matches
+              const getTier = (bonus) => {
+                if (bonus >= 8000) return 1;  // High text match
+                if (bonus >= 1000) return 2;  // Medium text match
+                return 3;                      // Low/no text match
+              };
+
+              const aTier = getTier(aTextBonus);
+              const bTier = getTier(bTextBonus);
+
+              // PRIORITY 1: Text match tier - higher tier (lower number) comes first
+              // This ensures "פלטר" products ALWAYS come before "כישור"
+              if (aTier !== bTier) {
+                return aTier - bTier;
+              }
+
+              // PRIORITY 2: Within the same tier, apply personalization
+              // Sort by boosted score (text score + profile boost)
               return (b.boostedScore || 0) - (a.boostedScore || 0);
             });
-            console.log(`[${requestId}] 👤 PERSONALIZATION: Re-ranked ${finalResults.length} results with profile boost`);
+            console.log(`[${requestId}] 👤 PERSONALIZATION: Re-ranked ${finalResults.length} results with profile boost (preserving text match priority)`);
             console.log(`[${requestId}] 👤 Top 3 after personalization:`, finalResults.slice(0, 3).map(p => ({
               name: p.name,
               profileBoost: p.profileBoost,
+              searchScore: p.searchScore,
               highlight: p.highlight
             })));
           }
