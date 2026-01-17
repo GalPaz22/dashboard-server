@@ -7412,10 +7412,9 @@ app.post("/search", async (req, res) => {
                 // Combine: Tier 1 first, then Tier 2
                 combinedResults = [...tier1Results, ...tier2Results];
 
-                // Update hasSoftFilters for sorting logic later
-                if (combinedSoftCategories.length > 0) {
-                  hasSoftFilters = true;
-                }
+                // NOTE: Do NOT update hasSoftFilters here - it should only reflect the user's original query
+                // Setting it to true here would cause text matches (Tier 1) to be sorted AFTER category expansion (Tier 2)
+                // because the sorting prioritizes softFilterMatch:true when hasSoftFilters is true
 
                 // Store metadata for response - use combined soft categories to reflect what was actually used
                 extractedCategoriesMetadata = {
