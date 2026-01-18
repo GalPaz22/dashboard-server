@@ -6234,19 +6234,19 @@ app.post("/fast-search", async (req, res) => {
   
   try {
     let { query, session_id } = req.body;
-    const FAST_LIMIT = 10; // Return 10 products (was 5) - more variety with Tier 2
+    const FAST_LIMIT = 10; // Return up to 10 textual products (Tier 1 only)
     
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model + aggressive expansion)${session_id ? ` 👤 [personalized for ${session_id}]` : ''}`);
-    
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} textual results only - Tier 1)${session_id ? ` 👤 [personalized for ${session_id}]` : ''}`);
+
     // Use faster LLM model (gemini-2.5-flash-lite) for reordering
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
     req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
-    req.body.fastSearchMode = true; // Signal for aggressive Tier 2 expansion with soft category + vector boost
+    req.body.fastSearchMode = true; // Signal to return textual results only (Tier 1), skip Tier 2
     // 👤 PERSONALIZATION: Ensure session_id is passed through to /search
     if (session_id) {
       req.body.session_id = session_id;
@@ -6406,7 +6406,7 @@ app.post("/search", async (req, res) => {
     console.log(`[${requestId}] 🚀 Using gemini-2.5-flash-lite for LLM reordering (faster)`);
   }
   if (isFastSearchMode) {
-    console.log(`[${requestId}] 🎯 FAST SEARCH MODE: Aggressive Tier 2 expansion with multi-category + vector boost`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH MODE: Will return textual results only (Tier 1), skipping Tier 2`);
   }
 
   // Trim query to avoid classification issues with trailing/leading whitespace
@@ -7282,7 +7282,29 @@ app.post("/search", async (req, res) => {
               console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
             }
 
-            if (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0) {
+            // 🚀 FAST SEARCH MODE: Skip Tier 2 and return only textual results (Tier 1)
+            if (isFastSearchMode && highQualityTextMatches.length > 0) {
+              console.log(`[${requestId}] ⚡ FAST SEARCH MODE: Skipping Tier 2, returning only textual results (Tier 1)`);
+              console.log(`[${requestId}]    Text matches found: ${highQualityTextMatches.length}`);
+
+              // Mark all as high text matches and return
+              highQualityTextMatches.forEach(match => {
+                match.highTextMatch = true;
+                match.softCategoryExpansion = false;
+              });
+
+              combinedResults = highQualityTextMatches.slice(0, searchLimit);
+              extractedCategoriesMetadata = {
+                hardCategories: hardCategoriesArray,
+                softCategories: softCategoriesArray,
+                textMatchCount: combinedResults.length,
+                categoryFiltered: false,
+                tier2Skipped: true,
+                tier2SkipReason: 'fast_search_mode'
+              };
+
+              console.log(`[${requestId}] ⚡ Returning ${combinedResults.length} text matches ONLY (Tier 2 skipped - fast search mode)`);
+            } else if (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0) {
               // STEP 3: Perform category-filtered search
               console.log(`[${requestId}] Step 3: Performing category-filtered search...`);
 
