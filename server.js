@@ -7123,10 +7123,33 @@ app.post("/search", async (req, res) => {
           }));
 
           // Filter for high-quality text matches (lower threshold for better extraction)
-          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+          let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+
+          // 🎯 CRITICAL FIX: Filter text matches by query-extracted soft categories
+          // If the query extracted soft categories, only return text matches that ALSO match those categories
+          const queryExtractedSoftCats = softFilters.softCategory || [];
+          const queryExtractedSoftCatsArray = Array.isArray(queryExtractedSoftCats) ? queryExtractedSoftCats.filter(Boolean) : (queryExtractedSoftCats ? [queryExtractedSoftCats] : []);
+
+          if (queryExtractedSoftCatsArray.length > 0) {
+            const beforeFilterCount = highQualityTextMatches.length;
+
+            // Filter to only include products that have at least one matching soft category
+            highQualityTextMatches = highQualityTextMatches.filter(product => {
+              if (!product.softCategory || !Array.isArray(product.softCategory) || product.softCategory.length === 0) {
+                return false; // Product has no soft categories - exclude
+              }
+              // Check if any of the product's soft categories match query-extracted ones
+              const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+              return queryExtractedSoftCatsArray.some(qsc =>
+                productSoftCats.some(psc => psc.includes(qsc.toLowerCase().trim()) || qsc.toLowerCase().trim().includes(psc))
+              );
+            });
+
+            console.log(`[${requestId}] 🎯 SOFT CATEGORY FILTER ON TEXT MATCHES: ${beforeFilterCount} → ${highQualityTextMatches.length} (filtered by query-extracted: ${JSON.stringify(queryExtractedSoftCatsArray)})`);
+          }
 
           if (highQualityTextMatches.length > 0) {
-            console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches`);
+            console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches (after soft category filter)`);
             
             // Log tier 1 text match results with their categories
             console.log(`[${requestId}] 📊 TIER 1 TEXT MATCH - Top matches with extracted filters:`);
@@ -7154,12 +7177,13 @@ app.post("/search", async (req, res) => {
               // Set metadata for client tier info (CRITICAL for response structure)
               extractedCategoriesMetadata = {
                 hardCategories: [],
-                softCategories: [],
+                softCategories: queryExtractedSoftCatsArray, // Include the soft categories used for filtering
                 textMatchCount: combinedResults.length,
-                categoryFiltered: true // Mark as two-step search
+                categoryFiltered: true, // Mark as two-step search
+                softCategoryFiltered: queryExtractedSoftCatsArray.length > 0 // Mark that soft category filter was applied
               };
 
-              console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search`);
+              console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search${queryExtractedSoftCatsArray.length > 0 ? ` (filtered by soft categories: ${JSON.stringify(queryExtractedSoftCatsArray)})` : ''}`);
             } else {
               // CRITICAL: For very strong exact matches, extract categories from TOP 2 results ONLY
               // This prevents fuzzy noise (e.g., "סלמי" when searching "סלרי") from polluting category extraction
