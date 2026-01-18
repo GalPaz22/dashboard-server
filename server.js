@@ -7414,46 +7414,76 @@ app.post("/search", async (req, res) => {
                   }
                 }
               } else if (queryEmbedding) {
-                // No soft categories but we have embedding - use combined fuzzy + vector search
-                console.log(`[${requestId}] No soft categories, using combined fuzzy + vector search`);
+                // No query-extracted soft categories - check if we should skip Tier 2
+                // NEW BEHAVIOR: If no soft categories extracted from query AND we have good text matches,
+                // skip Tier 2 entirely to avoid irrelevant results ("mess")
+                const hasQueryExtractedSoftCats = llmSoftCategoriesArray.filter(Boolean).length > 0;
 
-                const searchPromises = [
-                  collection.aggregate(buildStandardSearchPipeline(
-                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
-                  )).toArray(),
-                  collection.aggregate(buildStandardVectorSearchPipeline(
-                    queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
-                  )).toArray()
-                ];
+                if (!hasQueryExtractedSoftCats && highQualityTextMatches.length > 0) {
+                  // No query-extracted soft categories but we have text matches - SKIP Tier 2
+                  console.log(`[${requestId}] 🎯 NO QUERY-EXTRACTED SOFT CATEGORIES - Skipping Tier 2, returning only text matches`);
+                  console.log(`[${requestId}]    Reason: No soft category filters from query to apply to Tier 2`);
+                  console.log(`[${requestId}]    Text matches found: ${highQualityTextMatches.length}`);
 
-                const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
-
-                const docRanks = new Map();
-                fuzzyRes.forEach((doc, index) => {
-                  docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
-                });
-                vectorRes.forEach((doc, index) => {
-                  const id = doc._id.toString();
-                  const existing = docRanks.get(id);
-                  if (existing) {
-                    existing.vectorRank = index;
-                  } else {
-                    docRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
-                  }
-                });
-
-                categoryFilteredResults = Array.from(docRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
-                  const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-                  return {
-                    ...doc,
-                    rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0),
-                    softFilterMatch: false,
-                    softCategoryMatches: 0,
-                    exactMatchBonus: exactMatchBonus,
-                    fuzzyRank: fuzzyRank,
-                    vectorRank: vectorRank
+                  // Mark that we intentionally skipped Tier 2 (for clearer logging later)
+                  // Skip Tier 2 - directly use text matches without category expansion
+                  combinedResults = highQualityTextMatches.slice(0, searchLimit);
+                  highQualityTextMatches.forEach(match => {
+                    match.highTextMatch = true;
+                  });
+                  extractedCategoriesMetadata = {
+                    hardCategories: hardCategoriesArray,
+                    softCategories: [],
+                    textMatchCount: combinedResults.length,
+                    categoryFiltered: false,
+                    tier2Skipped: true,
+                    tier2SkipReason: 'no_query_soft_categories'
                   };
-                }).sort((a, b) => b.rrf_score - a.rrf_score);
+                  console.log(`[${requestId}] ✅ Returning ${combinedResults.length} text matches ONLY (Tier 2 skipped - no soft category filters)`);
+                  // Skip the rest of the category filtering logic
+                  categoryFilteredResults = null;
+                } else {
+                  // Fallback: No soft categories AND no good text matches - use combined fuzzy + vector search
+                  console.log(`[${requestId}] No soft categories and no strong text matches, using combined fuzzy + vector search`);
+
+                  const searchPromises = [
+                    collection.aggregate(buildStandardSearchPipeline(
+                      cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
+                    )).toArray(),
+                    collection.aggregate(buildStandardVectorSearchPipeline(
+                      queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+                    )).toArray()
+                  ];
+
+                  const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
+
+                  const docRanks = new Map();
+                  fuzzyRes.forEach((doc, index) => {
+                    docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+                  });
+                  vectorRes.forEach((doc, index) => {
+                    const id = doc._id.toString();
+                    const existing = docRanks.get(id);
+                    if (existing) {
+                      existing.vectorRank = index;
+                    } else {
+                      docRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+                    }
+                  });
+
+                  categoryFilteredResults = Array.from(docRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
+                    const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+                    return {
+                      ...doc,
+                      rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0),
+                      softFilterMatch: false,
+                      softCategoryMatches: 0,
+                      exactMatchBonus: exactMatchBonus,
+                      fuzzyRank: fuzzyRank,
+                      vectorRank: vectorRank
+                    };
+                  }).sort((a, b) => b.rrf_score - a.rrf_score);
+                }
               } else {
                 // PERFORMANCE OPTIMIZATION: For simple queries, skip vector search entirely
                 // Only do text-based fuzzy search with category filters
@@ -7477,23 +7507,28 @@ app.post("/search", async (req, res) => {
                 }).sort((a, b) => b.rrf_score - a.rrf_score);
               }
 
-              if (categoryFilteredResults && categoryFilteredResults.length > 0) {
+              // Check if Tier 2 was intentionally skipped (categoryFilteredResults === null)
+              // In that case, combinedResults was already set directly
+              if (categoryFilteredResults === null) {
+                // Tier 2 was intentionally skipped - combinedResults already set above
+                console.log(`[${requestId}] 🎯 Tier 2 intentionally skipped - using text matches only`);
+              } else if (categoryFilteredResults && categoryFilteredResults.length > 0) {
                 console.log(`[${requestId}] ✅ Category-filtered search completed: ${categoryFilteredResults.length} Tier 2 results`);
 
                 // MERGE Tier 1 (text matches) with Tier 2 (category-filtered results)
                 // Tier 1: High-quality text matches (already calculated)
                 // Tier 2: Category-filtered results (semantic similarity)
-                
+
                 // Create a map of text match IDs for deduplication
                 const textMatchIds = new Set(highQualityTextMatches.map(m => m._id.toString()));
-                
+
                 // Mark text matches as Tier 1
                 const tier1Results = highQualityTextMatches.map(m => ({
                   ...m,
                   highTextMatch: true, // Mark as Tier 1
                   softCategoryExpansion: false // NOT a Tier 2 result
                 }));
-                
+
                 // Filter category results to exclude text matches (avoid duplicates), mark as Tier 2
                 const tier2Results = categoryFilteredResults
                   .filter(p => !textMatchIds.has(p._id.toString()))
@@ -7502,7 +7537,7 @@ app.post("/search", async (req, res) => {
                     highTextMatch: false, // NOT a Tier 1 result
                     softCategoryExpansion: true // Mark as Tier 2
                   }));
-                
+
                 console.log(`[${requestId}] 🎯 MERGED TIERS: ${tier1Results.length} text matches (Tier 1) + ${tier2Results.length} category expansion (Tier 2) = ${tier1Results.length + tier2Results.length} total`);
 
                 // Combine: Tier 1 first, then Tier 2
