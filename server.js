@@ -3567,7 +3567,7 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     // Use fast model if requested (for /fast-search)
-    const modelName = useFastLLM ? "gemini-2.5-flash-lite" : "gemini-3-flash-preview";
+    const modelName = useFastLLM ? "gemini-2.0-flash-lite" : "gemini-3-flash-preview";
 
     const response = await genAI.models.generateContent({
       model: modelName,
@@ -6233,20 +6233,24 @@ app.post("/fast-search", async (req, res) => {
   const searchStartTime = Date.now();
   
   try {
-    let { query } = req.body;
+    let { query, session_id } = req.body;
     const FAST_LIMIT = 10; // Return 10 products (was 5) - more variety with Tier 2
     
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model + aggressive expansion)`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model + aggressive expansion)${session_id ? ` 👤 [personalized for ${session_id}]` : ''}`);
     
     // Use faster LLM model (gemini-2.5-flash-lite) for reordering
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
     req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
     req.body.fastSearchMode = true; // Signal for aggressive Tier 2 expansion with soft category + vector boost
+    // 👤 PERSONALIZATION: Ensure session_id is passed through to /search
+    if (session_id) {
+      req.body.session_id = session_id;
+    }
     
     // Temporarily override store limit
     const originalLimit = req.store.limit;
@@ -6267,7 +6271,10 @@ app.post("/fast-search", async (req, res) => {
       const products = (data.products || []).slice(0, FAST_LIMIT);
       const executionTime = Date.now() - searchStartTime;
       
-      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products`);
+      // 👤 PERSONALIZATION: Count personalized products
+      const personalizedCount = products.filter(p => (p.profileBoost || 0) > 0).length;
+      
+      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products${personalizedCount > 0 ? ` (${personalizedCount} personalized)` : ''}`);
       
       // Return in simplified format
       return originalJson({
@@ -6276,7 +6283,9 @@ app.post("/fast-search", async (req, res) => {
           query,
           requestId,
           executionTime,
-          isFastSearch: true
+          isFastSearch: true,
+          personalizedResults: personalizedCount > 0, // 👤 Indicate if personalization was applied
+          personalizedCount: personalizedCount
         }
       });
     };
