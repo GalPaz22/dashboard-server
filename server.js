@@ -7175,12 +7175,18 @@ app.post("/search", async (req, res) => {
               combinedResults = excellentMatches.slice(0, searchLimit);
 
               // Set metadata for client tier info (CRITICAL for response structure)
+              // 🎯 Include query-extracted hard category if it exists (even though we're not filtering by it in this path)
+              const queryHardCategory = hardFilters.category;
+              const earlyExitHardCategories = queryHardCategory
+                ? (Array.isArray(queryHardCategory) ? queryHardCategory : [queryHardCategory])
+                : [];
               extractedCategoriesMetadata = {
-                hardCategories: [],
+                hardCategories: earlyExitHardCategories,
                 softCategories: queryExtractedSoftCatsArray, // Include the soft categories used for filtering
                 textMatchCount: combinedResults.length,
                 categoryFiltered: true, // Mark as two-step search
-                softCategoryFiltered: queryExtractedSoftCatsArray.length > 0 // Mark that soft category filter was applied
+                softCategoryFiltered: queryExtractedSoftCatsArray.length > 0, // Mark that soft category filter was applied
+                hardCategorySource: earlyExitHardCategories.length > 0 ? 'query' : null
               };
 
               console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search${queryExtractedSoftCatsArray.length > 0 ? ` (filtered by soft categories: ${JSON.stringify(queryExtractedSoftCatsArray)})` : ''}`);
@@ -7282,10 +7288,25 @@ app.post("/search", async (req, res) => {
               console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
             }
 
+            // 🎯 HARD CATEGORY PRIORITY: Query-extracted categories ALWAYS take precedence over product-extracted
+            // Only fall back to product-extracted hard categories if NO query-extracted hard category exists
+            // This logic is determined BEFORE branching so metadata is consistent across all code paths
+            const queryExtractedHardCategory = hardFilters.category;
+            const hasQueryExtractedHardCategory = queryExtractedHardCategory &&
+              (Array.isArray(queryExtractedHardCategory) ? queryExtractedHardCategory.length > 0 : true);
+
+            // Determine which hard categories to use (for filtering and metadata)
+            const effectiveHardCategories = hasQueryExtractedHardCategory
+              ? (Array.isArray(queryExtractedHardCategory) ? queryExtractedHardCategory : [queryExtractedHardCategory])
+              : hardCategoriesArray;
+
             // 🚀 FAST SEARCH MODE: Skip Tier 2 and return only textual results (Tier 1)
             if (isFastSearchMode && highQualityTextMatches.length > 0) {
               console.log(`[${requestId}] ⚡ FAST SEARCH MODE: Skipping Tier 2, returning only textual results (Tier 1)`);
               console.log(`[${requestId}]    Text matches found: ${highQualityTextMatches.length}`);
+              if (hasQueryExtractedHardCategory) {
+                console.log(`[${requestId}]    Hard categories (query-extracted): ${JSON.stringify(effectiveHardCategories)}`);
+              }
 
               // Mark all as high text matches and return
               highQualityTextMatches.forEach(match => {
@@ -7295,21 +7316,30 @@ app.post("/search", async (req, res) => {
 
               combinedResults = highQualityTextMatches.slice(0, searchLimit);
               extractedCategoriesMetadata = {
-                hardCategories: hardCategoriesArray,
+                hardCategories: effectiveHardCategories,
                 softCategories: softCategoriesArray,
                 textMatchCount: combinedResults.length,
                 categoryFiltered: false,
                 tier2Skipped: true,
-                tier2SkipReason: 'fast_search_mode'
+                tier2SkipReason: 'fast_search_mode',
+                hardCategorySource: hasQueryExtractedHardCategory ? 'query' : 'products'
               };
 
               console.log(`[${requestId}] ⚡ Returning ${combinedResults.length} text matches ONLY (Tier 2 skipped - fast search mode)`);
-            } else if (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0) {
+            } else if (hardCategoriesArray.length > 0 || softCategoriesArray.length > 0 || hasQueryExtractedHardCategory) {
               // STEP 3: Perform category-filtered search
               console.log(`[${requestId}] Step 3: Performing category-filtered search...`);
 
               const categoryFilteredHardFilters = { ...hardFilters };
-              if (hardCategoriesArray.length > 0) {
+
+              if (hasQueryExtractedHardCategory) {
+                // USE QUERY-EXTRACTED: User searched for "italian red wine" → use "red wine" category from query
+                console.log(`[${requestId}] 🎯 HARD CATEGORY: Using QUERY-EXTRACTED category: ${JSON.stringify(queryExtractedHardCategory)}`);
+                console.log(`[${requestId}]    (Ignoring product-extracted categories: ${JSON.stringify(hardCategoriesArray)})`);
+                categoryFilteredHardFilters.category = queryExtractedHardCategory;
+              } else if (hardCategoriesArray.length > 0) {
+                // FALLBACK TO PRODUCT-EXTRACTED: No query-extracted category, use categories from Tier 1 products
+                console.log(`[${requestId}] 🎯 HARD CATEGORY: No query-extracted category, using PRODUCT-EXTRACTED: ${JSON.stringify(hardCategoriesArray)}`);
                 categoryFilteredHardFilters.category = hardCategoriesArray;
               }
 
@@ -7478,12 +7508,13 @@ app.post("/search", async (req, res) => {
                     match.highTextMatch = true;
                   });
                   extractedCategoriesMetadata = {
-                    hardCategories: hardCategoriesArray,
+                    hardCategories: effectiveHardCategories,
                     softCategories: [],
                     textMatchCount: combinedResults.length,
                     categoryFiltered: false,
                     tier2Skipped: true,
-                    tier2SkipReason: 'no_query_soft_categories'
+                    tier2SkipReason: 'no_query_soft_categories',
+                    hardCategorySource: hasQueryExtractedHardCategory ? 'query' : 'products'
                   };
                   console.log(`[${requestId}] ✅ Returning ${combinedResults.length} text matches ONLY (Tier 2 skipped - no soft category filters)`);
                   // Skip the rest of the category filtering logic
@@ -7593,12 +7624,13 @@ app.post("/search", async (req, res) => {
                 // Setting it to true here would cause text matches (Tier 1) to be sorted AFTER category expansion (Tier 2)
                 // because the sorting prioritizes softFilterMatch:true when hasSoftFilters is true
 
-                // Store metadata for response - use combined soft categories to reflect what was actually used
+                // Store metadata for response - use effectiveHardCategories which reflects priority (query > products)
                 extractedCategoriesMetadata = {
-                  hardCategories: hardCategoriesArray,
+                  hardCategories: effectiveHardCategories,
                   softCategories: combinedSoftCategories.length > 0 ? combinedSoftCategories : softCategoriesArray,
                   textMatchCount: highQualityTextMatches.length,
-                  categoryFiltered: true
+                  categoryFiltered: true,
+                  hardCategorySource: hasQueryExtractedHardCategory ? 'query' : 'products'
                 };
 
                 console.log(`[${requestId}] 🎯 Two-step search completed successfully`);
