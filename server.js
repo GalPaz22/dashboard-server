@@ -1133,26 +1133,20 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
       $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
     },
   });
-
-  // Project fields - include softCategory for personalization when requested
-  const projectFields = {
-    _id: 0,
-    suggestion: `$${path}`,
-    score: { $meta: "searchScore" },
-    url: 1,
-    image: 1,
-    price: 1,
-    id: 1,
-  };
-
-  // Include softCategory for personalization (only for products collection)
-  if (includePersonalizationFields) {
-    projectFields.softCategory = 1;
-  }
-
+  
   pipeline.push(
     { $limit: 5 },
-    { $project: projectFields }
+    {
+      $project: {
+        _id: 0,
+        suggestion: `$${path}`,
+        score: { $meta: "searchScore" },
+        url: 1,
+        image: 1,
+        price: 1,
+        id: 1,
+      },
+    }
   );
 
   return pipeline;
@@ -3269,10 +3263,15 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     if (matchPercentage >= 0.75) {
       return 12000;
     }
-    // Below 75% match is not considered high-quality - give low/no bonus
-    if (matchPercentage >= 0.6) {
-      return 500; // Low bonus, won't trigger "high-quality exact text match"
+    // 🎯 LOWERED THRESHOLD: If 50-74% match (e.g., "רקנאטי אדום" → "רקנאטי מרלו כרם אודם")
+    // This helps when synonyms are used ("אדום" vs "אודם")
+  /*  if (matchPercentage >= 0.5) {
+      return 8000; // Good enough to be considered a text match (above 1000 threshold)
     }
+    // Below 50% match is not considered a quality match
+    if (matchPercentage >= 0.4) {
+      return 500; // Low bonus, won't trigger "high-quality exact text match"
+    }*/
   }
 
   // Fuzzy similarity for short queries
@@ -3424,8 +3423,299 @@ function sanitizeQueryForLLM(query) {
 }
 
 /* =========================================================== *\
-   LLM REORDERING FUNCTIONS (UNCHANGED)
+   LLM VALIDATION FUNCTIONS
 \* =========================================================== */
+
+/**
+ * 🎯 SIMPLE SEARCH VALIDATOR (for /fast-search)
+ * Validates if regex-based simple search results are good enough to return,
+ * or if we need to fall back to the full complex search.
+ * 
+ * @param {Array} products - Products from simple regex search
+ * @param {String} query - User's search query
+ * @param {String} context - Search context (e.g., 'wine shop')
+ * @returns {Object} { isGoodMatch: boolean, validProducts: Array, reason: string }
+ */
+async function validateSimpleSearchResults(products, query, context = "e-commerce") {
+  const cacheKey = generateCacheKey('validateSimpleSearch', query, products.map(p => p._id.toString()).join(','));
+  return withCache(cacheKey, async () => {
+    try {
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        console.log(`[SIMPLE VALIDATOR] Circuit breaker open, using fallback for: "${query}"`);
+        return { isGoodMatch: false, validProducts: [], reason: "Circuit breaker open" };
+      }
+
+      const productData = products.map((p, index) => ({
+        index: index,
+        _id: p._id.toString(),
+        name: p.name || "No name",
+        category: p.category || "No category",
+        softCategory: (p.softCategory || []).slice(0, 5) // Limit for prompt size
+      }));
+
+      const systemInstruction = `You are an expert at validating if product search results are relevant to a user's query.
+
+Context: ${context}
+
+Your task: Determine if the provided search results are GOOD ENOUGH to return to the user, or if we should run a more complex semantic search.
+
+DECISION CRITERIA:
+1. If query contains a BRAND NAME (e.g., "רקנאטי", "Jameson", "Glenmorangie"):
+   → AT LEAST ONE product must be from that exact brand
+   → If no products match the brand, return isGoodMatch=false
+
+2. If query is purely DESCRIPTIVE (e.g., "יין אדום", "whisky", "vodka"):
+   → If most products match the description, return isGoodMatch=true
+   → If most products are irrelevant, return isGoodMatch=false
+
+3. BRAND + ATTRIBUTES (e.g., "רקנאטי אדום", "Jameson whisky"):
+   → Must have products from that brand
+   → Bonus if they also match the attributes
+
+EXAMPLES:
+
+Query: "רקנאטי לבן"
+Products: [רקנאטי סוביניון בלאן, רקנאטי שרדונה, ברקן סוביניון בלאן]
+→ isGoodMatch=TRUE (has רקנאטי products matching לבן)
+
+Query: "רקנאטי אדום"
+Products: [ברקן קברנה, ויתקין מרלו, כרם שבו אדום]
+→ isGoodMatch=FALSE (no רקנאטי products - need semantic search)
+
+Query: "יין אדום"
+Products: [כרם שבו אדום, ברקן קברנה, ויתקין מרלו]
+→ isGoodMatch=TRUE (all are red wines)
+
+Query: "whisky"
+Products: [Jameson, Glenfiddich, Glenmorangie]
+→ isGoodMatch=TRUE (all are whisky)
+
+Query: "Jameson"
+Products: [Glenmorangie, Glenfiddich, Jack Daniels]
+→ isGoodMatch=FALSE (no Jameson - need better search)
+
+Return:
+1. isGoodMatch: boolean - true if results are good enough, false if need complex search
+2. validProductIndices: array of indices of relevant products (return ALL that match)
+3. reason: brief explanation (max 15 words)`;
+
+      const userPrompt = `Search query: "${query}"
+
+Products found (simple regex search):
+${productData.map((p, i) => `${i}. ${p.name} (${p.category})`).join('\n')}
+
+Are these results GOOD ENOUGH to return, or should we run a complex semantic search?`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-2.5-flash-lite",
+        contents: [{ text: userPrompt }],
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              isGoodMatch: {
+                type: Type.BOOLEAN,
+                description: "True if results are good enough to return without complex search"
+              },
+              validProductIndices: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: "Array of product indices that are relevant"
+              },
+              reason: {
+                type: Type.STRING,
+                description: "Brief explanation (max 15 words)"
+              }
+            },
+            required: ["isGoodMatch", "validProductIndices", "reason"]
+          }
+        }
+      });
+
+      let text = response.text ? response.text.trim() : null;
+      if (!text && response.candidates && response.candidates[0]) {
+        const candidate = response.candidates[0];
+        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+          text = candidate.content.parts[0].text;
+        }
+      }
+
+      if (!text) {
+        throw new Error("No text content in response from LLM validation");
+      }
+
+      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+      const result = JSON.parse(text);
+      aiCircuitBreaker.recordSuccess();
+
+      // Map indices back to actual products
+      const validProducts = result.validProductIndices
+        .filter(idx => idx >= 0 && idx < products.length)
+        .map(idx => products[idx]);
+
+      console.log(`[SIMPLE VALIDATOR] Query "${query}" → ${result.isGoodMatch ? '✅ GOOD' : '❌ NEED COMPLEX'} (${validProducts.length}/${products.length} products): ${result.reason}`);
+      
+      return {
+        isGoodMatch: result.isGoodMatch,
+        validProducts: validProducts,
+        reason: result.reason
+      };
+    } catch (error) {
+      console.error("[SIMPLE VALIDATOR] Error validating simple search results:", error);
+      aiCircuitBreaker.recordFailure();
+      return { isGoodMatch: false, validProducts: [], reason: `Error: ${error.message}` };
+    }
+  }, 7200); // Cache for 2 hours
+}
+
+/**
+ * 🎯 LLM TEXT MATCH VALIDATOR
+ * When textual search returns weak matches (low exactMatchBonus), use LLM to validate
+ * if any of the top results are actually semantically correct matches.
+ * 
+ * This prevents unnecessary expensive vector searches when the product exists but has
+ * slightly different wording (e.g., "רקנאטי לבן" → "רקנאטי סוביניון בלאן").
+ * 
+ * @param {Array} weakTextMatches - Top 10 text matches with low exactMatchBonus
+ * @param {string} query - Original search query
+ * @param {string} context - Store context
+ * @returns {Object} { hasValidMatch: boolean, validProducts: Array, reason: string }
+ */
+async function validateWeakTextMatchesWithLLM(weakTextMatches, query, context = "wine shop") {
+  if (!weakTextMatches || weakTextMatches.length === 0) {
+    return { hasValidMatch: false, validProducts: [], reason: "No text matches to validate" };
+  }
+
+  const cacheKey = generateCacheKey('validate-text', query, weakTextMatches.map(p => p._id.toString()).join(','));
+
+  return withCache(cacheKey, async () => {
+    try {
+      // Check circuit breaker
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        console.log(`[VALIDATE] Circuit breaker open, skipping validation for: "${query}"`);
+        return { hasValidMatch: false, validProducts: [], reason: "Circuit breaker open" };
+      }
+
+      const productData = weakTextMatches.map((p, index) => ({
+        index: index,
+        _id: p._id.toString(),
+        name: p.name || "No name",
+        description: p.description || "",
+        category: p.category || "",
+        softCategory: p.softCategory || [],
+        exactMatchBonus: p.exactMatchBonus || 0
+      }));
+
+      const systemInstruction = `You are an expert at validating e-commerce product matches against user search queries.
+
+Context: ${context}
+
+Your task: Determine if ANY of the provided products are semantically valid matches for the user's query, even if the exact wording differs.
+
+CRITICAL RULES:
+1. If the query contains a BRAND NAME (e.g., "רקנאטי", "ברקן", "Glenmorangie"), the product MUST be from that brand to match
+2. If the query is ONLY descriptive (e.g., "יין אדום", "whisky"), any product matching the description is valid
+3. Check BOTH brand name AND product attributes when validating
+
+Examples of VALID matches:
+- Query: "רקנאטי לבן" → Product: "רקנאטי סוביניון בלאן" (✅ same brand, לבן = בלאן)
+- Query: "ברקן אדום" → Product: "ברקן מרלו" (✅ same brand, מרלו is red wine)
+- Query: "יין מתוק" → Product: "מוסקט פטיליה" (✅ no brand specified, מוסקט is sweet wine)
+- Query: "whisky" → Product: "Glenmorangie Original Single Malt" (✅ no brand specified, single malt is whisky)
+
+Examples of INVALID matches:
+- Query: "רקנאטי אדום" → Product: "ברקן קברנה סוביניון" (❌ WRONG BRAND - query asks for רקנאטי, not ברקן)
+- Query: "רקנאטי לבן" → Product: "רקנאטי קברנה סוביניון" (❌ same brand, but קברנה is red, not white)
+- Query: "יין יבש" → Product: "מוסקט מתוק" (❌ opposite - sweet not dry)
+- Query: "Glenmorangie" → Product: "Glenfiddich 12" (❌ WRONG BRAND)
+
+Return:
+1. hasValidMatch: true if at least one product is a semantically valid match
+2. validProductIndices: Array of indices (0-9) of products that ARE valid matches
+3. reason: Brief explanation (max 20 words)`;
+
+      const userPrompt = `Search query: "${query}"
+
+Products to validate:
+${productData.map((p, i) => `${i}. ${p.name} (${p.category || 'no category'})`).join('\n')}
+
+Which products (if any) are semantically valid matches for this query?`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-2.5-flash-lite", // Fast model for quick validation
+        contents: [{ text: userPrompt }],
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              hasValidMatch: {
+                type: Type.BOOLEAN,
+                description: "True if at least one product is a valid semantic match"
+              },
+              validProductIndices: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: "Array of product indices (0-9) that are valid matches"
+              },
+              reason: {
+                type: Type.STRING,
+                description: "Brief explanation of validation decision (max 20 words)"
+              }
+            },
+            required: ["hasValidMatch", "validProductIndices", "reason"]
+          }
+        }
+      });
+
+      let text = response.text ? response.text.trim() : null;
+
+      if (!text && response.candidates && response.candidates[0]) {
+        const candidate = response.candidates[0];
+        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+          text = candidate.content.parts[0].text;
+        }
+      }
+
+      if (!text) {
+        throw new Error("No text content in response");
+      }
+
+      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+      const result = JSON.parse(text);
+
+      aiCircuitBreaker.recordSuccess();
+
+      // Extract valid products
+      const validProducts = result.validProductIndices
+        .filter(idx => idx >= 0 && idx < weakTextMatches.length)
+        .map(idx => weakTextMatches[idx]);
+
+      console.log(`[VALIDATE] Query "${query}" → ${result.hasValidMatch ? '✅ VALID' : '❌ NO MATCH'} (${validProducts.length}/${weakTextMatches.length} products): ${result.reason}`);
+
+      return {
+        hasValidMatch: result.hasValidMatch,
+        validProducts: validProducts,
+        reason: result.reason
+      };
+    } catch (error) {
+      console.error("[VALIDATE] Error validating text matches:", error.message);
+      aiCircuitBreaker.recordFailure();
+      return { hasValidMatch: false, validProducts: [], reason: `Validation error: ${error.message}` };
+    }
+  }, 7200); // Cache for 2 hours
+}
 
 async function reorderResultsWithGPT(
   combinedResults,
@@ -4067,6 +4357,39 @@ async function executeExplicitSoftCategorySearch(
 
     highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
     
+    // 🎯 NEW: LLM VALIDATION FOR WEAK TEXT MATCHES
+    // If no high-quality matches (>= 1000), but we have some weak text results, validate with LLM
+    if (highQualityTextMatches.length === 0 && textResultsWithBonuses.length > 0) {
+      console.log(`[SOFT SEARCH] 🎯 No high-quality matches, but found ${textResultsWithBonuses.length} weak text matches`);
+      console.log(`[SOFT SEARCH] 🎯 Validating top 10 weak matches with LLM before vector fallback...`);
+      
+      const weakMatches = textResultsWithBonuses
+        .sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0))
+        .slice(0, 10);
+      
+      const validationStartTime = Date.now();
+      const validation = await validateWeakTextMatchesWithLLM(weakMatches, query, 'wine shop');
+      const validationTime = Date.now() - validationStartTime;
+      
+      if (validation.hasValidMatch && validation.validProducts.length > 0) {
+        console.log(`[SOFT SEARCH] ✅ LLM VALIDATION SUCCESS (${validationTime}ms): Found ${validation.validProducts.length} valid matches`);
+        console.log(`[SOFT SEARCH] 🎯 Reason: ${validation.reason}`);
+        console.log(`[SOFT SEARCH] 🎯 Rescued products: ${validation.validProducts.map(p => p.name).join(', ')}`);
+        
+        // Use LLM-validated products as high-quality matches
+        highQualityTextMatches = validation.validProducts;
+        
+        // Boost their exactMatchBonus so they're treated as good matches
+        highQualityTextMatches.forEach(p => {
+          p.exactMatchBonus = Math.max(p.exactMatchBonus || 0, 15000); // Strong match
+          p.llmValidated = true; // Flag for tracking
+        });
+      } else {
+        console.log(`[SOFT SEARCH] ❌ LLM VALIDATION FAILED (${validationTime}ms): ${validation.reason}`);
+        console.log(`[SOFT SEARCH] 🎯 Proceeding to vector search...`);
+      }
+    }
+    
     // CRITICAL: If we have strong exact matches (>= 50000), filter out weak fuzzy matches
     // This prevents "סלמי" from appearing when searching for "סלרי"
     const STRONG_EXACT_MATCH_THRESHOLD = 50000;
@@ -4080,7 +4403,7 @@ async function executeExplicitSoftCategorySearch(
     
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
-    console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include`);
+    console.log(`[SOFT SEARCH] Found ${highQualityTextMatches.length} high-quality text matches to include (${highQualityTextMatches.filter(p => p.llmValidated).length} LLM-validated)`);
   } catch (error) {
     console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
     }
@@ -5625,25 +5948,14 @@ app.get("/autocomplete", async (req, res) => {
       collection1.aggregate(pipeline1).toArray(),
       collection2.aggregate(pipeline2).toArray(),
     ]);
-
-    // 👤 PERSONALIZATION: Calculate profile boost for product suggestions
-    const labeledSuggestions1 = suggestions1.map(item => {
-      let profileBoost = 0;
-      if (userProfile && item.softCategory) {
-        profileBoost = calculateProfileBoost(item, userProfile);
-      }
-      return {
-        suggestion: item.suggestion,
-        score: item.score,
-        boostedScore: item.score + profileBoost, // Combined score for sorting
-        profileBoost: profileBoost,
-        source: "products",
-        url: item.url,
-        price: item.price,
-        image: item.image
-      };
-    });
-
+    const labeledSuggestions1 = suggestions1.map(item => ({
+      suggestion: item.suggestion,
+      score: item.score,
+      source: "products",
+      url: item.url,
+      price: item.price,
+      image: item.image
+    }));
     const labeledSuggestions2 = suggestions2.map(item => ({
       suggestion: item.suggestion,
       score: item.score,
@@ -5751,15 +6063,48 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       softCategoryMatches: 0
     }));
 
-          const highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+          let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
     // Sort by text match strength
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
-    console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches`);
+    console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches (threshold: 1000)`);
+
+    // 🎯 NEW: LLM VALIDATION FOR WEAK TEXT MATCHES
+    // If no high-quality matches but we have some text results, validate with LLM before expensive vector search
+    if (highQualityTextMatches.length === 0 && textResultsWithBonuses.length > 0) {
+      console.log(`[${requestId}] 🎯 Phase 1: No high-quality matches, but found ${textResultsWithBonuses.length} weak text matches`);
+      console.log(`[${requestId}] 🎯 Validating top 10 weak matches with LLM before vector fallback...`);
+      
+      const weakMatches = textResultsWithBonuses
+        .sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0))
+        .slice(0, 10);
+      
+      const validationStartTime = Date.now();
+      const validation = await validateWeakTextMatchesWithLLM(weakMatches, query, context);
+      const validationTime = Date.now() - validationStartTime;
+      
+      if (validation.hasValidMatch && validation.validProducts.length > 0) {
+        console.log(`[${requestId}] ✅ LLM VALIDATION SUCCESS (${validationTime}ms): Found ${validation.validProducts.length} valid matches`);
+        console.log(`[${requestId}] 🎯 Reason: ${validation.reason}`);
+        console.log(`[${requestId}] 🎯 Rescued products: ${validation.validProducts.map(p => p.name).join(', ')}`);
+        
+        // Use LLM-validated products as high-quality matches
+        highQualityTextMatches = validation.validProducts;
+        
+        // Boost their exactMatchBonus so they're treated as good matches
+        highQualityTextMatches.forEach(p => {
+          p.exactMatchBonus = Math.max(p.exactMatchBonus || 0, 15000); // Strong match
+          p.llmValidated = true; // Flag for tracking
+        });
+      } else {
+        console.log(`[${requestId}] ❌ LLM VALIDATION FAILED (${validationTime}ms): ${validation.reason}`);
+        console.log(`[${requestId}] 🎯 Proceeding to vector search fallback...`);
+      }
+    }
 
     if (highQualityTextMatches.length === 0) {
-      console.log(`[${requestId}] Phase 1: No text matches found - falling back to vector search with filters:`, JSON.stringify(extractedFilters));
+      console.log(`[${requestId}] Phase 1: No text matches found (even after LLM validation) - falling back to vector search with filters:`, JSON.stringify(extractedFilters));
 
       try {
         const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
@@ -6269,203 +6614,56 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 // ============================================================================
 // FAST SEARCH ENDPOINT - Optimized for speed (~10 products, <500ms response)
 // ============================================================================
-
-/**
- * 🎯 LLM-BASED QUERY SPECIFICITY CLASSIFICATION
- * Uses LLM to determine if a query is looking for a specific product/brand
- * (should return few exact matches) or a broad category (should return more).
- *
- * Examples:
- * - "glenmorangie" → specific_product (brand name) → return 1-3 exact matches
- * - "israeli whisky" → broad_category (attribute search) → return up to 10
- * - "coca cola" → specific_product → return 1-3 exact matches
- * - "organic wine" → broad_category → return up to 10
- *
- * @param {string} query - The search query
- * @param {string} context - Store context (e.g., "wine shop")
- * @returns {Object} { searchType: 'specific_product'|'broad_category', maxResults: number, reason: string }
- */
-async function classifyQuerySpecificity(query, context = "e-commerce") {
-  const cacheKey = generateCacheKey('specificity', query, context);
-
-  return withCache(cacheKey, async () => {
-    try {
-      // Check circuit breaker
-      if (aiCircuitBreaker.shouldBypassAI()) {
-        console.log(`[SPECIFICITY] Circuit breaker open, using fallback for: "${query}"`);
-        return classifySpecificityFallback(query);
-      }
-
-      const systemInstruction = `You are an expert at analyzing e-commerce search queries to determine if the user is looking for a SPECIFIC product/brand or browsing a BROAD category.
-
-Context: ${context}
-
-SPECIFIC_PRODUCT queries are:
-- Brand names (e.g., "glenmorangie", "coca cola", "absolut vodka", "ברקן")
-- Specific product names or model numbers (e.g., "iPhone 14 Pro", "macallan 18")
-- Misspelled brand names (e.g., "glanmourangy" = Glenmorangie, "jonnie walker" = Johnnie Walker)
-- When the user clearly wants ONE specific thing, not variety
-
-BROAD_CATEGORY queries are:
-- Category + attribute searches (e.g., "israeli whisky", "organic wine", "יין אדום")
-- Descriptive searches (e.g., "sweet wine", "strong coffee", "cheap beer")
-- Geographic/origin searches (e.g., "french wine", "scottish whisky")
-- Use-case searches (e.g., "wine for dinner", "gift whisky")
-- General categories (e.g., "red wine", "single malt")
-
-Return your classification. For specific_product, also estimate how many exact matches likely exist (usually 1-5).`;
-
-      const response = await genAI.models.generateContent({
-        model: "gemini-2.0-flash-lite", // Use fast model for quick classification
-        contents: [{ text: query }],
-        config: {
-          systemInstruction,
-          temperature: 0.1,
-          thinkingConfig: {
-            thinkingBudget: 0,
-          },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              searchType: {
-                type: Type.STRING,
-                enum: ["specific_product", "broad_category"],
-                description: "Whether user wants a specific product or is browsing a category"
-              },
-              maxResults: {
-                type: Type.NUMBER,
-                description: "Recommended max results: 1-5 for specific_product, 10 for broad_category"
-              },
-              reason: {
-                type: Type.STRING,
-                description: "Brief explanation of classification"
-              }
-            },
-            required: ["searchType", "maxResults", "reason"]
-          }
-        }
-      });
-
-      let text = response.text ? response.text.trim() : null;
-
-      if (!text && response.candidates && response.candidates[0]) {
-        const candidate = response.candidates[0];
-        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
-          text = candidate.content.parts[0].text;
-        }
-      }
-
-      if (!text) {
-        throw new Error("No text content in response");
-      }
-
-      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
-      const result = JSON.parse(text);
-
-      aiCircuitBreaker.recordSuccess();
-
-      // Ensure maxResults is within bounds
-      result.maxResults = Math.min(Math.max(result.maxResults || 10, 1), 10);
-
-      console.log(`[SPECIFICITY] Query "${query}" → ${result.searchType} (max ${result.maxResults}): ${result.reason}`);
-
-      return result;
-    } catch (error) {
-      console.error("[SPECIFICITY] Error classifying query:", error.message);
-      aiCircuitBreaker.recordFailure();
-      return classifySpecificityFallback(query);
-    }
-  }, 7200); // Cache for 2 hours
-}
-
-/**
- * Fallback classification when LLM is unavailable
- */
-function classifySpecificityFallback(query) {
-  const lowerQuery = query.toLowerCase().trim();
-  const words = lowerQuery.split(/\s+/);
-
-  // Heuristic: Single word queries are often brand/product names
-  // Multi-word queries with adjectives are often category searches
-  const descriptiveWords = ['cheap', 'expensive', 'good', 'best', 'organic', 'natural', 'sweet', 'dry', 'strong', 'light', 'israeli', 'french', 'italian', 'scottish', 'red', 'white', 'יין', 'אדום', 'לבן', 'מתוק', 'יבש', 'ישראלי', 'צרפתי'];
-
-  const hasDescriptiveWord = words.some(w => descriptiveWords.includes(w));
-
-  if (words.length === 1 && !hasDescriptiveWord) {
-    return {
-      searchType: 'specific_product',
-      maxResults: 3,
-      reason: 'Single word query - likely brand/product name (fallback)'
-    };
-  }
-
-  if (hasDescriptiveWord) {
-    return {
-      searchType: 'broad_category',
-      maxResults: 10,
-      reason: 'Contains descriptive/category words (fallback)'
-    };
-  }
-
-  // Default to broad for multi-word queries
-  return {
-    searchType: words.length <= 2 ? 'specific_product' : 'broad_category',
-    maxResults: words.length <= 2 ? 5 : 10,
-    reason: 'Heuristic based on query length (fallback)'
-  };
-}
-
 app.post("/fast-search", async (req, res) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
 
   try {
     let { query, session_id } = req.body;
-    const { context } = req.store || {};
-    const FAST_LIMIT = 10; // Maximum possible results
-
+    const FAST_LIMIT = 10; // Return 10 products (was 5) - more variety with Tier 2
+    
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    // 🎯 LLM CLASSIFICATION: Determine if this is a specific product search or broad category
-    const specificity = await classifyQuerySpecificity(query, context);
-    const dynamicLimit = specificity.maxResults;
-
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" → ${specificity.searchType} (limit: ${dynamicLimit})${session_id ? ` 👤 [personalized]` : ''}`);
-
-    // Use faster LLM model for reordering
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model + aggressive expansion)${session_id ? ` 👤 [personalized for ${session_id}]` : ''}`);
+    
+    // Use faster LLM model (gemini-2.5-flash-lite) for reordering
     req.body.modern = true;
-    req.body.limit = FAST_LIMIT; // Fetch up to 10, but will filter later
-    req.body.useFastLLM = true;
-    req.body.fastSearchMode = true;
+    req.body.limit = FAST_LIMIT;
+    req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
+    req.body.fastSearchMode = true; // Signal for aggressive Tier 2 expansion with soft category + vector boost
+    // 👤 PERSONALIZATION: Ensure session_id is passed through to /search
     if (session_id) {
       req.body.session_id = session_id;
     }
-
+    
+    // Temporarily override store limit
     const originalLimit = req.store.limit;
+    const originalExplain = req.store.explain;
     req.store.limit = FAST_LIMIT;
-
+    
+    // Create a custom response handler to intercept /search response
     const originalJson = res.json.bind(res);
     let responseSent = false;
 
     res.json = function(data) {
       if (responseSent) return;
       responseSent = true;
-
+      
+      // Restore original limit
       req.store.limit = originalLimit;
-
-      const allProducts = data.products || [];
-
-      // 🎯 Apply LLM-determined limit
-      const products = allProducts.slice(0, dynamicLimit);
-
+      
+      // Extract products and ensure we only return FAST_LIMIT
+      const products = (data.products || []).slice(0, FAST_LIMIT);
       const executionTime = Date.now() - searchStartTime;
+      
+      // 👤 PERSONALIZATION: Count personalized products
       const personalizedCount = products.filter(p => (p.profileBoost || 0) > 0).length;
-
-      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length}/${allProducts.length} products (${specificity.searchType})`);
-
+      
+      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products${personalizedCount > 0 ? ` (${personalizedCount} personalized)` : ''}`);
+      
+      // Return in simplified format
       return originalJson({
         products: products,
         metadata: {
@@ -6473,29 +6671,18 @@ app.post("/fast-search", async (req, res) => {
           requestId,
           executionTime,
           isFastSearch: true,
-          personalizedResults: personalizedCount > 0,
-          personalizedCount: personalizedCount,
-          // 🎯 Query specificity metadata
-          queryClassification: {
-            searchType: specificity.searchType,
-            maxResults: dynamicLimit,
-            reason: specificity.reason,
-            returnedCount: products.length,
-            availableCount: allProducts.length
-          }
+          personalizedResults: personalizedCount > 0, // 👤 Indicate if personalization was applied
+          personalizedCount: personalizedCount
         }
       });
     };
     
-    // Now manually call the search logic
-    // We need to find and call the /search handler
-    // Let's use app._router to find it
+    // Call the /search handler
     const searchRoute = app._router.stack.find(layer => 
       layer.route && layer.route.path === '/search' && layer.route.methods.post
     );
     
     if (searchRoute && searchRoute.route) {
-      // Call the first handler (should be the main search handler)
       const searchHandler = searchRoute.route.stack[0].handle;
       return await searchHandler(req, res);
     } else {
@@ -6512,6 +6699,86 @@ app.post("/fast-search", async (req, res) => {
 });
 
 // --- Simple keyword search (for demo/comparison) ---
+/**
+ * 🎯 FUZZY REGEX GENERATOR
+ * Creates fuzzy regex patterns that allow for small typos and common word variations
+ * Also handles common suffixes: "ישראלי" → matches "ישראל"
+ * @param {String} word - The word to make fuzzy
+ * @returns {String} - Fuzzy regex pattern
+ */
+function generateFuzzyRegex(word) {
+  // Escape special regex characters first
+  const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  
+  // Don't apply fuzzy to very short words (< 3 chars)
+  if (word.length < 3) {
+    return escapedWord;
+  }
+  
+  // For 3-5 char words, allow optional suffix (ים, ית, י, ה)
+  // This makes "ישראלי" match "ישראל", "יבש" match "יבשה", etc.
+  if (word.length <= 5) {
+    return escapedWord + '(ים|ית|י|ה)?';
+  }
+  
+  // For longer words (6+), create a more flexible pattern
+  // Allow the word stem (first 75% of chars) + optional suffix
+  const stemLength = Math.floor(word.length * 0.75);
+  const stem = word.substring(0, stemLength).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  
+  // Allow optional suffixes after the stem
+  return stem + '.{0,' + (word.length - stemLength + 2) + '}';
+}
+
+/**
+ * 🎯 PERFECT FILTER MATCH DETECTOR (NO LLM!)
+ * Checks if ALL query words match perfectly to hard/soft categories
+ * If yes → it's a BROAD search (return all matching products)
+ * If no → it's a SPECIFIC search (filter by brand/product name)
+ * 
+ * @param {String} query - The full query string
+ * @param {Array} hardCategories - Available hard categories
+ * @param {Array} softCategories - Available soft categories
+ * @returns {Object} { isPerfectMatch: boolean, unmatchedWords: Array }
+ */
+function detectPerfectFilterMatch(query, hardCategories = [], softCategories = []) {
+  if (typeof query !== 'string') {
+    return { isPerfectMatch: false, unmatchedWords: [] };
+  }
+  const queryWords = query.toLowerCase().trim().split(/\s+/).filter(w => w.length >= 2);
+  if (queryWords.length === 0) {
+    return { isPerfectMatch: false, unmatchedWords: [] };
+  }
+  
+  // Normalize categories to lowercase for comparison, ensuring we only process strings
+  const normalizedHardCategories = (hardCategories || [])
+    .filter(c => typeof c === 'string')
+    .map(c => c.toLowerCase().trim());
+    
+  const normalizedSoftCategories = (softCategories || [])
+    .filter(c => typeof c === 'string')
+    .map(c => c.toLowerCase().trim());
+  const allCategories = [...normalizedHardCategories, ...normalizedSoftCategories];
+  
+  const unmatchedWords = queryWords.filter(word => {
+    return !allCategories.some(cat => {
+      // 1. Exact match
+      if (cat === word) return true;
+      // 2. Word is category with suffix (e.g., "ישראלי" for "ישראל")
+      if (word.startsWith(cat) && word.length <= cat.length + 3) return true;
+      // 3. Category is in word (e.g., "יין לבן" contains "יין")
+      if (cat.includes(word)) return true;
+      // 4. Word is in category (e.g., "יין" in "יין לבן")
+      if (word.length >= 3 && cat.includes(word)) return true;
+      return false;
+    });
+  });
+  
+  const isPerfectMatch = unmatchedWords.length === 0;
+  
+  return { isPerfectMatch, unmatchedWords };
+}
+
 app.post("/simple-search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
@@ -6525,8 +6792,7 @@ app.post("/simple-search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // STRICT matching - only return results if ALL query words appear in product name
-    // Focuses on name only for stricter matching (description can be too broad)
+    // FUZZY matching - allow small typos in query words
     const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
     
     if (queryWords.length === 0) {
@@ -6534,12 +6800,21 @@ app.post("/simple-search", async (req, res) => {
       return res.json({ products: [], count: 0, timing: Date.now() - searchStartTime });
     }
     
-    // Search only in name and category for stricter matching
+    // Generate fuzzy patterns for each word
+    const fuzzyPatterns = queryWords.map(word => ({
+      exact: word, // Keep exact match for priority
+      fuzzy: generateFuzzyRegex(word)
+    }));
+    
+    console.log(`[${requestId}] 🔍 Fuzzy patterns:`, fuzzyPatterns.map(p => `${p.exact} → ${p.fuzzy}`).join(', '));
+    
+    // Search with fuzzy patterns (ALL words must match)
     const results = await collection.find({
-      $and: queryWords.map(word => ({
+      $and: fuzzyPatterns.map(pattern => ({
         $or: [
-          { name: { $regex: word, $options: 'i' } },
-          { category: { $regex: word, $options: 'i' } }
+          { name: { $regex: pattern.fuzzy, $options: 'i' } },
+          { category: { $regex: pattern.fuzzy, $options: 'i' } },
+          { softCategory: { $regex: pattern.fuzzy, $options: 'i' } }
         ]
       }))
     }).limit(limit).toArray();
@@ -7189,7 +7464,7 @@ app.post("/search", async (req, res) => {
           cleanedText,
           [],
           complexQueryBoostMap, // 🎯 Use 100x boost for query-extracted categories
-          true // skipTextualSearch = true for complex queries (use only vectors + soft categories)
+          false // 🎯 CRITICAL FIX: ALWAYS check text matches first, even for complex queries
         );
           
       } else {
@@ -7714,19 +7989,18 @@ app.post("/search", async (req, res) => {
                     }
                   });
 
-                  categoryFilteredResults = Array.from(docRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
-                    const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
-                    return {
-                      ...doc,
-                      rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0),
-                      softFilterMatch: false,
-                      softCategoryMatches: 0,
-                      exactMatchBonus: exactMatchBonus,
-                      fuzzyRank: fuzzyRank,
-                      vectorRank: vectorRank
-                    };
-                  }).sort((a, b) => b.rrf_score - a.rrf_score);
-                }
+                categoryFilteredResults = Array.from(docRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
+                  const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+                  return {
+                    ...doc,
+                    rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0),
+                    softFilterMatch: false,
+                    softCategoryMatches: 0,
+                    exactMatchBonus: exactMatchBonus,
+                    fuzzyRank: fuzzyRank,
+                    vectorRank: vectorRank
+                  };
+                }).sort((a, b) => b.rrf_score - a.rrf_score);
               } else {
                 // PERFORMANCE OPTIMIZATION: For simple queries, skip vector search entirely
                 // Only do text-based fuzzy search with category filters
@@ -7935,10 +8209,21 @@ app.post("/search", async (req, res) => {
         const aHasSoftMatch = a.softFilterMatch || false;
         const bHasSoftMatch = b.softFilterMatch || false;
 
-        // WHEN SOFT FILTERS EXIST: Soft category matches ALWAYS come first
-        // When user searches for "white Italian wine", Italian wines must appear first - always
+        // WHEN SOFT FILTERS EXIST: Balance text match quality with soft category relevance
+        // Strong text matches (e.g., "רקנאטי מרלו") should ALWAYS come first, even if soft filters exist
         if (hasSoftFilters) {
-          // PRIORITY 1: Soft category matches ALWAYS come first
+          // 🎯 PRIORITY 0: VERY STRONG text matches (exactMatchBonus >= 20000) ALWAYS come first
+          // This ensures "רקנאטי מרלו" appears before soft category "מרלו" matches
+          const aIsVeryStrongText = aTextBonus >= 20000;
+          const bIsVeryStrongText = bTextBonus >= 20000;
+          if (aIsVeryStrongText !== bIsVeryStrongText) {
+            return aIsVeryStrongText ? -1 : 1;
+          }
+          if (aIsVeryStrongText && bIsVeryStrongText) {
+            return bTextBonus - aTextBonus; // Sort by text bonus
+          }
+
+          // PRIORITY 1: Soft category matches come next (after very strong text matches)
           if (aHasSoftMatch !== bHasSoftMatch) {
             return aHasSoftMatch ? -1 : 1;
           }
