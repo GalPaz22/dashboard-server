@@ -6843,7 +6843,8 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
         $or: [
           { name: { $regex: pattern.fuzzy, $options: 'i' } },
           { category: { $regex: pattern.fuzzy, $options: 'i' } },
-          { softCategory: { $regex: pattern.fuzzy, $options: 'i' } }
+          { softCategory: { $regex: pattern.fuzzy, $options: 'i' } },
+          { description1: { $regex: pattern.fuzzy, $options: 'i' } }
         ]
       }))
     }).limit(searchLimit).toArray();
@@ -6878,41 +6879,8 @@ app.post("/fast-search", async (req, res) => {
     const db = client.db(req.store.dbName);
     const collection = db.collection(req.store.products);
 
-    const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
-    
-    // 🎯 Check perfect filter match FIRST to decide limit
-    const filterCheck = detectPerfectFilterMatch(
-      query,
-      req.store.categories || [],
-      req.store.softCategories || []
-    );
-    const isPerfectFilterMatch = filterCheck.isPerfectMatch;
-    
-    let simpleResults = [];
-    if (queryWords.length > 0) {
-      // Generate fuzzy patterns for each word
-      const fuzzyPatterns = queryWords.map(word => ({
-        exact: word,
-        fuzzy: generateFuzzyRegex(word)
-      }));
-      
-      console.log(`[${requestId}] 🔍 Fuzzy patterns:`, fuzzyPatterns.map(p => `${p.exact} → ${p.fuzzy}`).join(', '));
-      
-      // 🎯 If PERFECT MATCH → No limit (1000), else small limit for LLM validation (15)
-      const currentLimit = isPerfectFilterMatch ? 1000 : 15;
-      
-      simpleResults = await collection.find({
-        $and: fuzzyPatterns.map(pattern => ({
-          $or: [
-            { name: { $regex: pattern.fuzzy, $options: 'i' } },
-            { category: { $regex: pattern.fuzzy, $options: 'i' } },
-            { softCategory: { $regex: pattern.fuzzy, $options: 'i' } }
-          ]
-        }))
-      }).limit(currentLimit).toArray();
-      
-      console.log(`[${requestId}] 📋 Simple fuzzy search found ${simpleResults.length} matches (Limit: ${currentLimit})`);
-    }
+    const { results: simpleResults, isPerfectFilterMatch, filterCheck, queryWords } = 
+      await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
     // STEP 2: Handle Results
@@ -7194,67 +7162,69 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
 app.post("/simple-search", async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
-  const { query, limit = 12 } = req.body;
+  const { query, limit = 12, session_id } = req.body;
   const { dbName, products: collectionName } = req.store;
 
-  console.log(`[${requestId}] 🔍 Simple keyword search: "${query}"`);
+  console.log(`[${requestId}] 🔍 Simple keyword search: "${query}"${session_id ? ` 👤 [personalized]` : ''}`);
 
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // FUZZY matching - allow small typos in query words
-    const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
+    // Use the reusable simple search logic
+    const { results, isPerfectFilterMatch, filterCheck, queryWords } = 
+      await performSimpleSearch(db, collection, query, req.store, limit);
     
     if (queryWords.length === 0) {
       console.log(`[${requestId}] 🔍 Simple search: query too short, returning 0 results`);
       return res.json({ products: [], count: 0, timing: Date.now() - searchStartTime });
     }
-    
-    // Generate fuzzy patterns for each word
-    const fuzzyPatterns = queryWords.map(word => ({
-      exact: word, // Keep exact match for priority
-      fuzzy: generateFuzzyRegex(word)
-    }));
-    
-    console.log(`[${requestId}] 🔍 Fuzzy patterns:`, fuzzyPatterns.map(p => `${p.exact} → ${p.fuzzy}`).join(', '));
-    
-    // Search with fuzzy patterns (ALL words must match)
-    const results = await collection.find({
-      $and: fuzzyPatterns.map(pattern => ({
-        $or: [
-          { name: { $regex: pattern.fuzzy, $options: 'i' } },
-          { category: { $regex: pattern.fuzzy, $options: 'i' } },
-          { softCategory: { $regex: pattern.fuzzy, $options: 'i' } }
-        ]
-      }))
-    }).limit(limit).toArray();
-    
-    console.log(`[${requestId}] 🔍 Simple search: query="${query}", words=[${queryWords.join(',')}], found ${results.length} matches (ALL words must appear in name/category)`);
 
-    const response = results.map(product => ({
-      _id: product._id.toString(),
-      id: product.id,
-      name: product.name,
-      description: product.description,
-      price: product.price,
-      image: product.image,
-      url: product.url,
-      type: product.type,
-      category: product.category,
-      softCategory: product.softCategory,
-      specialSales: product.specialSales,
-      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-      ItemID: product.ItemID
-    }));
+    // Load user profile for personalization if session_id is provided
+    let userProfile = null;
+    if (session_id) {
+      userProfile = await getUserProfileForBoosting(db, session_id);
+    }
 
-    console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results in ${Date.now() - searchStartTime}ms`);
+    const response = results.map(product => {
+      // Apply personalization boost
+      const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+      
+      return {
+        _id: product._id.toString(),
+        id: product.id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        type: product.type,
+        category: product.category,
+        softCategory: product.softCategory,
+        specialSales: product.specialSales,
+        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+        ItemID: product.ItemID,
+        profileBoost: profileBoost,
+        highlight: true
+      };
+    });
+
+    // Sort by profileBoost if personalization is active
+    if (userProfile) {
+      response.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+    }
+
+    console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
     res.json({
       products: response,
       count: response.length,
-      timing: Date.now() - searchStartTime
+      timing: Date.now() - searchStartTime,
+      metadata: {
+        isPerfectFilterMatch,
+        searchMode: isPerfectFilterMatch ? 'perfect-filter-match' : 'fuzzy-regex'
+      }
     });
   } catch (error) {
     console.error(`[${requestId}] Simple search error:`, error);
