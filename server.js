@@ -1087,9 +1087,9 @@ async function executeOptimizedFilterOnlySearch(
    EXISTING PIPELINE FUNCTIONS (UNCHANGED)
 \* =========================================================== */
 
-const buildAutocompletePipeline = (query, indexName, path) => {
+const buildAutocompletePipeline = (query, indexName, path, includePersonalizationFields = false) => {
   const pipeline = [];
-  
+
   pipeline.push({
     $search: {
       index: indexName,
@@ -1099,7 +1099,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
             text: {
         query: query,
         path: path,
-              score: { 
+              score: {
                 boost: { value: 100.0 }
               }
             }
@@ -1108,7 +1108,7 @@ const buildAutocompletePipeline = (query, indexName, path) => {
             text: {
               query: query,
               path: path,
-              score: { 
+              score: {
                 boost: { value: 5.0 }
               }
             }
@@ -1127,28 +1127,34 @@ const buildAutocompletePipeline = (query, indexName, path) => {
       }
     },
   });
-  
+
   pipeline.push({
     $match: {
       $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
     },
   });
-  
+
+  // Project fields - include softCategory for personalization when requested
+  const projectFields = {
+    _id: 0,
+    suggestion: `$${path}`,
+    score: { $meta: "searchScore" },
+    url: 1,
+    image: 1,
+    price: 1,
+    id: 1,
+  };
+
+  // Include softCategory for personalization (only for products collection)
+  if (includePersonalizationFields) {
+    projectFields.softCategory = 1;
+  }
+
   pipeline.push(
     { $limit: 5 },
-    {
-      $project: {
-        _id: 0,
-        suggestion: `$${path}`,
-        score: { $meta: "searchScore" },
-        url: 1,
-        image: 1,
-        price: 1,
-        id: 1,
-      },
-    }
+    { $project: projectFields }
   );
-  
+
   return pipeline;
 };
 
@@ -5593,42 +5599,77 @@ app.get("/search/load-more", async (req, res) => {
 });
 
 app.get("/autocomplete", async (req, res) => {
-  const { query } = req.query;
+  const { query, session_id } = req.query;
   const { dbName, products: collectionName } = req.store;
   try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const collection1 = db.collection("products");
     const collection2 = db.collection("queries");
-    const pipeline1 = buildAutocompletePipeline(query, "default", "name", 1);
-    const pipeline2 = buildAutocompletePipeline(query, "default2", "query", 1);
+
+    // 👤 PERSONALIZATION: Load user profile if session_id is provided
+    let userProfile = null;
+    if (session_id) {
+      userProfile = await getUserProfileForBoosting(dbName, session_id);
+      if (userProfile) {
+        console.log(`[AUTOCOMPLETE] 👤 Personalization enabled for session: ${session_id}`);
+      }
+    }
+
+    // Include softCategory in pipeline if personalization is active (for products only)
+    const includePersonalizationFields = !!userProfile;
+    const pipeline1 = buildAutocompletePipeline(query, "default", "name", includePersonalizationFields);
+    const pipeline2 = buildAutocompletePipeline(query, "default2", "query", false); // queries don't have softCategory
+
     const [suggestions1, suggestions2] = await Promise.all([
       collection1.aggregate(pipeline1).toArray(),
       collection2.aggregate(pipeline2).toArray(),
     ]);
-    const labeledSuggestions1 = suggestions1.map(item => ({
-      suggestion: item.suggestion,
-      score: item.score,
-      source: "products",
-      url: item.url,
-      price: item.price,
-      image: item.image
-    }));
+
+    // 👤 PERSONALIZATION: Calculate profile boost for product suggestions
+    const labeledSuggestions1 = suggestions1.map(item => {
+      let profileBoost = 0;
+      if (userProfile && item.softCategory) {
+        profileBoost = calculateProfileBoost(item, userProfile);
+      }
+      return {
+        suggestion: item.suggestion,
+        score: item.score,
+        boostedScore: item.score + profileBoost, // Combined score for sorting
+        profileBoost: profileBoost,
+        source: "products",
+        url: item.url,
+        price: item.price,
+        image: item.image
+      };
+    });
+
     const labeledSuggestions2 = suggestions2.map(item => ({
       suggestion: item.suggestion,
       score: item.score,
+      boostedScore: item.score, // No personalization boost for queries
+      profileBoost: 0,
       source: "queries",
       url: item.url
     }));
+
+    // Sort by: 1) Query suggestions first, 2) Boosted score (text score + personalization)
     const combinedSuggestions = [...labeledSuggestions1, ...labeledSuggestions2]
       .sort((a, b) => {
         if (a.source === 'queries' && b.source !== 'queries') return -1;
         if (a.source !== 'queries' && b.source === 'queries') return 1;
-        return b.score - a.score;
+        return b.boostedScore - a.boostedScore; // Use boosted score for sorting
       })
       .filter((item, index, self) =>
         index === self.findIndex((t) => t.suggestion === item.suggestion)
       );
+
+    // Log personalization summary
+    if (userProfile) {
+      const personalizedCount = combinedSuggestions.filter(s => s.profileBoost > 0).length;
+      console.log(`[AUTOCOMPLETE] 👤 Personalized ${personalizedCount}/${combinedSuggestions.length} suggestions`);
+    }
+
     res.json(combinedSuggestions);
   } catch (error) {
     console.error("Error fetching autocomplete suggestions:", error);
@@ -6228,14 +6269,119 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 // ============================================================================
 // FAST SEARCH ENDPOINT - Optimized for speed (~10 products, <500ms response)
 // ============================================================================
+
+/**
+ * 🎯 SMART SCORE-GAP DETECTION
+ * Analyzes product scores to detect when there are only a few "perfect" matches
+ * vs. broad results that should be padded to full limit.
+ *
+ * Use case:
+ * - "glanmourangy whiskey" → 2 perfect matches (high score), rest are weak → return only 2
+ * - "israeli whisky" → many products with moderate scores → return up to 10
+ *
+ * @param {Array} products - Products sorted by exactMatchBonus descending
+ * @param {number} maxLimit - Maximum products to return (e.g., 10)
+ * @returns {Object} { perfectMatches: Array, reason: string, wasLimited: boolean }
+ */
+function detectPerfectMatchesWithScoreGap(products, maxLimit = 10) {
+  if (!products || products.length === 0) {
+    return { perfectMatches: [], reason: 'no_products', wasLimited: false };
+  }
+
+  // Thresholds for score-gap detection
+  const PERFECT_MATCH_THRESHOLD = 50000; // Products with exactMatchBonus >= 50k are considered "perfect"
+  const SCORE_GAP_RATIO = 0.3; // If next product score is < 30% of current, it's a significant gap
+  const MIN_SCORE_FOR_GAP_CHECK = 10000; // Only check gap for products with meaningful scores
+
+  // Sort by exactMatchBonus descending (should already be sorted, but ensure)
+  const sortedProducts = [...products].sort((a, b) =>
+    (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0)
+  );
+
+  // Find perfect matches (score >= threshold)
+  const perfectMatches = sortedProducts.filter(p => (p.exactMatchBonus || 0) >= PERFECT_MATCH_THRESHOLD);
+
+  // If no perfect matches, return all (up to limit)
+  if (perfectMatches.length === 0) {
+    return {
+      perfectMatches: sortedProducts.slice(0, maxLimit),
+      reason: 'no_perfect_matches',
+      wasLimited: false
+    };
+  }
+
+  // Check for score gap after the perfect matches
+  const lastPerfectMatchIdx = perfectMatches.length - 1;
+  const lastPerfectScore = perfectMatches[lastPerfectMatchIdx].exactMatchBonus || 0;
+
+  // If there are more products after perfect matches, check for gap
+  if (sortedProducts.length > perfectMatches.length) {
+    const nextProductAfterPerfect = sortedProducts[perfectMatches.length];
+    const nextScore = nextProductAfterPerfect.exactMatchBonus || 0;
+
+    // Calculate gap ratio
+    const gapRatio = lastPerfectScore > 0 ? nextScore / lastPerfectScore : 0;
+
+    // If there's a significant gap (next product is less than 30% of last perfect match)
+    // AND the last perfect match has a meaningful score, return only perfect matches
+    if (gapRatio < SCORE_GAP_RATIO && lastPerfectScore >= MIN_SCORE_FOR_GAP_CHECK) {
+      return {
+        perfectMatches: perfectMatches,
+        reason: `score_gap_detected`,
+        gapDetails: {
+          lastPerfectScore,
+          nextScore,
+          gapRatio: gapRatio.toFixed(2),
+          perfectCount: perfectMatches.length
+        },
+        wasLimited: true
+      };
+    }
+  }
+
+  // Also check for internal gaps within the product list (might have a gap before reaching maxLimit)
+  for (let i = 0; i < Math.min(sortedProducts.length - 1, maxLimit - 1); i++) {
+    const currentScore = sortedProducts[i].exactMatchBonus || 0;
+    const nextScore = sortedProducts[i + 1].exactMatchBonus || 0;
+
+    // Only consider gaps if current product has a meaningful score
+    if (currentScore >= MIN_SCORE_FOR_GAP_CHECK) {
+      const gapRatio = currentScore > 0 ? nextScore / currentScore : 0;
+
+      // Significant internal gap found
+      if (gapRatio < SCORE_GAP_RATIO) {
+        const productsBeforeGap = sortedProducts.slice(0, i + 1);
+        return {
+          perfectMatches: productsBeforeGap,
+          reason: 'internal_score_gap',
+          gapDetails: {
+            gapPosition: i + 1,
+            scoreBeforeGap: currentScore,
+            scoreAfterGap: nextScore,
+            gapRatio: gapRatio.toFixed(2)
+          },
+          wasLimited: true
+        };
+      }
+    }
+  }
+
+  // No significant gap found - return up to maxLimit
+  return {
+    perfectMatches: sortedProducts.slice(0, maxLimit),
+    reason: 'no_significant_gap',
+    wasLimited: false
+  };
+}
+
 app.post("/fast-search", async (req, res) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
-  
+
   try {
     let { query, session_id } = req.body;
     const FAST_LIMIT = 10; // Return up to 10 textual products (Tier 1 only)
-    
+
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
@@ -6251,32 +6397,45 @@ app.post("/fast-search", async (req, res) => {
     if (session_id) {
       req.body.session_id = session_id;
     }
-    
+
     // Temporarily override store limit
     const originalLimit = req.store.limit;
     req.store.limit = FAST_LIMIT;
-    
+
     // Create a custom response handler to intercept /search response
     const originalJson = res.json.bind(res);
     let responseSent = false;
-    
+
     res.json = function(data) {
       if (responseSent) return;
       responseSent = true;
-      
+
       // Restore original limit
       req.store.limit = originalLimit;
-      
-      // Extract products and ensure we only return FAST_LIMIT
-      const products = (data.products || []).slice(0, FAST_LIMIT);
+
+      // Extract products
+      const allProducts = data.products || [];
+
+      // 🎯 SMART SCORE-GAP DETECTION: Only return perfect matches if there's a significant gap
+      const gapDetection = detectPerfectMatchesWithScoreGap(allProducts, FAST_LIMIT);
+      const products = gapDetection.perfectMatches;
+
       const executionTime = Date.now() - searchStartTime;
-      
+
       // 👤 PERSONALIZATION: Count personalized products
       const personalizedCount = products.filter(p => (p.profileBoost || 0) > 0).length;
-      
-      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products${personalizedCount > 0 ? ` (${personalizedCount} personalized)` : ''}`);
-      
-      // Return in simplified format
+
+      // Log with gap detection details
+      if (gapDetection.wasLimited) {
+        console.log(`[${requestId}] ⚡ FAST SEARCH: 🎯 SCORE GAP DETECTED - returning only ${products.length} perfect matches (${gapDetection.reason})`);
+        if (gapDetection.gapDetails) {
+          console.log(`[${requestId}]   Gap details: ${JSON.stringify(gapDetection.gapDetails)}`);
+        }
+      } else {
+        console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products${personalizedCount > 0 ? ` (${personalizedCount} personalized)` : ''}`);
+      }
+
+      // Return in simplified format with gap detection metadata
       return originalJson({
         products: products,
         metadata: {
@@ -6284,8 +6443,16 @@ app.post("/fast-search", async (req, res) => {
           requestId,
           executionTime,
           isFastSearch: true,
-          personalizedResults: personalizedCount > 0, // 👤 Indicate if personalization was applied
-          personalizedCount: personalizedCount
+          personalizedResults: personalizedCount > 0,
+          personalizedCount: personalizedCount,
+          // 🎯 Score-gap metadata
+          scoreGapDetection: {
+            wasLimited: gapDetection.wasLimited,
+            reason: gapDetection.reason,
+            returnedCount: products.length,
+            originalCount: allProducts.length,
+            ...(gapDetection.gapDetails || {})
+          }
         }
       });
     };
