@@ -6271,106 +6271,148 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 // ============================================================================
 
 /**
- * 🎯 SMART SCORE-GAP DETECTION
- * Analyzes product scores to detect when there are only a few "perfect" matches
- * vs. broad results that should be padded to full limit.
+ * 🎯 LLM-BASED QUERY SPECIFICITY CLASSIFICATION
+ * Uses LLM to determine if a query is looking for a specific product/brand
+ * (should return few exact matches) or a broad category (should return more).
  *
- * Use case:
- * - "glanmourangy whiskey" → 2 perfect matches (high score), rest are weak → return only 2
- * - "israeli whisky" → many products with moderate scores → return up to 10
+ * Examples:
+ * - "glenmorangie" → specific_product (brand name) → return 1-3 exact matches
+ * - "israeli whisky" → broad_category (attribute search) → return up to 10
+ * - "coca cola" → specific_product → return 1-3 exact matches
+ * - "organic wine" → broad_category → return up to 10
  *
- * @param {Array} products - Products sorted by exactMatchBonus descending
- * @param {number} maxLimit - Maximum products to return (e.g., 10)
- * @returns {Object} { perfectMatches: Array, reason: string, wasLimited: boolean }
+ * @param {string} query - The search query
+ * @param {string} context - Store context (e.g., "wine shop")
+ * @returns {Object} { searchType: 'specific_product'|'broad_category', maxResults: number, reason: string }
  */
-function detectPerfectMatchesWithScoreGap(products, maxLimit = 10) {
-  if (!products || products.length === 0) {
-    return { perfectMatches: [], reason: 'no_products', wasLimited: false };
-  }
+async function classifyQuerySpecificity(query, context = "e-commerce") {
+  const cacheKey = generateCacheKey('specificity', query, context);
 
-  // Thresholds for score-gap detection
-  const PERFECT_MATCH_THRESHOLD = 50000; // Products with exactMatchBonus >= 50k are considered "perfect"
-  const SCORE_GAP_RATIO = 0.3; // If next product score is < 30% of current, it's a significant gap
-  const MIN_SCORE_FOR_GAP_CHECK = 10000; // Only check gap for products with meaningful scores
+  return withCache(cacheKey, async () => {
+    try {
+      // Check circuit breaker
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        console.log(`[SPECIFICITY] Circuit breaker open, using fallback for: "${query}"`);
+        return classifySpecificityFallback(query);
+      }
 
-  // Sort by exactMatchBonus descending (should already be sorted, but ensure)
-  const sortedProducts = [...products].sort((a, b) =>
-    (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0)
-  );
+      const systemInstruction = `You are an expert at analyzing e-commerce search queries to determine if the user is looking for a SPECIFIC product/brand or browsing a BROAD category.
 
-  // Find perfect matches (score >= threshold)
-  const perfectMatches = sortedProducts.filter(p => (p.exactMatchBonus || 0) >= PERFECT_MATCH_THRESHOLD);
+Context: ${context}
 
-  // If no perfect matches, return all (up to limit)
-  if (perfectMatches.length === 0) {
+SPECIFIC_PRODUCT queries are:
+- Brand names (e.g., "glenmorangie", "coca cola", "absolut vodka", "ברקן")
+- Specific product names or model numbers (e.g., "iPhone 14 Pro", "macallan 18")
+- Misspelled brand names (e.g., "glanmourangy" = Glenmorangie, "jonnie walker" = Johnnie Walker)
+- When the user clearly wants ONE specific thing, not variety
+
+BROAD_CATEGORY queries are:
+- Category + attribute searches (e.g., "israeli whisky", "organic wine", "יין אדום")
+- Descriptive searches (e.g., "sweet wine", "strong coffee", "cheap beer")
+- Geographic/origin searches (e.g., "french wine", "scottish whisky")
+- Use-case searches (e.g., "wine for dinner", "gift whisky")
+- General categories (e.g., "red wine", "single malt")
+
+Return your classification. For specific_product, also estimate how many exact matches likely exist (usually 1-5).`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-2.0-flash-lite", // Use fast model for quick classification
+        contents: [{ text: query }],
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              searchType: {
+                type: Type.STRING,
+                enum: ["specific_product", "broad_category"],
+                description: "Whether user wants a specific product or is browsing a category"
+              },
+              maxResults: {
+                type: Type.NUMBER,
+                description: "Recommended max results: 1-5 for specific_product, 10 for broad_category"
+              },
+              reason: {
+                type: Type.STRING,
+                description: "Brief explanation of classification"
+              }
+            },
+            required: ["searchType", "maxResults", "reason"]
+          }
+        }
+      });
+
+      let text = response.text ? response.text.trim() : null;
+
+      if (!text && response.candidates && response.candidates[0]) {
+        const candidate = response.candidates[0];
+        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+          text = candidate.content.parts[0].text;
+        }
+      }
+
+      if (!text) {
+        throw new Error("No text content in response");
+      }
+
+      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+      const result = JSON.parse(text);
+
+      aiCircuitBreaker.recordSuccess();
+
+      // Ensure maxResults is within bounds
+      result.maxResults = Math.min(Math.max(result.maxResults || 10, 1), 10);
+
+      console.log(`[SPECIFICITY] Query "${query}" → ${result.searchType} (max ${result.maxResults}): ${result.reason}`);
+
+      return result;
+    } catch (error) {
+      console.error("[SPECIFICITY] Error classifying query:", error.message);
+      aiCircuitBreaker.recordFailure();
+      return classifySpecificityFallback(query);
+    }
+  }, 7200); // Cache for 2 hours
+}
+
+/**
+ * Fallback classification when LLM is unavailable
+ */
+function classifySpecificityFallback(query) {
+  const lowerQuery = query.toLowerCase().trim();
+  const words = lowerQuery.split(/\s+/);
+
+  // Heuristic: Single word queries are often brand/product names
+  // Multi-word queries with adjectives are often category searches
+  const descriptiveWords = ['cheap', 'expensive', 'good', 'best', 'organic', 'natural', 'sweet', 'dry', 'strong', 'light', 'israeli', 'french', 'italian', 'scottish', 'red', 'white', 'יין', 'אדום', 'לבן', 'מתוק', 'יבש', 'ישראלי', 'צרפתי'];
+
+  const hasDescriptiveWord = words.some(w => descriptiveWords.includes(w));
+
+  if (words.length === 1 && !hasDescriptiveWord) {
     return {
-      perfectMatches: sortedProducts.slice(0, maxLimit),
-      reason: 'no_perfect_matches',
-      wasLimited: false
+      searchType: 'specific_product',
+      maxResults: 3,
+      reason: 'Single word query - likely brand/product name (fallback)'
     };
   }
 
-  // Check for score gap after the perfect matches
-  const lastPerfectMatchIdx = perfectMatches.length - 1;
-  const lastPerfectScore = perfectMatches[lastPerfectMatchIdx].exactMatchBonus || 0;
-
-  // If there are more products after perfect matches, check for gap
-  if (sortedProducts.length > perfectMatches.length) {
-    const nextProductAfterPerfect = sortedProducts[perfectMatches.length];
-    const nextScore = nextProductAfterPerfect.exactMatchBonus || 0;
-
-    // Calculate gap ratio
-    const gapRatio = lastPerfectScore > 0 ? nextScore / lastPerfectScore : 0;
-
-    // If there's a significant gap (next product is less than 30% of last perfect match)
-    // AND the last perfect match has a meaningful score, return only perfect matches
-    if (gapRatio < SCORE_GAP_RATIO && lastPerfectScore >= MIN_SCORE_FOR_GAP_CHECK) {
-      return {
-        perfectMatches: perfectMatches,
-        reason: `score_gap_detected`,
-        gapDetails: {
-          lastPerfectScore,
-          nextScore,
-          gapRatio: gapRatio.toFixed(2),
-          perfectCount: perfectMatches.length
-        },
-        wasLimited: true
-      };
-    }
+  if (hasDescriptiveWord) {
+    return {
+      searchType: 'broad_category',
+      maxResults: 10,
+      reason: 'Contains descriptive/category words (fallback)'
+    };
   }
 
-  // Also check for internal gaps within the product list (might have a gap before reaching maxLimit)
-  for (let i = 0; i < Math.min(sortedProducts.length - 1, maxLimit - 1); i++) {
-    const currentScore = sortedProducts[i].exactMatchBonus || 0;
-    const nextScore = sortedProducts[i + 1].exactMatchBonus || 0;
-
-    // Only consider gaps if current product has a meaningful score
-    if (currentScore >= MIN_SCORE_FOR_GAP_CHECK) {
-      const gapRatio = currentScore > 0 ? nextScore / currentScore : 0;
-
-      // Significant internal gap found
-      if (gapRatio < SCORE_GAP_RATIO) {
-        const productsBeforeGap = sortedProducts.slice(0, i + 1);
-        return {
-          perfectMatches: productsBeforeGap,
-          reason: 'internal_score_gap',
-          gapDetails: {
-            gapPosition: i + 1,
-            scoreBeforeGap: currentScore,
-            scoreAfterGap: nextScore,
-            gapRatio: gapRatio.toFixed(2)
-          },
-          wasLimited: true
-        };
-      }
-    }
-  }
-
-  // No significant gap found - return up to maxLimit
+  // Default to broad for multi-word queries
   return {
-    perfectMatches: sortedProducts.slice(0, maxLimit),
-    reason: 'no_significant_gap',
-    wasLimited: false
+    searchType: words.length <= 2 ? 'specific_product' : 'broad_category',
+    maxResults: words.length <= 2 ? 5 : 10,
+    reason: 'Heuristic based on query length (fallback)'
   };
 }
 
@@ -6380,29 +6422,31 @@ app.post("/fast-search", async (req, res) => {
 
   try {
     let { query, session_id } = req.body;
-    const FAST_LIMIT = 10; // Return up to 10 textual products (Tier 1 only)
+    const { context } = req.store || {};
+    const FAST_LIMIT = 10; // Maximum possible results
 
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} textual results only - Tier 1)${session_id ? ` 👤 [personalized for ${session_id}]` : ''}`);
+    // 🎯 LLM CLASSIFICATION: Determine if this is a specific product search or broad category
+    const specificity = await classifyQuerySpecificity(query, context);
+    const dynamicLimit = specificity.maxResults;
 
-    // Use faster LLM model (gemini-2.5-flash-lite) for reordering
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" → ${specificity.searchType} (limit: ${dynamicLimit})${session_id ? ` 👤 [personalized]` : ''}`);
+
+    // Use faster LLM model for reordering
     req.body.modern = true;
-    req.body.limit = FAST_LIMIT;
-    req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
-    req.body.fastSearchMode = true; // Signal to return textual results only (Tier 1), skip Tier 2
-    // 👤 PERSONALIZATION: Ensure session_id is passed through to /search
+    req.body.limit = FAST_LIMIT; // Fetch up to 10, but will filter later
+    req.body.useFastLLM = true;
+    req.body.fastSearchMode = true;
     if (session_id) {
       req.body.session_id = session_id;
     }
 
-    // Temporarily override store limit
     const originalLimit = req.store.limit;
     req.store.limit = FAST_LIMIT;
 
-    // Create a custom response handler to intercept /search response
     const originalJson = res.json.bind(res);
     let responseSent = false;
 
@@ -6410,32 +6454,18 @@ app.post("/fast-search", async (req, res) => {
       if (responseSent) return;
       responseSent = true;
 
-      // Restore original limit
       req.store.limit = originalLimit;
 
-      // Extract products
       const allProducts = data.products || [];
 
-      // 🎯 SMART SCORE-GAP DETECTION: Only return perfect matches if there's a significant gap
-      const gapDetection = detectPerfectMatchesWithScoreGap(allProducts, FAST_LIMIT);
-      const products = gapDetection.perfectMatches;
+      // 🎯 Apply LLM-determined limit
+      const products = allProducts.slice(0, dynamicLimit);
 
       const executionTime = Date.now() - searchStartTime;
-
-      // 👤 PERSONALIZATION: Count personalized products
       const personalizedCount = products.filter(p => (p.profileBoost || 0) > 0).length;
 
-      // Log with gap detection details
-      if (gapDetection.wasLimited) {
-        console.log(`[${requestId}] ⚡ FAST SEARCH: 🎯 SCORE GAP DETECTED - returning only ${products.length} perfect matches (${gapDetection.reason})`);
-        if (gapDetection.gapDetails) {
-          console.log(`[${requestId}]   Gap details: ${JSON.stringify(gapDetection.gapDetails)}`);
-        }
-      } else {
-        console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products${personalizedCount > 0 ? ` (${personalizedCount} personalized)` : ''}`);
-      }
+      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length}/${allProducts.length} products (${specificity.searchType})`);
 
-      // Return in simplified format with gap detection metadata
       return originalJson({
         products: products,
         metadata: {
@@ -6445,13 +6475,13 @@ app.post("/fast-search", async (req, res) => {
           isFastSearch: true,
           personalizedResults: personalizedCount > 0,
           personalizedCount: personalizedCount,
-          // 🎯 Score-gap metadata
-          scoreGapDetection: {
-            wasLimited: gapDetection.wasLimited,
-            reason: gapDetection.reason,
+          // 🎯 Query specificity metadata
+          queryClassification: {
+            searchType: specificity.searchType,
+            maxResults: dynamicLimit,
+            reason: specificity.reason,
             returnedCount: products.length,
-            originalCount: allProducts.length,
-            ...(gapDetection.gapDetails || {})
+            availableCount: allProducts.length
           }
         }
       });
