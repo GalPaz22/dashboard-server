@@ -11797,12 +11797,19 @@ app.get("/profile/:session_id", async (req, res) => {
  * Helper function to get user profile for search boosting
  * Returns null if no profile exists (graceful degradation)
  */
-async function getUserProfileForBoosting(dbName, sessionId) {
+async function getUserProfileForBoosting(dbOrDbName, sessionId) {
   if (!sessionId) return null;
 
   try {
-    const client = await connectToMongoDB(mongodbUri);
-    const db = client.db(dbName);
+    let db;
+    if (typeof dbOrDbName === 'string') {
+      const client = await connectToMongoDB(mongodbUri);
+      db = client.db(dbOrDbName);
+    } else {
+      // It's already a DB object
+      db = dbOrDbName;
+    }
+    
     const profile = await db.collection('profiles').findOne({ session_id: sessionId });
 
     // Only return profile if it has meaningful data
@@ -12048,7 +12055,10 @@ app.post("/product-click", async (req, res) => {
 
     const { dbName } = store;
 
-    const { product_id, product_name, search_query, session_id } = req.body;
+    const { product_id, product_name, search_query, session_id, interaction_type } = req.body;
+    
+    // Default to 'click' if not provided
+    const interactionType = interaction_type || 'click';
 
  
 
@@ -12186,10 +12196,10 @@ app.post("/product-click", async (req, res) => {
     console.log(`[PRODUCT CLICK] Tracked: session=${session_id}, product=${product_id}, query="${clickDocument.search_query || 'none'}"`);
 
     // =========================================================
-    // PERSONALIZATION: Auto-update profile from click
+    // PERSONALIZATION: Auto-update profile from interaction
     // =========================================================
-    trackUserProfileInteraction(db, session_id, product_id, 'click', null)
-      .then(() => console.log(`[PRODUCT CLICK] 👤 Profile auto-updated for session: ${session_id}`))
+    trackUserProfileInteraction(db, session_id, product_id, interactionType, null)
+      .then(() => console.log(`[PRODUCT CLICK] 👤 Profile auto-updated (${interactionType}) for session: ${session_id}`))
       .catch(err => console.error("[PRODUCT CLICK] Profile update error:", err.message));
 
     res.status(201).json({
