@@ -5950,10 +5950,40 @@ app.get("/autocomplete", async (req, res) => {
     const pipeline1 = buildAutocompletePipeline(query, "default", "name", includePersonalizationFields);
     const pipeline2 = buildAutocompletePipeline(query, "default2", "query", false); // queries don't have softCategory
 
+    // 🚀 NEW: Integrated Filter Match & Fuzzy Regex for Autocomplete
+    const { results: regexResults, isPerfectFilterMatch, filterCheck } = 
+      await performSimpleSearch(db, collection1, query, req.store, 5);
+
+    // 1. Create Filter Match Suggestion (Highest Priority)
+    const filterSuggestions = [];
+    if (isPerfectFilterMatch || (filterCheck && filterCheck.unmatchedWords.length < 2)) {
+      filterSuggestions.push({
+        suggestion: query,
+        score: 150,
+        boostedScore: 150,
+        source: "filter-match",
+        isPerfectMatch: isPerfectFilterMatch,
+        type: "category-search"
+      });
+    }
+
     const [suggestions1, suggestions2] = await Promise.all([
       collection1.aggregate(pipeline1).toArray(),
-      collection2.aggregate(pipeline2).toArray(),
+      collection2.aggregate(pipeline2).toArray()
     ]);
+
+    // Label regex suggestions
+    const labeledRegexSuggestions = regexResults.map(item => ({
+      suggestion: item.name,
+      score: 95, // High score for regex matches
+      boostedScore: 95,
+      profileBoost: 0,
+      source: "products-regex",
+      url: item.url,
+      price: item.price,
+      image: item.image,
+      isFuzzyMatch: true
+    }));
 
     // 👤 PERSONALIZATION: Calculate profile boost for product suggestions
     const labeledSuggestions1 = suggestions1.map(item => {
@@ -5982,16 +6012,21 @@ app.get("/autocomplete", async (req, res) => {
       url: item.url
     }));
 
-    // Sort by: 1) Query suggestions first, 2) Boosted score (text score + personalization)
-    const combinedSuggestions = [...labeledSuggestions1, ...labeledSuggestions2]
-      .sort((a, b) => {
-        if (a.source === 'queries' && b.source !== 'queries') return -1;
-        if (a.source !== 'queries' && b.source === 'queries') return 1;
-        return b.boostedScore - a.boostedScore; // Use boosted score for sorting
-      })
+    // Sort by priority: 
+    // 1. Filter Match (Category Search)
+    // 2. Query Suggestions (Previous successful searches)
+    // 3. Regex Fuzzy matches (Product names)
+    // 4. Atlas Search matches
+    const combinedSuggestions = [
+      ...filterSuggestions, 
+      ...labeledSuggestions2, 
+      ...labeledRegexSuggestions, 
+      ...labeledSuggestions1
+    ]
       .filter((item, index, self) =>
         index === self.findIndex((t) => t.suggestion === item.suggestion)
-      );
+      )
+      .slice(0, 10); // Keep it fast
 
     // Log personalization summary
     if (userProfile) {
@@ -6778,6 +6813,50 @@ function classifySpecificityFallback(query) {
   };
 }
 
+/**
+ * 🎯 CORE SIMPLE SEARCH LOGIC
+ * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
+ */
+async function performSimpleSearch(db, collection, query, store, limit = 10) {
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+  
+  // 1. Check perfect filter match
+  const filterCheck = detectPerfectFilterMatch(
+    query,
+    store.categories || [],
+    store.softCategories || []
+  );
+  const isPerfectFilterMatch = filterCheck.isPerfectMatch;
+  
+  let results = [];
+  if (queryWords.length > 0) {
+    const fuzzyPatterns = queryWords.map(word => ({
+      exact: word,
+      fuzzy: generateFuzzyRegex(word)
+    }));
+    
+    // If PERFECT MATCH → higher limit, else small limit for validation
+    const searchLimit = isPerfectFilterMatch ? 1000 : 15;
+    
+    results = await collection.find({
+      $and: fuzzyPatterns.map(pattern => ({
+        $or: [
+          { name: { $regex: pattern.fuzzy, $options: 'i' } },
+          { category: { $regex: pattern.fuzzy, $options: 'i' } },
+          { softCategory: { $regex: pattern.fuzzy, $options: 'i' } }
+        ]
+      }))
+    }).limit(searchLimit).toArray();
+  }
+
+  return {
+    results,
+    isPerfectFilterMatch,
+    filterCheck,
+    queryWords
+  };
+}
+
 app.post("/fast-search", async (req, res) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
@@ -7000,7 +7079,7 @@ app.post("/fast-search", async (req, res) => {
 /**
  * 🎯 FUZZY REGEX GENERATOR
  * Creates fuzzy regex patterns that allow for small typos and common word variations
- * Also handles common suffixes: "ישראלי" → matches "ישראל"
+ * Also handles common suffixes: "ישראלי" ↔ matches "ישראל"
  * @param {String} word - The word to make fuzzy
  * @returns {String} - Fuzzy regex pattern
  */
@@ -7013,19 +7092,33 @@ function generateFuzzyRegex(word) {
     return escapedWord;
   }
   
+  // Common Hebrew suffixes
+  const suffixes = ['ים', 'ית', 'ות', 'י', 'ה'];
+  
+  // Check if word already has a suffix, if so, allow the stem as well
+  let stem = escapedWord;
+  for (const s of suffixes) {
+    if (word.endsWith(s)) {
+      stem = word.substring(0, word.length - s.length).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      break;
+    }
+  }
+
   // For 3-5 char words, allow optional suffix (ים, ית, י, ה)
-  // This makes "ישראלי" match "ישראל", "יבש" match "יבשה", etc.
+  // This makes "ישראלי" match "ישראל" and vice-versa
   if (word.length <= 5) {
-    return escapedWord + '(ים|ית|י|ה)?';
+    // If we have a stem, search for stem followed by optional suffix
+    // This handles "ספרדי" -> matches "ספרד" (stem) or "ספרדי", "ספרדית" etc.
+    return stem + '(' + suffixes.join('|') + ')?';
   }
   
   // For longer words (6+), create a more flexible pattern
   // Allow the word stem (first 75% of chars) + optional suffix
   const stemLength = Math.floor(word.length * 0.75);
-  const stem = word.substring(0, stemLength).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const longStem = word.substring(0, stemLength).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   
   // Allow optional suffixes after the stem
-  return stem + '.{0,' + (word.length - stemLength + 2) + '}';
+  return longStem + '.{0,' + (word.length - stemLength + 2) + '}';
 }
 
 /**
@@ -7043,7 +7136,13 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   if (typeof query !== 'string') {
     return { isPerfectMatch: false, unmatchedWords: [] };
   }
-  const queryWords = query.toLowerCase().trim().split(/\s+/).filter(w => w.length >= 2);
+  
+  // Normalize and clean query words
+  const queryWords = query.toLowerCase().trim()
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "") // Remove punctuation
+    .split(/\s+/)
+    .filter(w => w.length >= 2);
+    
   if (queryWords.length === 0) {
     return { isPerfectMatch: false, unmatchedWords: [] };
   }
@@ -7056,20 +7155,35 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   const normalizedSoftCategories = (softCategories || [])
     .filter(c => typeof c === 'string')
     .map(c => c.toLowerCase().trim());
+    
   const allCategories = [...normalizedHardCategories, ...normalizedSoftCategories];
   
+  // Hebrew Variations Map (Common roots and their variations)
+  const isVariationMatch = (word, cat) => {
+    if (word === cat) return true;
+    
+    // Check if word is category with common Hebrew suffixes (י, ית, ים, ות, ה)
+    if (word.startsWith(cat) && word.length <= cat.length + 2) return true;
+    
+    // Check if category is word with suffix (e.g., cat="ספרד", word="ספרדי")
+    if (cat.startsWith(word) && cat.length <= word.length + 2) return true;
+    
+    // Check if word has common Hebrew prefixes (ה, ו, ב, ל)
+    const prefixes = ['ה', 'ו', 'ב', 'ל'];
+    for (const p of prefixes) {
+      if (word.startsWith(p) && word.substring(1) === cat) return true;
+      if (word.startsWith(p) && word.substring(1).startsWith(cat) && word.length <= cat.length + 3) return true;
+    }
+
+    // Support bidirectional "contains" for multi-word categories
+    if (word.length >= 3 && cat.includes(word)) return true;
+    if (cat.length >= 3 && word.includes(cat)) return true;
+    
+    return false;
+  };
+  
   const unmatchedWords = queryWords.filter(word => {
-    return !allCategories.some(cat => {
-      // 1. Exact match
-      if (cat === word) return true;
-      // 2. Word is category with suffix (e.g., "ישראלי" for "ישראל")
-      if (word.startsWith(cat) && word.length <= cat.length + 3) return true;
-      // 3. Category is in word (e.g., "יין לבן" contains "יין")
-      if (cat.includes(word)) return true;
-      // 4. Word is in category (e.g., "יין" in "יין לבן")
-      if (word.length >= 3 && cat.includes(word)) return true;
-      return false;
-    });
+    return !allCategories.some(cat => isVariationMatch(word, cat));
   });
   
   const isPerfectMatch = unmatchedWords.length === 0;
@@ -7198,6 +7312,65 @@ app.post("/search", async (req, res) => {
   const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט,ספרדי,איטלקי,צרפתי,פורטוגלי,ארגנטיני,צ'ילה,דרום אפריקה,אוסטרליה";
   const finalSoftCategories = softCategories || defaultSoftCategories;
   
+  // ============================================================
+  // 🚀 PHASE 0: FAST SIMPLE SEARCH (Regex/Perfect Match)
+  // We try this first. If it's a perfect match or LLM approved, we return it immediately.
+  // ============================================================
+  try {
+    const client = await getMongoClient();
+    const db = client.db(dbName);
+    const collection = db.collection(collectionName);
+    
+    const { results: simpleResults, isPerfectFilterMatch, filterCheck, queryWords } = 
+      await performSimpleSearch(db, collection, query, req.store, searchLimit);
+
+    if (simpleResults.length > 0) {
+      let approvedProducts = [];
+      let searchMode = '';
+
+      if (isPerfectFilterMatch) {
+        approvedProducts = simpleResults;
+        searchMode = 'perfect-filter-match';
+      } else {
+        // Only validate with LLM if it's NOT a perfect filter match
+        const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
+        if (validation.isGoodMatch && validation.validProducts.length > 0) {
+          approvedProducts = validation.validProducts.slice(0, searchLimit);
+          searchMode = 'simple-validated';
+        }
+      }
+
+      if (approvedProducts.length > 0) {
+        console.log(`[${requestId}] 🚀 [SEARCH] Simple search SUCCESS (${searchMode}) - returning ${approvedProducts.length} products`);
+        
+        // Apply personalization boost
+        let userProfile = null;
+        if (session_id) {
+          userProfile = await getUserProfileForBoosting(db, session_id);
+        }
+
+        const finalProducts = approvedProducts.map(p => {
+          const profileBoost = userProfile ? calculateProfileBoost(p, userProfile) : 0;
+          return {
+            ...p,
+            _id: p._id.toString(),
+            profileBoost,
+            highlight: true,
+            searchMode
+          };
+        }).sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+
+        return res.json(isModernMode ? {
+          products: finalProducts,
+          metadata: { query, requestId, executionTime: Date.now() - searchStartTime, searchMode, isPerfectFilterMatch }
+        } : finalProducts);
+      }
+    }
+    console.log(`[${requestId}] 🔍 [SEARCH] Simple search was not enough, falling back to full search logic`);
+  } catch (err) {
+    console.error(`[${requestId}] ⚠️ Simple search phase error:`, err.message);
+  }
+
   if (!query || !dbName || !collectionName) {
     return res.status(400).json({
       error: "Either apiKey **or** (dbName & collectionName) must be provided",
