@@ -1089,7 +1089,7 @@ async function executeOptimizedFilterOnlySearch(
 
 const buildAutocompletePipeline = (query, indexName, path, includePersonalizationFields = false) => {
   const pipeline = [];
-
+  
   pipeline.push({
     $search: {
       index: indexName,
@@ -1099,7 +1099,7 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
             text: {
         query: query,
         path: path,
-              score: {
+              score: { 
                 boost: { value: 100.0 }
               }
             }
@@ -1108,7 +1108,7 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
             text: {
               query: query,
               path: path,
-              score: {
+              score: { 
                 boost: { value: 5.0 }
               }
             }
@@ -1127,17 +1127,15 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
       }
     },
   });
-
+  
   pipeline.push({
     $match: {
       $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
     },
   });
   
-  pipeline.push(
-    { $limit: 5 },
-    {
-      $project: {
+  // Project fields - include softCategory for personalization when requested
+  const projectFields = {
         _id: 0,
         suggestion: `$${path}`,
         score: { $meta: "searchScore" },
@@ -1145,10 +1143,18 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
         image: 1,
         price: 1,
         id: 1,
-      },
-    }
-  );
+  };
 
+  // Include softCategory for personalization (only for products collection)
+  if (includePersonalizationFields) {
+    projectFields.softCategory = 1;
+  }
+
+  pipeline.push(
+    { $limit: 5 },
+    { $project: projectFields }
+  );
+  
   return pipeline;
 };
 
@@ -5948,14 +5954,25 @@ app.get("/autocomplete", async (req, res) => {
       collection1.aggregate(pipeline1).toArray(),
       collection2.aggregate(pipeline2).toArray(),
     ]);
-    const labeledSuggestions1 = suggestions1.map(item => ({
+
+    // 👤 PERSONALIZATION: Calculate profile boost for product suggestions
+    const labeledSuggestions1 = suggestions1.map(item => {
+      let profileBoost = 0;
+      if (userProfile && item.softCategory) {
+        profileBoost = calculateProfileBoost(item, userProfile);
+      }
+      return {
       suggestion: item.suggestion,
       score: item.score,
+        boostedScore: item.score + profileBoost, // Combined score for sorting
+        profileBoost: profileBoost,
       source: "products",
       url: item.url,
       price: item.price,
       image: item.image
-    }));
+      };
+    });
+
     const labeledSuggestions2 = suggestions2.map(item => ({
       suggestion: item.suggestion,
       score: item.score,
@@ -6614,56 +6631,336 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
 // ============================================================================
 // FAST SEARCH ENDPOINT - Optimized for speed (~10 products, <500ms response)
 // ============================================================================
+
+/**
+ * 🎯 LLM-BASED QUERY SPECIFICITY CLASSIFICATION
+ * Uses LLM to determine if a query is looking for a specific product/brand
+ * (should return few exact matches) or a broad category (should return more).
+ *
+ * Examples:
+ * - "glenmorangie" → specific_product (brand name) → return 1-3 exact matches
+ * - "israeli whisky" → broad_category (attribute search) → return up to 10
+ * - "coca cola" → specific_product → return 1-3 exact matches
+ * - "organic wine" → broad_category → return up to 10
+ *
+ * @param {string} query - The search query
+ * @param {string} context - Store context (e.g., "wine shop")
+ * @returns {Object} { searchType: 'specific_product'|'broad_category', maxResults: number, reason: string }
+ */
+async function classifyQuerySpecificity(query, context = "e-commerce") {
+  const cacheKey = generateCacheKey('specificity', query, context);
+
+  return withCache(cacheKey, async () => {
+    try {
+      // Check circuit breaker
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        console.log(`[SPECIFICITY] Circuit breaker open, using fallback for: "${query}"`);
+        return classifySpecificityFallback(query);
+      }
+
+      const systemInstruction = `You are an expert at analyzing e-commerce search queries to determine if the user is looking for a SPECIFIC product/brand or browsing a BROAD category.
+
+Context: ${context}
+
+SPECIFIC_PRODUCT queries are:
+- Brand names (e.g., "glenmorangie", "coca cola", "absolut vodka", "ברקן")
+- Specific product names or model numbers (e.g., "iPhone 14 Pro", "macallan 18")
+- Misspelled brand names (e.g., "glanmourangy" = Glenmorangie, "jonnie walker" = Johnnie Walker)
+- When the user clearly wants ONE specific thing, not variety
+
+BROAD_CATEGORY queries are:
+- Category + attribute searches (e.g., "israeli whisky", "organic wine", "יין אדום")
+- Descriptive searches (e.g., "sweet wine", "strong coffee", "cheap beer")
+- Geographic/origin searches (e.g., "french wine", "scottish whisky")
+- Use-case searches (e.g., "wine for dinner", "gift whisky")
+- General categories (e.g., "red wine", "single malt")
+
+Return your classification. For specific_product, also estimate how many exact matches likely exist (usually 1-5).`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-2.5-flash-lite", // Use fast model for quick classification
+        contents: [{ text: query }],
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              searchType: {
+                type: Type.STRING,
+                enum: ["specific_product", "broad_category"],
+                description: "Whether user wants a specific product or is browsing a category"
+              },
+              maxResults: {
+                type: Type.NUMBER,
+                description: "Recommended max results: 1-5 for specific_product, 10 for broad_category"
+              },
+              reason: {
+                type: Type.STRING,
+                description: "Brief explanation of classification"
+              }
+            },
+            required: ["searchType", "maxResults", "reason"]
+          }
+        }
+      });
+
+      let text = response.text ? response.text.trim() : null;
+
+      if (!text && response.candidates && response.candidates[0]) {
+        const candidate = response.candidates[0];
+        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+          text = candidate.content.parts[0].text;
+        }
+      }
+
+      if (!text) {
+        throw new Error("No text content in response");
+      }
+
+      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+      const result = JSON.parse(text);
+
+      aiCircuitBreaker.recordSuccess();
+
+      // Ensure maxResults is within bounds
+      result.maxResults = Math.min(Math.max(result.maxResults || 10, 1), 10);
+
+      console.log(`[SPECIFICITY] Query "${query}" → ${result.searchType} (max ${result.maxResults}): ${result.reason}`);
+
+      return result;
+    } catch (error) {
+      console.error("[SPECIFICITY] Error classifying query:", error.message);
+      aiCircuitBreaker.recordFailure();
+      return classifySpecificityFallback(query);
+    }
+  }, 7200); // Cache for 2 hours
+}
+
+/**
+ * Fallback classification when LLM is unavailable
+ */
+function classifySpecificityFallback(query) {
+  const lowerQuery = query.toLowerCase().trim();
+  const words = lowerQuery.split(/\s+/);
+
+  // Heuristic: Single word queries are often brand/product names
+  // Multi-word queries with adjectives are often category searches
+  const descriptiveWords = ['cheap', 'expensive', 'good', 'best', 'organic', 'natural', 'sweet', 'dry', 'strong', 'light', 'israeli', 'french', 'italian', 'scottish', 'red', 'white', 'יין', 'אדום', 'לבן', 'מתוק', 'יבש', 'ישראלי', 'צרפתי'];
+
+  const hasDescriptiveWord = words.some(w => descriptiveWords.includes(w));
+
+  if (words.length === 1 && !hasDescriptiveWord) {
+    return {
+      searchType: 'specific_product',
+      maxResults: 3,
+      reason: 'Single word query - likely brand/product name (fallback)'
+    };
+  }
+
+  if (hasDescriptiveWord) {
+    return {
+      searchType: 'broad_category',
+      maxResults: 10,
+      reason: 'Contains descriptive/category words (fallback)'
+    };
+  }
+
+  // Default to broad for multi-word queries
+  return {
+    searchType: words.length <= 2 ? 'specific_product' : 'broad_category',
+    maxResults: words.length <= 2 ? 5 : 10,
+    reason: 'Heuristic based on query length (fallback)'
+  };
+}
+
 app.post("/fast-search", async (req, res) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
 
   try {
     let { query, session_id } = req.body;
-    const FAST_LIMIT = 10; // Return 10 products (was 5) - more variety with Tier 2
-    
+    const FAST_LIMIT = 10;
+
     if (!query || query.trim() === "") {
       return res.status(400).json({ error: "Query is required" });
     }
 
-    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (will return max ${FAST_LIMIT} products - using fast LLM model + aggressive expansion)${session_id ? ` 👤 [personalized for ${session_id}]` : ''}`);
+    console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (limit: ${FAST_LIMIT})${session_id ? ` 👤 [personalized]` : ''}`);
+
+    // ============================================================
+    // STEP 1: Try simple-search (fast FUZZY regex-based search)
+    // ============================================================
+    const client = await getMongoClient();
+    const db = client.db(req.store.dbName);
+    const collection = db.collection(req.store.products);
+
+    const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
     
-    // Use faster LLM model (gemini-2.5-flash-lite) for reordering
+    // 🎯 Check perfect filter match FIRST to decide limit
+    const filterCheck = detectPerfectFilterMatch(
+      query,
+      req.store.categories || [],
+      req.store.softCategories || []
+    );
+    const isPerfectFilterMatch = filterCheck.isPerfectMatch;
+    
+    let simpleResults = [];
+    if (queryWords.length > 0) {
+      // Generate fuzzy patterns for each word
+      const fuzzyPatterns = queryWords.map(word => ({
+        exact: word,
+        fuzzy: generateFuzzyRegex(word)
+      }));
+      
+      console.log(`[${requestId}] 🔍 Fuzzy patterns:`, fuzzyPatterns.map(p => `${p.exact} → ${p.fuzzy}`).join(', '));
+      
+      // 🎯 If PERFECT MATCH → No limit (1000), else small limit for LLM validation (15)
+      const currentLimit = isPerfectFilterMatch ? 1000 : 15;
+      
+      simpleResults = await collection.find({
+        $and: fuzzyPatterns.map(pattern => ({
+          $or: [
+            { name: { $regex: pattern.fuzzy, $options: 'i' } },
+            { category: { $regex: pattern.fuzzy, $options: 'i' } },
+            { softCategory: { $regex: pattern.fuzzy, $options: 'i' } }
+          ]
+        }))
+      }).limit(currentLimit).toArray();
+      
+      console.log(`[${requestId}] 📋 Simple fuzzy search found ${simpleResults.length} matches (Limit: ${currentLimit})`);
+    }
+
+    // ============================================================
+    // STEP 2: Handle Results
+    // If ALL query words match categories → BROAD search (return all)
+    // If ANY word doesn't match → SPECIFIC search (LLM validation)
+    // ============================================================
+    let shouldUseSimpleResults = false;
+    let validatedProducts = [];
+
+    if (simpleResults.length > 0) {
+      if (isPerfectFilterMatch) {
+        // 🎯 PERFECT MATCH → Return ALL results (BROAD search)
+        shouldUseSimpleResults = true;
+        validatedProducts = simpleResults; // No slicing!
+        console.log(`[${requestId}] 🎯 PERFECT FILTER MATCH (BROAD): All words match categories → returning ALL ${validatedProducts.length} products`);
+      } else {
+        // 🎯 NOT PERFECT → LLM validates (SPECIFIC search)
+        console.log(`[${requestId}] 🔍 NOT perfect filter match (${filterCheck.unmatchedWords.length} unmatched: ${filterCheck.unmatchedWords.join(', ')}) → LLM validation`);
+        
+        const validationStart = Date.now();
+        const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
+        const validationTime = Date.now() - validationStart;
+
+        if (validation.isGoodMatch && validation.validProducts.length > 0) {
+          shouldUseSimpleResults = true;
+          validatedProducts = validation.validProducts.slice(0, FAST_LIMIT);
+          console.log(`[${requestId}] ✅ LLM APPROVED simple results (${validationTime}ms): ${validation.validProducts.length} products - ${validation.reason}`);
+        } else {
+          console.log(`[${requestId}] ❌ LLM REJECTED simple results (${validationTime}ms): ${validation.reason} - falling back to full search`);
+        }
+      }
+    } else {
+      console.log(`[${requestId}] 📋 No simple results found - falling back to full search`);
+    }
+
+    // ============================================================
+    // STEP 3a: If LLM approved → Apply personalization & return
+    // ============================================================
+    if (shouldUseSimpleResults) {
+      // Apply personalization if session_id provided
+      let userProfile = null;
+      if (session_id) {
+        userProfile = await getUserProfileForBoosting(db, session_id);
+      }
+
+      const productsWithBoost = validatedProducts.map(product => {
+        const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+        return {
+          _id: product._id.toString(),
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          price: product.price,
+          image: product.image,
+          url: product.url,
+          type: product.type,
+          category: product.category,
+          softCategory: product.softCategory,
+          specialSales: product.specialSales,
+          onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+          ItemID: product.ItemID,
+          profileBoost: profileBoost,
+          highlight: true, // Textual match
+          fastSearchMode: 'simple-validated'
+        };
+      });
+
+      // Sort by profileBoost (personalization)
+      productsWithBoost.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+
+      const executionTime = Date.now() - searchStartTime;
+      const personalizedCount = productsWithBoost.filter(p => (p.profileBoost || 0) > 0).length;
+
+      const searchMode = isPerfectFilterMatch ? 'perfect-filter-match' : 'simple-validated';
+      console.log(`[${requestId}] ⚡ FAST SEARCH (${searchMode}) completed in ${executionTime}ms - returning ${productsWithBoost.length} products`);
+
+      return res.json({
+        products: productsWithBoost,
+        metadata: {
+          query,
+          requestId,
+          executionTime,
+          isFastSearch: true,
+          searchMode: searchMode,
+          isPerfectFilterMatch: isPerfectFilterMatch,
+          personalizedResults: personalizedCount > 0,
+          personalizedCount: personalizedCount
+        }
+      });
+    }
+
+    // ============================================================
+    // STEP 3b: If LLM rejected → Fall back to full /search
+    // ============================================================
+    console.log(`[${requestId}] 🔄 Falling back to full /search (complex query path)`);
+
+    // Use faster LLM model for reordering
     req.body.modern = true;
     req.body.limit = FAST_LIMIT;
-    req.body.useFastLLM = true; // Signal to use gemini-2.5-flash-lite instead of gemini-2.5-flash
-    req.body.fastSearchMode = true; // Signal for aggressive Tier 2 expansion with soft category + vector boost
-    // 👤 PERSONALIZATION: Ensure session_id is passed through to /search
-    if (session_id) {
-      req.body.session_id = session_id;
-    }
-    
-    // Temporarily override store limit
+    req.body.useFastLLM = true;
+    req.body.fastSearchMode = true;
+
+    // 🚀 CRITICAL: Disable explanations in fast search for maximum speed
     const originalLimit = req.store.limit;
     const originalExplain = req.store.explain;
     req.store.limit = FAST_LIMIT;
-    
-    // Create a custom response handler to intercept /search response
+    req.store.explain = false;
+
     const originalJson = res.json.bind(res);
     let responseSent = false;
 
     res.json = function(data) {
       if (responseSent) return;
       responseSent = true;
-      
-      // Restore original limit
+
+      // Restore original store settings
       req.store.limit = originalLimit;
-      
-      // Extract products and ensure we only return FAST_LIMIT
-      const products = (data.products || []).slice(0, FAST_LIMIT);
+      req.store.explain = originalExplain;
+
+      const allProducts = data.products || [];
+      const products = allProducts.slice(0, FAST_LIMIT);
+
       const executionTime = Date.now() - searchStartTime;
-      
-      // 👤 PERSONALIZATION: Count personalized products
       const personalizedCount = products.filter(p => (p.profileBoost || 0) > 0).length;
-      
-      console.log(`[${requestId}] ⚡ FAST SEARCH completed in ${executionTime}ms - returning ${products.length} products${personalizedCount > 0 ? ` (${personalizedCount} personalized)` : ''}`);
-      
-      // Return in simplified format
+
+      console.log(`[${requestId}] ⚡ FAST SEARCH (full-search fallback) completed in ${executionTime}ms - returning ${products.length} products`);
+
       return originalJson({
         products: products,
         metadata: {
@@ -6671,7 +6968,8 @@ app.post("/fast-search", async (req, res) => {
           requestId,
           executionTime,
           isFastSearch: true,
-          personalizedResults: personalizedCount > 0, // 👤 Indicate if personalization was applied
+          searchMode: 'full-search-fallback',
+          personalizedResults: personalizedCount > 0,
           personalizedCount: personalizedCount
         }
       });
@@ -7964,30 +8262,30 @@ app.post("/search", async (req, res) => {
                   // Fallback: No soft categories AND no good text matches - use combined fuzzy + vector search
                   console.log(`[${requestId}] No soft categories and no strong text matches, using combined fuzzy + vector search`);
 
-                  const searchPromises = [
-                    collection.aggregate(buildStandardSearchPipeline(
-                      cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
-                    )).toArray(),
-                    collection.aggregate(buildStandardVectorSearchPipeline(
-                      queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
-                    )).toArray()
-                  ];
+                const searchPromises = [
+                  collection.aggregate(buildStandardSearchPipeline(
+                    cleanedTextForSearch, query, categoryFilteredHardFilters, searchLimit, true, syncMode === 'image'
+                  )).toArray(),
+                  collection.aggregate(buildStandardVectorSearchPipeline(
+                    queryEmbedding, categoryFilteredHardFilters, vectorLimit, true
+                  )).toArray()
+                ];
 
-                  const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
+                const [fuzzyRes, vectorRes] = await Promise.all(searchPromises);
 
-                  const docRanks = new Map();
-                  fuzzyRes.forEach((doc, index) => {
-                    docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
-                  });
-                  vectorRes.forEach((doc, index) => {
-                    const id = doc._id.toString();
-                    const existing = docRanks.get(id);
-                    if (existing) {
-                      existing.vectorRank = index;
-                    } else {
-                      docRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
-                    }
-                  });
+                const docRanks = new Map();
+                fuzzyRes.forEach((doc, index) => {
+                  docRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
+                });
+                vectorRes.forEach((doc, index) => {
+                  const id = doc._id.toString();
+                  const existing = docRanks.get(id);
+                  if (existing) {
+                    existing.vectorRank = index;
+                  } else {
+                    docRanks.set(id, { fuzzyRank: Infinity, vectorRank: index, doc });
+                  }
+                });
 
                 categoryFilteredResults = Array.from(docRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
                   const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
@@ -8001,6 +8299,7 @@ app.post("/search", async (req, res) => {
                     vectorRank: vectorRank
                   };
                 }).sort((a, b) => b.rrf_score - a.rrf_score);
+                }
               } else {
                 // PERFORMANCE OPTIMIZATION: For simple queries, skip vector search entirely
                 // Only do text-based fuzzy search with category filters
