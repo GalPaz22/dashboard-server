@@ -7199,6 +7199,9 @@ app.post("/simple-search", async (req, res) => {
       // Apply personalization boost
       const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
       
+      // Calculate exact match bonus for specific searches
+      const exactMatchBonus = getExactMatchBonus(product.name, query, query);
+      
       return {
         _id: product._id.toString(),
         id: product.id,
@@ -7214,14 +7217,32 @@ app.post("/simple-search", async (req, res) => {
         onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
         ItemID: product.ItemID,
         profileBoost: profileBoost,
+        exactMatchBonus: exactMatchBonus,
         highlight: true
       };
     });
 
-    // Sort by profileBoost if personalization is active
-    if (userProfile) {
-      response.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
-    }
+    // 🎯 SMART SORTING: Balance textual relevance with personalization
+    response.sort((a, b) => {
+      // If it's a perfect filter match (BROAD search), personalization is the main factor
+      if (isPerfectFilterMatch) {
+        return (b.profileBoost || 0) - (a.profileBoost || 0);
+      }
+      
+      // For SPECIFIC searches, prioritize strong textual matches
+      const bonusA = a.exactMatchBonus || 0;
+      const bonusB = b.exactMatchBonus || 0;
+      
+      // Use tiers to ensure personalization doesn't jump over exact matches
+      const getTier = (b) => (b >= 1000 ? (b >= 20000 ? 1 : 2) : 3);
+      const tierA = getTier(bonusA);
+      const tierB = getTier(bonusB);
+      
+      if (tierA !== tierB) return tierA - tierB;
+      
+      // Within same tier, personalization decides the order
+      return (b.profileBoost || 0) - (a.profileBoost || 0) || (bonusB - bonusA);
+    });
 
     console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
