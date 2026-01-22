@@ -9,13 +9,12 @@ POST /site-config
 ```
 
 ## Authentication
-Requires `X-API-Key` header with valid API key.
+Requires `X-API-Key` header with valid API key. The `dbName` is automatically retrieved from the API key.
 
 ## Request Body
+Empty body (or empty JSON `{}`):
 ```json
-{
-  "dbName": "your-database-name"
-}
+{}
 ```
 
 ## Response
@@ -49,24 +48,17 @@ Returns the `siteConfig` object from the user's credentials:
 }
 ```
 
-#### 400 - Missing dbName
+#### 404 - User Credentials Not Found
 ```json
 {
-  "error": "Missing dbName"
-}
-```
-
-#### 403 - dbName Not Allowed
-```json
-{
-  "error": "dbName not allowed for this API key"
+  "error": "User credentials not found"
 }
 ```
 
 #### 404 - Site Config Not Found
 ```json
 {
-  "error": "siteConfig not found for this dbName"
+  "error": "siteConfig not found"
 }
 ```
 
@@ -87,9 +79,7 @@ const response = await fetch('http://localhost:8080/site-config', {
     'Content-Type': 'application/json',
     'X-API-Key': 'your-api-key-here'
   },
-  body: JSON.stringify({
-    dbName: 'your-database-name'
-  })
+  body: JSON.stringify({})
 });
 
 const siteConfig = await response.json();
@@ -101,9 +91,7 @@ console.log('Site Config:', siteConfig);
 curl -X POST http://localhost:8080/site-config \
   -H "Content-Type: application/json" \
   -H "X-API-Key: your-api-key-here" \
-  -d '{
-    "dbName": "your-database-name"
-  }'
+  -d '{}'
 ```
 
 ## Database Structure
