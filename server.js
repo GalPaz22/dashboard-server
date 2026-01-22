@@ -3733,7 +3733,8 @@ async function reorderResultsWithGPT(
   softFilters = null,
   maxResults = 12, // 🎯 REDUCED: 12 products is the sweet spot for speed vs quality
   useFastLLM = true, // 🎯 DEFAULT TO TRUE: Always use the fast model for reranking
-  userProfile = null // 👤 PERSONALIZATION: User profile for personalized ranking
+  userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
+  isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
 ) {
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
@@ -3794,8 +3795,8 @@ async function reorderResultsWithGPT(
       ? `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
-- Return EXACTLY 4 products maximum. NO MORE THAN 4 PRODUCTS EVER.
-- If given more products, select only the 4 most relevant ones.
+- Return EXACTLY ${isEmergencyMode ? 15 : 4} products maximum. NO MORE THAN ${isEmergencyMode ? 15 : 4} PRODUCTS EVER.
+- If given more products, select only the ${isEmergencyMode ? 15 : 4} most relevant ones.
 - You must respond in the EXACT same language as the search query.
 - Explanations must be in the same language as the query (Hebrew if query is Hebrew, English if query is English).
 
@@ -3818,15 +3819,15 @@ The search query intent to analyze is provided separately in the user content.`
       : `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
-- Return EXACTLY 4 products maximum. NO MORE THAN 4 PRODUCTS EVER.
-- If given more products, select only the 4 most relevant ones.
+- Return EXACTLY ${isEmergencyMode ? 15 : 4} products maximum. NO MORE THAN ${isEmergencyMode ? 15 : 4} PRODUCTS EVER.
+- If given more products, select only the ${isEmergencyMode ? 15 : 4} most relevant ones.
 - You must respond in the EXACT same language as the search query.
 
 STRICT RULES:
 - You must ONLY rank products based on their relevance to the search intent
 - Products with "softFilterMatch": true are highly relevant suggestions that matched specific criteria. Prioritize them unless they are clearly irrelevant to the query.
 - You must ONLY return valid JSON in the exact format specified
-- If there are less than 4 relevant products, return only the relevant ones. If there are no relevant products, return an empty array.
+|- If there are less than ${isEmergencyMode ? 15 : 4} relevant products, return only the relevant ones. If there are no relevant products, return an empty array.
 
 Context: ${context}${softCategoryContext}${personalizationContext}
 
@@ -3843,7 +3844,7 @@ ${JSON.stringify(productData, null, 2)}`;
     const responseSchema = explain 
       ? {
           type: Type.ARRAY,
-          maxItems: 4,
+          maxItems: isEmergencyMode ? 15 : 4,
           items: {
             type: Type.OBJECT,
             properties: {
@@ -3861,7 +3862,7 @@ ${JSON.stringify(productData, null, 2)}`;
         }
       : {
           type: Type.ARRAY,
-          maxItems: 4,
+          maxItems: isEmergencyMode ? 15 : 4,
           items: {
             type: Type.OBJECT,
             properties: {
@@ -3942,7 +3943,8 @@ async function reorderImagesWithGPT(
   softFilters = null,
   maxResults = 12, // 🎯 REDUCED for speed
   useFastLLM = true, // 🎯 DEFAULT to fast model
-  userProfile = null // 👤 PERSONALIZATION: User profile for personalized ranking
+  userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
+  isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
 ) {
  try {
    if (!Array.isArray(alreadyDelivered)) {
@@ -7158,13 +7160,35 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     return false;
   };
   
+  const matchedHardCategories = [];
+  const matchedSoftCategories = [];
+
   const unmatchedWords = queryWords.filter(word => {
-    return !allCategories.some(cat => isVariationMatch(word, cat));
+    // Check hard categories first
+    const hardMatch = normalizedHardCategories.find(cat => isVariationMatch(word, cat));
+    if (hardMatch) {
+      matchedHardCategories.push(hardMatch);
+      return false;
+    }
+    
+    // Check soft categories
+    const softMatch = normalizedSoftCategories.find(cat => isVariationMatch(word, cat));
+    if (softMatch) {
+      matchedSoftCategories.push(softMatch);
+      return false;
+    }
+    
+    return true;
   });
   
   const isPerfectMatch = unmatchedWords.length === 0;
   
-  return { isPerfectMatch, unmatchedWords };
+  return { 
+    isPerfectMatch, 
+    unmatchedWords,
+    matchedHardCategories: [...new Set(matchedHardCategories)],
+    matchedSoftCategories: [...new Set(matchedSoftCategories)]
+  };
 }
 
 app.post("/simple-search", async (req, res) => {
@@ -7339,6 +7363,93 @@ app.post("/search", async (req, res) => {
         }
       }
 
+      // 🎯 EMERGENCY FALLBACK: If results < 5 and a hard category was extracted,
+      // trigger a lightning-fast semantic expansion
+      const shouldTriggerEmergencyExpansion = (approvedProducts.length < 5 || simpleResults.length < 5) && 
+                                              filterCheck.matchedHardCategories && 
+                                              filterCheck.matchedHardCategories.length > 0;
+
+      if (shouldTriggerEmergencyExpansion) {
+        console.log(`[${requestId}] ⚠️ EMERGENCY EXPANSION: Low results (${approvedProducts.length}) for hard category search "${query}". Running ultra-fast semantic fallback.`);
+        
+        try {
+          const emergencyStartTime = Date.now();
+          
+          // Step 1: Parallel extraction and embedding (fastest possible)
+          const [extractedFilters, queryEmbedding] = await Promise.all([
+            extractFiltersBrief(query, categories, types, finalSoftCategories, 'wine shop'),
+            getQueryEmbedding(query)
+          ]);
+
+          if (queryEmbedding) {
+            // Step 2: Limited vector search (20 results)
+            const emergencyLimit = 20;
+            
+            // 🎯 RELAX FILTERS: In emergency mode, if we have very few results, 
+            // we use the embedding to find similar products but DON'T strictly enforce the hard category
+            // This allows us to find "sweet" things that aren't strictly in the "syrup" category
+            const relaxedFilters = { ...extractedFilters };
+            delete relaxedFilters.category; 
+            delete relaxedFilters.type;
+
+            const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, relaxedFilters, emergencyLimit, true);
+            const emergencyResults = await collection.aggregate(vectorPipeline).toArray();
+            
+            if (emergencyResults.length > 0) {
+              // Step 3: Fast Rerank (Flash-Lite)
+              // Combine with existing simple results to ensure they stay top
+              const combinedForRerank = [...approvedProducts];
+              const seenIds = new Set(approvedProducts.map(p => p._id.toString()));
+              
+              emergencyResults.forEach(p => {
+                if (!seenIds.has(p._id.toString())) {
+                  combinedForRerank.push(p);
+                }
+              });
+
+              const reranked = await reorderResultsWithGPT(
+                combinedForRerank,
+                query, // translatedQuery
+                query,
+                [], // alreadyDelivered
+                false, // explain
+                'wine shop',
+                extractedFilters,
+                15, // maxResults 🎯 Allow more for emergency
+                true, // useFastLLM
+                null, // userProfile
+                true  // 🎯 NEW PARAM: isEmergencyMode (to bypass 4-item limit)
+              );
+
+              if (reranked && reranked.length > 0) {
+                console.log(`[${requestId}] 📊 EMERGENCY: LLM reranked ${reranked.length} products from ${combinedForRerank.length} candidates`);
+                const rerankedIds = reranked.map(r => r._id);
+                approvedProducts = combinedForRerank
+                  .sort((a, b) => {
+                    const indexA = rerankedIds.indexOf(a._id.toString());
+                    const indexB = rerankedIds.indexOf(b._id.toString());
+                    if (indexA === -1 && indexB === -1) return 0;
+                    if (indexA === -1) return 1;
+                    if (indexB === -1) return -1;
+                    return indexA - indexB;
+                  })
+                  .slice(0, 15); // 🎯 CRITICAL: Take top 15 from reranked results
+                
+                // 🎯 Mark as emergency expanded to skip final sorting
+                approvedProducts.forEach(p => p.isEmergencyResult = true);
+                
+                searchMode = `${searchMode || 'emergency'}-semantic-expanded`;
+                console.log(`[${requestId}] ✅ EMERGENCY EXPANSION SUCCESS in ${Date.now() - emergencyStartTime}ms. Final count: ${approvedProducts.length} products.`);
+              } else {
+                console.log(`[${requestId}] ⚠️ EMERGENCY: LLM returned ${reranked?.length || 0} products - keeping original ${approvedProducts.length}`);
+              }
+            }
+          }
+        } catch (emergencyErr) {
+          console.warn(`[${requestId}] ⚠️ Emergency expansion failed, returning original small result set:`, emergencyErr.message);
+        }
+      }
+
       if (approvedProducts.length > 0) {
         console.log(`[${requestId}] 🚀 [SEARCH] Simple search SUCCESS (${searchMode}) - returning ${approvedProducts.length} products`);
         
@@ -7357,7 +7468,12 @@ app.post("/search", async (req, res) => {
             highlight: true,
             searchMode
           };
-        }).sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+        });
+
+        // 🎯 Skip sorting if emergency expansion already handled it
+        if (!approvedProducts[0]?.isEmergencyResult) {
+          finalProducts.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+        }
 
         return res.json(isModernMode ? {
           products: finalProducts,
