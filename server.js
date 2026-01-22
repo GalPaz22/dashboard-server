@@ -21,6 +21,10 @@ dotenv.config();
 let redisClient = null;
 let redisReady = false;
 
+let redisConnectionFailed = false;
+let redisErrorCount = 0;
+const MAX_REDIS_ERRORS = 10;
+
 async function initializeRedis() {
   const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
   
@@ -29,36 +33,56 @@ async function initializeRedis() {
       url: redisUrl,
       socket: {
         reconnectStrategy: (retries) => {
-          if (retries > 10) {
-            console.error('[REDIS] Too many reconnection attempts, giving up');
-            return new Error('Redis reconnection failed');
+          // 🎯 CRITICAL: Stop reconnection after 3 attempts to prevent memory leaks
+          if (retries > 3) {
+            console.error('[REDIS] Too many reconnection attempts, giving up permanently');
+            redisConnectionFailed = true;
+            redisReady = false;
+            return false; // Stop reconnecting
           }
-          const delay = Math.min(retries * 100, 3000);
+          const delay = Math.min(retries * 1000, 3000);
           console.log(`[REDIS] Reconnecting in ${delay}ms... (attempt ${retries})`);
           return delay;
         },
-        connectTimeout: 10000,
+        connectTimeout: 5000, // Reduced from 10s to 5s
       },
-      // Enable offline queue to buffer commands when disconnected
-      enableOfflineQueue: true,
+      // 🎯 CRITICAL: Disable offline queue to prevent memory buildup
+      enableOfflineQueue: false,
     });
 
+    // 🎯 CRITICAL: Set max listeners to prevent memory leak warnings
+    redisClient.setMaxListeners(5);
+
     redisClient.on('error', (err) => {
-      console.error('[REDIS] Error:', err.message);
+      redisErrorCount++;
+      // 🎯 Only log first few errors to prevent log spam
+      if (redisErrorCount <= MAX_REDIS_ERRORS && !redisConnectionFailed) {
+        console.error(`[REDIS] Error (${redisErrorCount}/${MAX_REDIS_ERRORS}):`, err.message);
+      }
+      if (redisErrorCount > MAX_REDIS_ERRORS && !redisConnectionFailed) {
+        console.error('[REDIS] Too many errors, suppressing further error logs');
+        redisConnectionFailed = true;
+      }
       redisReady = false;
     });
 
     redisClient.on('connect', () => {
       console.log('[REDIS] Connecting...');
+      redisConnectionFailed = false;
+      redisErrorCount = 0; // Reset error count on successful connection
     });
 
     redisClient.on('ready', () => {
       console.log('[REDIS] Ready and connected successfully');
       redisReady = true;
+      redisConnectionFailed = false;
+      redisErrorCount = 0;
     });
 
     redisClient.on('reconnecting', () => {
-      console.log('[REDIS] Reconnecting...');
+      if (!redisConnectionFailed) {
+        console.log('[REDIS] Reconnecting...');
+      }
       redisReady = false;
     });
 
@@ -72,7 +96,20 @@ async function initializeRedis() {
     
   } catch (error) {
     console.error('[REDIS] Failed to initialize:', error.message);
-    console.error('[REDIS] Caching will be disabled. Please check your Redis configuration.');
+    console.error('[REDIS] Caching will be disabled. Server will continue without Redis.');
+    redisConnectionFailed = true;
+    redisReady = false;
+    // 🎯 CRITICAL: Clean up failed client to prevent memory leaks
+    if (redisClient) {
+      try {
+        // Remove all listeners before disconnecting
+        redisClient.removeAllListeners();
+        await redisClient.disconnect();
+      } catch (e) {
+        // Ignore cleanup errors
+      }
+      redisClient = null;
+    }
   }
 }
 
@@ -389,6 +426,12 @@ async function clearAllCache() {
 
 // Cache warming function for common queries
 async function warmCache() {
+  // 🎯 CRITICAL: Skip cache warming if Redis is not available
+  if (!redisClient || !redisReady || redisConnectionFailed) {
+    console.log('[CACHE WARM] Skipping - Redis not available');
+    return;
+  }
+  
   console.log('[CACHE WARM] Starting cache warming...');
   
   const commonQueries = [
@@ -11968,7 +12011,7 @@ const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
   
-  // Warm cache on startup
+  // Warm cache on startup (only if Redis is available)
   setTimeout(async () => {
     try {
       await warmCache();
@@ -11976,6 +12019,27 @@ const server = app.listen(PORT, async () => {
       console.error('Cache warming failed on startup:', error);
     }
   }, 5000);
+  
+  // 🎯 MEMORY MANAGEMENT: Monitor and log memory usage every 30 minutes
+  setInterval(() => {
+    const memUsage = process.memoryUsage();
+    const heapUsedMB = Math.round(memUsage.heapUsed / 1024 / 1024);
+    const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
+    const rssMB = Math.round(memUsage.rss / 1024 / 1024);
+    
+    console.log(`[MEMORY] Heap: ${heapUsedMB}MB / ${heapTotalMB}MB | RSS: ${rssMB}MB`);
+    
+    // 🎯 WARNING: If memory usage is high, trigger garbage collection
+    if (heapUsedMB > 400) {
+      console.warn(`[MEMORY WARNING] High heap usage: ${heapUsedMB}MB - consider restarting server`);
+    }
+    
+    // 🎯 Force garbage collection if available (run node with --expose-gc flag)
+    if (global.gc && heapUsedMB > 300) {
+      console.log('[MEMORY] Forcing garbage collection...');
+      global.gc();
+    }
+  }, 30 * 60 * 1000); // Every 30 minutes
 });
 
 /* =========================================================== *\
