@@ -802,13 +802,61 @@ async function authenticate(req, res, next) {
   }
 }
 
+// 🔧 NEW ENDPOINT: Get site config from credentials
+app.post("/site-config", async (req, res) => {
+  try {
+    const apiKey = req.get("X-API-Key");
+    const dbName = String(req.body?.dbName || "").trim();
+
+    if (!apiKey) {
+      return res.status(401).json({ error: "Missing X-API-Key" });
+    }
+    if (!dbName) {
+      return res.status(400).json({ error: "Missing dbName" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const coreDb = client.db("users");
+    const user = await coreDb.collection("users").findOne(
+      { apiKey },
+      { projection: { apiKey: 1, credentials: 1, dbName: 1 } }
+    );
+
+    if (!user) {
+      return res.status(401).json({ error: "Invalid API key" });
+    }
+
+    // Verify dbName matches
+    const cred = user.credentials || {};
+    if (String(user.dbName || "") !== dbName) {
+      return res.status(403).json({ error: "dbName not allowed for this API key" });
+    }
+
+    const siteConfig = cred.siteConfig || null;
+
+    if (!siteConfig) {
+      return res.status(404).json({ error: "siteConfig not found for this dbName" });
+    }
+
+    console.log(`[SITE-CONFIG] ✅ Retrieved config for dbName: ${dbName}`);
+    
+    // Return only what the client needs
+    return res.json(siteConfig);
+
+  } catch (err) {
+    console.error("[SITE-CONFIG] Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 // Apply authentication to all routes except test endpoints, health, cache management, and webhooks
 app.use((req, res, next) => {
   if (req.path.startsWith('/test-') ||
       req.path === '/health' ||
       req.path === '/clear-cache' ||
       req.path.startsWith('/cache/') ||
-      req.path.startsWith('/webhooks/')) {
+      req.path.startsWith('/webhooks/') ||
+      req.path === '/site-config') { // 🔧 Allow /site-config to handle its own auth
     return next();
   }
   return authenticate(req, res, next);
@@ -7395,7 +7443,8 @@ app.post("/search", async (req, res) => {
       let searchMode = '';
 
       if (isPerfectFilterMatch) {
-        approvedProducts = simpleResults;
+        // 🎯 LIMIT: Cap perfect filter match results at 50 to prevent memory issues
+        approvedProducts = simpleResults.slice(0, 50);
         searchMode = 'perfect-filter-match';
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
