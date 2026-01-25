@@ -6934,40 +6934,52 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
     
     // 🎯 PERFECT FILTER MATCH: Search by extracted categories, not original words
     if (isPerfectFilterMatch) {
-      const categoryConditions = [];
+      const andConditions = [
+        // Stock status filter: instock OR no stockStatus field
+        {
+          $or: [
+            { stockStatus: "instock" },
+            { stockStatus: { $exists: false } }
+          ]
+        }
+      ];
       
-      // Add hard categories to search
+      // 🎯 CRITICAL: Hard categories are MANDATORY (AND condition)
       if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
         filterCheck.matchedHardCategories.forEach(cat => {
-          categoryConditions.push({ category: { $regex: cat, $options: 'i' } });
-          categoryConditions.push({ type: { $regex: cat, $options: 'i' } });
-        });
-      }
-      
-      // Add soft categories to search
-      if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
-        filterCheck.matchedSoftCategories.forEach(cat => {
-          categoryConditions.push({ softCategory: { $regex: cat, $options: 'i' } });
-        });
-      }
-      
-      searchQuery = {
-        $and: [
-          // Stock status filter: instock OR no stockStatus field
-          {
+          // Each hard category must match in either 'category' OR 'type' field
+          andConditions.push({
             $or: [
-              { stockStatus: "instock" },
-              { stockStatus: { $exists: false } }
+              { category: { $regex: cat, $options: 'i' } },
+              { type: { $regex: cat, $options: 'i' } }
             ]
-          },
-          // Match any of the extracted categories
-          categoryConditions.length > 0 ? { $or: categoryConditions } : {}
-        ]
-      };
+          });
+        });
+      }
+      
+      // 🎯 Soft categories are OPTIONAL (only add if no hard categories, or as additional filter)
+      if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
+        const softConditions = filterCheck.matchedSoftCategories.map(cat => ({
+          softCategory: { $regex: cat, $options: 'i' }
+        }));
+        
+        // If there are hard categories, soft categories are additional AND filters
+        // If there are NO hard categories, soft categories are OR filters
+        if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
+          // With hard categories: require at least one soft category match (AND)
+          andConditions.push({ $or: softConditions });
+        } else {
+          // Without hard categories: match any soft category (OR)
+          andConditions.push({ $or: softConditions });
+        }
+      }
+      
+      searchQuery = { $and: andConditions };
       
       console.log(`[SIMPLE-SEARCH] Perfect match - searching by categories:`, {
         hardCategories: filterCheck.matchedHardCategories,
-        softCategories: filterCheck.matchedSoftCategories
+        softCategories: filterCheck.matchedSoftCategories,
+        requiresHardCategory: (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0)
       });
     } else {
       // 🎯 REGULAR SEARCH: Use original fuzzy word matching
