@@ -81,7 +81,7 @@ async function initializeRedis() {
 
     redisClient.on('reconnecting', () => {
       if (!redisConnectionFailed) {
-        console.log('[REDIS] Reconnecting...');
+      console.log('[REDIS] Reconnecting...');
       }
       redisReady = false;
     });
@@ -6927,26 +6927,87 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
   
   let results = [];
   if (queryWords.length > 0) {
-    const fuzzyPatterns = queryWords.map(word => ({
-      exact: word,
-      fuzzy: generateFuzzyRegex(word)
-    }));
+    // If PERFECT MATCH → no limit (return all matching products), else small limit for validation
+    const searchLimit = isPerfectFilterMatch ? 0 : 15; // 0 = no limit in MongoDB
     
-    // If PERFECT MATCH → higher limit, else small limit for validation
-    const searchLimit = isPerfectFilterMatch ? 1000 : 15;
+    let searchQuery;
     
-    results = await collection.find({
-      $and: fuzzyPatterns.map(pattern => ({
-        $or: [
-          { name: { $regex: pattern.fuzzy, $options: 'i' } },
-          { category: { $regex: pattern.fuzzy, $options: 'i' } },
-          { softCategory: { $regex: pattern.fuzzy, $options: 'i' } },
-          // 🎯 SAFE SEARCH: Don't use regex on long text fields to avoid 502/OOM
-          // Use a simple inclusion check instead (no fuzzy for descriptions)
-          { description1: { $regex: pattern.exact, $options: 'i' } }
+    // 🎯 PERFECT FILTER MATCH: Search by extracted categories, not original words
+    if (isPerfectFilterMatch) {
+      const categoryConditions = [];
+      
+      // Add hard categories to search
+      if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
+        filterCheck.matchedHardCategories.forEach(cat => {
+          categoryConditions.push({ category: { $regex: cat, $options: 'i' } });
+          categoryConditions.push({ type: { $regex: cat, $options: 'i' } });
+        });
+      }
+      
+      // Add soft categories to search
+      if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
+        filterCheck.matchedSoftCategories.forEach(cat => {
+          categoryConditions.push({ softCategory: { $regex: cat, $options: 'i' } });
+        });
+      }
+      
+      searchQuery = {
+        $and: [
+          // Stock status filter: instock OR no stockStatus field
+          {
+            $or: [
+              { stockStatus: "instock" },
+              { stockStatus: { $exists: false } }
+            ]
+          },
+          // Match any of the extracted categories
+          categoryConditions.length > 0 ? { $or: categoryConditions } : {}
         ]
-      }))
-    }).limit(searchLimit).toArray();
+      };
+      
+      console.log(`[SIMPLE-SEARCH] Perfect match - searching by categories:`, {
+        hardCategories: filterCheck.matchedHardCategories,
+        softCategories: filterCheck.matchedSoftCategories
+      });
+    } else {
+      // 🎯 REGULAR SEARCH: Use original fuzzy word matching
+      const fuzzyPatterns = queryWords.map(word => ({
+        exact: word,
+        fuzzy: generateFuzzyRegex(word)
+      }));
+      
+      searchQuery = {
+        $and: [
+          // Stock status filter: instock OR no stockStatus field
+          {
+            $or: [
+              { stockStatus: "instock" },
+              { stockStatus: { $exists: false } }
+            ]
+          },
+          // Text search filters
+          ...fuzzyPatterns.map(pattern => ({
+            $or: [
+              { name: { $regex: pattern.fuzzy, $options: 'i' } },
+              { category: { $regex: pattern.fuzzy, $options: 'i' } },
+              { type: { $regex: pattern.fuzzy, $options: 'i' } },
+              { softCategory: { $regex: pattern.fuzzy, $options: 'i' } },
+              // 🎯 SAFE SEARCH: Don't use regex on long text fields to avoid 502/OOM
+              // Use a simple inclusion check instead (no fuzzy for descriptions)
+              { description1: { $regex: pattern.exact, $options: 'i' } }
+            ]
+          }))
+        ]
+      };
+    }
+    
+    // Apply limit only if searchLimit > 0 (for non-perfect matches)
+    if (searchLimit > 0) {
+      results = await collection.find(searchQuery).limit(searchLimit).toArray();
+    } else {
+      // No limit for perfect category matches - return all matching products
+      results = await collection.find(searchQuery).toArray();
+    }
   }
 
   return {
@@ -7441,9 +7502,11 @@ app.post("/search", async (req, res) => {
       let searchMode = '';
 
       if (isPerfectFilterMatch) {
-        // 🎯 LIMIT: Cap perfect filter match results at 50 to prevent memory issues
-        approvedProducts = simpleResults.slice(0, 50);
+        // 🎯 PERFECT MATCH: Return all matching products (category-based search)
+        // Even if one product has exact name match, if it's a category search, return all
+        approvedProducts = simpleResults; // No limit for category searches
         searchMode = 'perfect-filter-match';
+        console.log(`[${requestId}] 🎯 Perfect filter match detected - returning ALL ${approvedProducts.length} products from categories`);
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
         const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
