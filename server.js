@@ -12357,53 +12357,49 @@ app.post("/product-click", async (req, res) => {
 
     const { dbName } = store;
 
-    const { product_id, product_name, search_query, session_id, interaction_type } = req.body;
+    const { 
+      event_id,
+      product_id, 
+      product_name, 
+      search_query, 
+      session_id, 
+      interaction_type,
+      product_url,
+      source,
+      platform,
+      zero_recovery,
+      timestamp: clientTimestamp
+    } = req.body;
     
     // Default to 'click' if not provided
     const interactionType = interaction_type || 'click';
 
- 
-
     // Validate required fields
-
     if (!product_id || !session_id) {
-
       return res.status(400).json({
-
         error: "Missing required fields: product_id and session_id are required"
-
       });
-
     }
 
- 
-
     const client = await connectToMongoDB(mongodbUri);
-
     const db = client.db(dbName);
-
     const clicksCollection = db.collection('product_clicks');
 
- 
-
-    // Create the click document
-
+    // Create the click document with all new fields
     const clickDocument = {
-
+      event_id: event_id || `clk-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
       product_id: String(product_id),
-
       product_name: product_name || null,
-
       search_query: search_query || null,
-
       session_id: session_id,
-
-      timestamp: new Date(),
-
+      interaction_type: interactionType,
+      timestamp: clientTimestamp ? new Date(clientTimestamp) : new Date(),
+      product_url: product_url || null,
+      source: source || null, // 'ai', 'manual', etc.
+      platform: platform || null, // 'shopify', 'woocommerce', etc.
+      zero_recovery: zero_recovery || false, // boolean flag
       user_agent: req.get('user-agent') || null,
-
       ip_address: req.ip || req.connection.remoteAddress
-
     };
 
  
@@ -12495,7 +12491,7 @@ app.post("/product-click", async (req, res) => {
     // Insert the click
     const insertResult = await clicksCollection.insertOne(clickDocument);
 
-    console.log(`[PRODUCT CLICK] Tracked: session=${session_id}, product=${product_id}, query="${clickDocument.search_query || 'none'}"`);
+    console.log(`[PRODUCT CLICK] Tracked: event_id=${clickDocument.event_id}, session=${session_id}, product=${product_id}, type=${interactionType}, source=${source || 'unknown'}, zero_recovery=${zero_recovery}, query="${clickDocument.search_query || 'none'}"`);
 
     // =========================================================
     // PERSONALIZATION: Auto-update profile from interaction
@@ -12507,9 +12503,12 @@ app.post("/product-click", async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Product click tracked successfully",
+      event_id: clickDocument.event_id,
       click_id: insertResult.insertedId,
       product_name: clickDocument.product_name,
-      search_query: clickDocument.search_query
+      search_query: clickDocument.search_query,
+      interaction_type: interactionType,
+      zero_recovery: clickDocument.zero_recovery
     });
 
  
