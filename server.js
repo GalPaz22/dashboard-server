@@ -7030,6 +7030,111 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
   };
 }
 
+/**
+ * 🎯 AI RECOMMENDATIONS
+ * When a specific product search returns 1-2 exact matches,
+ * find 5 additional recommended products based on similar soft categories,
+ * similar price range, and prioritize products on sale.
+ */
+async function findAiRecommendations(collection, matchedProducts, limit = 5) {
+  if (!matchedProducts || matchedProducts.length === 0) return [];
+
+  // Extract soft categories from matched products
+  const softCats = new Set();
+  matchedProducts.forEach(p => {
+    if (Array.isArray(p.softCategory)) {
+      p.softCategory.forEach(c => softCats.add(c));
+    } else if (typeof p.softCategory === 'string' && p.softCategory) {
+      softCats.add(p.softCategory);
+    }
+  });
+
+  // Calculate price range from matched products (±40%)
+  const prices = matchedProducts.map(p => parseFloat(p.price)).filter(p => p > 0);
+  const avgPrice = prices.length > 0 ? prices.reduce((a, b) => a + b, 0) / prices.length : 0;
+  const priceMargin = avgPrice * 0.4;
+  const minPrice = Math.max(0, avgPrice - priceMargin);
+  const maxPrice = avgPrice + priceMargin;
+
+  // Exclude already matched product IDs
+  const excludeIds = matchedProducts.map(p => p._id);
+
+  // Build query: similar soft categories + price range + in stock
+  const query = {
+    _id: { $nin: excludeIds },
+    $or: [
+      { stockStatus: "instock" },
+      { stockStatus: { $exists: false } }
+    ]
+  };
+
+  // Add soft category filter if we have any
+  if (softCats.size > 0) {
+    const softCatArray = [...softCats];
+    query.softCategory = {
+      $in: softCatArray.map(c => new RegExp(c, 'i'))
+    };
+  }
+
+  // Add price range filter if we have a valid price
+  if (avgPrice > 0) {
+    query.price = { $gte: minPrice, $lte: maxPrice };
+  }
+
+  // Fetch more candidates than needed so we can sort/prioritize
+  const candidates = await collection.find(query).limit(limit * 4).toArray();
+
+  if (candidates.length === 0 && softCats.size > 0) {
+    // Fallback: relax price constraint, keep soft categories
+    delete query.price;
+    const fallbackCandidates = await collection.find(query).limit(limit * 4).toArray();
+    return scoreAndSliceRecommendations(fallbackCandidates, matchedProducts, softCats, avgPrice, limit);
+  }
+
+  return scoreAndSliceRecommendations(candidates, matchedProducts, softCats, avgPrice, limit);
+}
+
+function scoreAndSliceRecommendations(candidates, matchedProducts, softCats, avgPrice, limit) {
+  if (!candidates || candidates.length === 0) return [];
+
+  const softCatArray = [...softCats];
+
+  const scored = candidates.map(product => {
+    let score = 0;
+
+    // 1. Soft category overlap score (max 50 points)
+    if (softCatArray.length > 0) {
+      const productSoftCats = Array.isArray(product.softCategory)
+        ? product.softCategory
+        : (product.softCategory ? [product.softCategory] : []);
+      const overlapCount = productSoftCats.filter(sc =>
+        softCatArray.some(mc => sc.toLowerCase().includes(mc.toLowerCase()) || mc.toLowerCase().includes(sc.toLowerCase()))
+      ).length;
+      score += Math.min(overlapCount * 15, 50);
+    }
+
+    // 2. Price proximity score (max 30 points)
+    if (avgPrice > 0 && product.price) {
+      const priceDiff = Math.abs(parseFloat(product.price) - avgPrice);
+      const priceProximity = Math.max(0, 1 - priceDiff / avgPrice);
+      score += priceProximity * 30;
+    }
+
+    // 3. On sale boost (20 points)
+    const isOnSale = !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0);
+    if (isOnSale) {
+      score += 20;
+    }
+
+    return { product, score, isOnSale };
+  });
+
+  // Sort by score descending
+  scored.sort((a, b) => b.score - a.score);
+
+  return scored.slice(0, limit).map(({ product }) => product);
+}
+
 app.post("/fast-search", async (req, res) => {
   const requestId = `fast-${Math.random().toString(36).substr(2, 9)}`;
   const searchStartTime = Date.now();
@@ -7123,14 +7228,58 @@ app.post("/fast-search", async (req, res) => {
       // Sort by profileBoost (personalization)
       productsWithBoost.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
 
+      // ============================================================
+      // 🎯 AI RECOMMENDATIONS: When 1-2 exact matches found, add similar products
+      // ============================================================
+      let aiRecommendations = [];
+      if (!isPerfectFilterMatch && productsWithBoost.length <= 2 && productsWithBoost.length > 0) {
+        const exactMatches = productsWithBoost.filter(p => {
+          const bonus = getExactMatchBonus(p.name, query, query);
+          return bonus >= 50000;
+        });
+
+        if (exactMatches.length > 0 && exactMatches.length <= 2) {
+          console.log(`[${requestId}] 🤖 Found ${exactMatches.length} exact match(es) - fetching AI recommendations...`);
+          const recStart = Date.now();
+          const rawRecommendations = await findAiRecommendations(collection, validatedProducts, 5);
+          const recTime = Date.now() - recStart;
+
+          aiRecommendations = rawRecommendations.map(product => {
+            const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+            return {
+              _id: product._id.toString(),
+              id: product.id,
+              name: product.name,
+              description: product.description,
+              price: product.price,
+              image: product.image,
+              url: product.url,
+              type: product.type,
+              category: product.category,
+              softCategory: product.softCategory,
+              specialSales: product.specialSales,
+              onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+              ItemID: product.ItemID,
+              profileBoost: profileBoost,
+              aiRecommend: true,
+              fastSearchMode: 'simple-validated'
+            };
+          });
+
+          console.log(`[${requestId}] 🤖 AI recommendations: ${aiRecommendations.length} products found in ${recTime}ms`);
+        }
+      }
+
+      const allProducts = [...productsWithBoost, ...aiRecommendations];
+
       const executionTime = Date.now() - searchStartTime;
-      const personalizedCount = productsWithBoost.filter(p => (p.profileBoost || 0) > 0).length;
+      const personalizedCount = allProducts.filter(p => (p.profileBoost || 0) > 0).length;
 
       const searchMode = isPerfectFilterMatch ? 'perfect-filter-match' : 'simple-validated';
-      console.log(`[${requestId}] ⚡ FAST SEARCH (${searchMode}) completed in ${executionTime}ms - returning ${productsWithBoost.length} products`);
+      console.log(`[${requestId}] ⚡ FAST SEARCH (${searchMode}) completed in ${executionTime}ms - returning ${allProducts.length} products (${aiRecommendations.length} AI recommendations)`);
 
       return res.json({
-        products: productsWithBoost,
+        products: allProducts,
         metadata: {
           query,
           requestId,
@@ -7139,7 +7288,8 @@ app.post("/fast-search", async (req, res) => {
           searchMode: searchMode,
           isPerfectFilterMatch: isPerfectFilterMatch,
           personalizedResults: personalizedCount > 0,
-          personalizedCount: personalizedCount
+          personalizedCount: personalizedCount,
+          aiRecommendationsCount: aiRecommendations.length
         }
       });
     }
@@ -7430,15 +7580,59 @@ app.post("/simple-search", async (req, res) => {
       return (b.profileBoost || 0) - (a.profileBoost || 0) || (bonusB - bonusA);
     });
 
-    console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
+    // ============================================================
+    // 🎯 AI RECOMMENDATIONS: When 1-2 exact matches found, add similar products
+    // ============================================================
+    let aiRecommendations = [];
+    if (!isPerfectFilterMatch && response.length <= 2 && response.length > 0) {
+      const exactMatches = response.filter(p => (p.exactMatchBonus || 0) >= 50000);
+
+      if (exactMatches.length > 0 && exactMatches.length <= 2) {
+        console.log(`[${requestId}] 🤖 Found ${exactMatches.length} exact match(es) - fetching AI recommendations...`);
+        const recStart = Date.now();
+        const rawRecommendations = await findAiRecommendations(collection, results, 5);
+        const recTime = Date.now() - recStart;
+
+        aiRecommendations = rawRecommendations.map(product => {
+          const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+          const exactMatchBonus = getExactMatchBonus(product.name, query, query);
+          return {
+            _id: product._id.toString(),
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            image: product.image,
+            url: product.url,
+            type: product.type,
+            category: product.category,
+            softCategory: product.softCategory,
+            specialSales: product.specialSales,
+            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+            ItemID: product.ItemID,
+            profileBoost: profileBoost,
+            exactMatchBonus: exactMatchBonus,
+            aiRecommend: true,
+            highlight: false
+          };
+        });
+
+        console.log(`[${requestId}] 🤖 AI recommendations: ${aiRecommendations.length} products found in ${recTime}ms`);
+      }
+    }
+
+    const allProducts = [...response, ...aiRecommendations];
+
+    console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results + ${aiRecommendations.length} AI recommendations in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
     res.json({
-      products: response,
-      count: response.length,
+      products: allProducts,
+      count: allProducts.length,
       timing: Date.now() - searchStartTime,
       metadata: {
         isPerfectFilterMatch,
-        searchMode: isPerfectFilterMatch ? 'perfect-filter-match' : 'fuzzy-regex'
+        searchMode: isPerfectFilterMatch ? 'perfect-filter-match' : 'fuzzy-regex',
+        aiRecommendationsCount: aiRecommendations.length
       }
     });
   } catch (error) {
