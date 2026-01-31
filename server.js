@@ -7834,10 +7834,43 @@ app.post("/search", async (req, res) => {
           finalProducts.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
         }
 
+        // ============================================================
+        // 🎯 AI RECOMMENDATIONS: When 1-2 exact matches, add similar products
+        // ============================================================
+        let aiRecommendations = [];
+        if (!isPerfectFilterMatch && finalProducts.length <= 2 && finalProducts.length > 0) {
+          const exactMatches = finalProducts.filter(p => {
+            const bonus = getExactMatchBonus(p.name, query, query);
+            return bonus >= 50000;
+          });
+
+          if (exactMatches.length > 0 && exactMatches.length <= 2) {
+            console.log(`[${requestId}] 🤖 [SEARCH] Found ${exactMatches.length} exact match(es) - fetching AI recommendations...`);
+            const recStart = Date.now();
+            const rawRecommendations = await findAiRecommendations(collection, approvedProducts, 5);
+            const recTime = Date.now() - recStart;
+
+            aiRecommendations = rawRecommendations.map(product => {
+              const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+              return {
+                ...product,
+                _id: product._id.toString(),
+                profileBoost,
+                aiRecommend: true,
+                searchMode
+              };
+            });
+
+            console.log(`[${requestId}] 🤖 [SEARCH] AI recommendations: ${aiRecommendations.length} products found in ${recTime}ms`);
+          }
+        }
+
+        const allProducts = [...finalProducts, ...aiRecommendations];
+
         return res.json(isModernMode ? {
-          products: finalProducts,
-          metadata: { query, requestId, executionTime: Date.now() - searchStartTime, searchMode, isPerfectFilterMatch }
-        } : finalProducts);
+          products: allProducts,
+          metadata: { query, requestId, executionTime: Date.now() - searchStartTime, searchMode, isPerfectFilterMatch, aiRecommendationsCount: aiRecommendations.length }
+        } : allProducts);
       }
     }
     console.log(`[${requestId}] 🔍 [SEARCH] Simple search was not enough, falling back to full search logic`);
