@@ -7039,6 +7039,15 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
 async function findAiRecommendations(collection, matchedProducts, limit = 5) {
   if (!matchedProducts || matchedProducts.length === 0) return [];
 
+  // Extract hard categories from matched products
+  const hardCats = new Set();
+  matchedProducts.forEach(p => {
+    if (p.category) {
+      const cat = typeof p.category === 'string' ? p.category.trim() : '';
+      if (cat) hardCats.add(cat);
+    }
+  });
+
   // Extract soft categories from matched products
   const softCats = new Set();
   matchedProducts.forEach(p => {
@@ -7059,7 +7068,7 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
   // Exclude already matched product IDs
   const excludeIds = matchedProducts.map(p => p._id);
 
-  // Build query: similar soft categories + price range + in stock
+  // Build query: same hard category + in stock
   const query = {
     _id: { $nin: excludeIds },
     $or: [
@@ -7068,12 +7077,9 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
     ]
   };
 
-  // Add soft category filter if we have any
-  if (softCats.size > 0) {
-    const softCatArray = [...softCats];
-    query.softCategory = {
-      $in: softCatArray.map(c => new RegExp(c, 'i'))
-    };
+  // Filter by hard category - keep recommendations in the same category
+  if (hardCats.size > 0) {
+    query.category = { $in: [...hardCats].map(c => new RegExp(c, 'i')) };
   }
 
   // Add price range filter if we have a valid price
@@ -7084,25 +7090,37 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
   // Fetch more candidates than needed so we can sort/prioritize
   const candidates = await collection.find(query).limit(limit * 4).toArray();
 
-  if (candidates.length === 0 && softCats.size > 0) {
-    // Fallback: relax price constraint, keep soft categories
+  if (candidates.length === 0 && hardCats.size > 0) {
+    // Fallback: relax price constraint, keep hard category
     delete query.price;
     const fallbackCandidates = await collection.find(query).limit(limit * 4).toArray();
-    return scoreAndSliceRecommendations(fallbackCandidates, matchedProducts, softCats, avgPrice, limit);
+    return scoreAndSliceRecommendations(fallbackCandidates, matchedProducts, hardCats, softCats, avgPrice, limit);
   }
 
-  return scoreAndSliceRecommendations(candidates, matchedProducts, softCats, avgPrice, limit);
+  return scoreAndSliceRecommendations(candidates, matchedProducts, hardCats, softCats, avgPrice, limit);
 }
 
-function scoreAndSliceRecommendations(candidates, matchedProducts, softCats, avgPrice, limit) {
+function scoreAndSliceRecommendations(candidates, matchedProducts, hardCats, softCats, avgPrice, limit) {
   if (!candidates || candidates.length === 0) return [];
 
+  const hardCatArray = [...hardCats];
   const softCatArray = [...softCats];
 
   const scored = candidates.map(product => {
     let score = 0;
 
-    // 1. Soft category overlap score (max 50 points)
+    // 1. Hard category match score (max 40 points)
+    if (hardCatArray.length > 0 && product.category) {
+      const productCat = (typeof product.category === 'string' ? product.category : '').toLowerCase();
+      const hardMatch = hardCatArray.some(hc =>
+        productCat.includes(hc.toLowerCase()) || hc.toLowerCase().includes(productCat)
+      );
+      if (hardMatch) {
+        score += 40; // Same hard category = strong signal
+      }
+    }
+
+    // 2. Soft category overlap score (max 50 points)
     if (softCatArray.length > 0) {
       const productSoftCats = Array.isArray(product.softCategory)
         ? product.softCategory
@@ -7113,14 +7131,14 @@ function scoreAndSliceRecommendations(candidates, matchedProducts, softCats, avg
       score += Math.min(overlapCount * 15, 50);
     }
 
-    // 2. Price proximity score (max 30 points)
+    // 3. Price proximity score (max 30 points)
     if (avgPrice > 0 && product.price) {
       const priceDiff = Math.abs(parseFloat(product.price) - avgPrice);
       const priceProximity = Math.max(0, 1 - priceDiff / avgPrice);
       score += priceProximity * 30;
     }
 
-    // 3. On sale boost (20 points)
+    // 4. On sale boost (20 points)
     const isOnSale = !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0);
     if (isOnSale) {
       score += 20;
