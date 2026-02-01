@@ -7762,14 +7762,13 @@ app.post("/search", async (req, res) => {
             // Step 2: Limited vector search (20 results)
             const emergencyLimit = 20;
             
-            // 🎯 RELAX FILTERS: In emergency mode, if we have very few results, 
-            // we use the embedding to find similar products but DON'T strictly enforce the hard category
-            // This allows us to find "sweet" things that aren't strictly in the "syrup" category
-            const relaxedFilters = { ...extractedFilters };
-            delete relaxedFilters.category; 
-            delete relaxedFilters.type;
+            // 🎯 ENFORCE HARD CATEGORIES: In emergency mode, we expand via embeddings
+            // but ALWAYS keep hard category filters as deal breakers.
+            // e.g., "ליקר שוקולד" must NEVER return "יין שוקולד" - hard categories are sacred.
+            const emergencyFilters = { ...extractedFilters };
+            // Keep category and type filters - they are deal breakers
 
-            const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, relaxedFilters, emergencyLimit, true);
+            const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, emergencyFilters, emergencyLimit, true);
             const emergencyResults = await collection.aggregate(vectorPipeline).toArray();
             
             if (emergencyResults.length > 0) {
@@ -7827,9 +7826,26 @@ app.post("/search", async (req, res) => {
         }
       }
 
+      // 🛡️ HARD CATEGORY DEAL BREAKER: If we extracted hard categories, filter out any products
+      // that don't match. This is the ultimate safety net - hard categories are sacred.
+      // e.g., search "ליקר שוקולד" with hardCat="ליקר" → remove any "יין שוקולד" that leaked through.
+      if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0 && approvedProducts.length > 0) {
+        const beforeCount = approvedProducts.length;
+        approvedProducts = approvedProducts.filter(product => {
+          if (!product.category) return false;
+          const productCats = Array.isArray(product.category) ? product.category : [product.category];
+          return filterCheck.matchedHardCategories.some(hardCat =>
+            productCats.some(pCat => pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase()))
+          );
+        });
+        if (beforeCount !== approvedProducts.length) {
+          console.log(`[${requestId}] 🛡️ [HARD CATEGORY GATE] Phase 0: Filtered out ${beforeCount - approvedProducts.length} products not matching hard categories [${filterCheck.matchedHardCategories.join(', ')}]`);
+        }
+      }
+
       if (approvedProducts.length > 0) {
         console.log(`[${requestId}] 🚀 [SEARCH] Simple search SUCCESS (${searchMode}) - returning ${approvedProducts.length} products`);
-        
+
         // Apply personalization boost
         let userProfile = null;
         if (session_id) {
@@ -8163,13 +8179,30 @@ app.post("/search", async (req, res) => {
            console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH enableSimpleCategoryExtraction: Keeping all filters (category="${originalCategory}", softCategory="${enhancedFilters.softCategory}")`);
            // Do NOT clear filters - user explicitly wants category extraction on simple queries
         } else {
-            // Clear category for simple text-based searches - rely on text matching
-            // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
-            if (originalCategory) {
-              console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - simple queries use text matching only`);
-              enhancedFilters.category = undefined;
+            // Check if the query explicitly contains a known hard category word
+            // e.g., "ליקר שוקולד" → "ליקר" is a known hard category → KEEP IT as a deal breaker
+            // But "קמפרי" → LLM might guess "ג׳ין" → NOT in query text → CLEAR IT
+            const queryWordsLower = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+            const storeCategories = (categories || []).filter(c => typeof c === 'string').map(c => c.toLowerCase().trim());
+            const queryContainsHardCategory = originalCategory && storeCategories.some(storeCat =>
+              queryWordsLower.some(qw => qw === storeCat || storeCat === qw ||
+                (qw.length >= 3 && storeCat.includes(qw)) || (storeCat.length >= 3 && qw.includes(storeCat)))
+            );
+
+            if (queryContainsHardCategory) {
+              // Hard category word is EXPLICITLY in the query → keep it as a deal breaker
+              // "ליקר שוקולד" → "ליקר" is in query AND is a known category → NEVER return "יין שוקולד"
+              console.log(`[${requestId}] 🛡️ SIMPLE QUERY: Category "${originalCategory}" KEPT as deal breaker - query explicitly contains a hard category word`);
+              // Do NOT clear category
+            } else {
+              // Clear category for simple text-based searches - rely on text matching
+              // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
+              if (originalCategory) {
+                console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - query doesn't contain a known hard category word`);
+                enhancedFilters.category = undefined;
+              }
             }
-            
+
             // Always clear price filters for simple queries (prices need explicit intent)
             enhancedFilters.price = undefined;
             enhancedFilters.minPrice = undefined;
@@ -9661,6 +9694,23 @@ app.post("/search", async (req, res) => {
       } catch (profileError) {
         console.error(`[${requestId}] 👤 Error loading profile:`, profileError.message);
         // Continue without personalization
+      }
+    }
+
+    // 🛡️ HARD CATEGORY DEAL BREAKER (FINAL GATE): Remove any products that don't match
+    // the extracted hard category. This is the last line of defense.
+    // e.g., "ליקר שוקולד" with hardFilters.category=["ליקר"] → remove any "יין" products.
+    if (hardFilters && hardFilters.category && hardFilters.category.length > 0) {
+      const beforeHardGate = finalResults.length;
+      finalResults = finalResults.filter(product => {
+        if (!product.category) return false;
+        const productCats = Array.isArray(product.category) ? product.category : [product.category];
+        return hardFilters.category.some(hardCat =>
+          productCats.some(pCat => pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase()))
+        );
+      });
+      if (beforeHardGate !== finalResults.length) {
+        console.log(`[${requestId}] 🛡️ [HARD CATEGORY FINAL GATE] Filtered out ${beforeHardGate - finalResults.length} products not matching hard categories [${hardFilters.category.join(', ')}]`);
       }
     }
 
