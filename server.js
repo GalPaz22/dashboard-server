@@ -7469,9 +7469,9 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     return { isPerfectMatch: false, unmatchedWords: [] };
   }
   
-  // Normalize and clean query words
+  // Normalize and clean query words - but keep geresh (׳) and apostrophe (') for matching
   const queryWords = query.toLowerCase().trim()
-    .replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "") // Remove punctuation
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "") // Remove punctuation but NOT geresh/apostrophe
     .split(/\s+/)
     .filter(w => w.length >= 2);
     
@@ -7490,50 +7490,121 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     
   const allCategories = [...normalizedHardCategories, ...normalizedSoftCategories];
   
+  // Helper to normalize quote characters (Hebrew geresh ׳ → ASCII apostrophe ')
+  const normalizeQuotes = (str) => {
+    return str.replace(/[׳']/g, ''); // Remove both geresh and apostrophe for fuzzy matching
+  };
+  
   // Hebrew Variations Map (Common roots and their variations)
   const isVariationMatch = (word, cat) => {
+    // Try exact match first
     if (word === cat) return true;
+    
+    // 🎯 FIX 2: Handle geresh/apostrophe variations (ג'ין vs גין)
+    // Try matching with normalized quotes removed
+    const wordNormalized = normalizeQuotes(word);
+    const catNormalized = normalizeQuotes(cat);
+    if (wordNormalized === catNormalized) return true;
     
     // Check if word is category with common Hebrew suffixes (י, ית, ים, ות, ה)
     if (word.startsWith(cat) && word.length <= cat.length + 2) return true;
+    if (wordNormalized.startsWith(catNormalized) && wordNormalized.length <= catNormalized.length + 2) return true;
     
     // Check if category is word with suffix (e.g., cat="ספרד", word="ספרדי")
     if (cat.startsWith(word) && cat.length <= word.length + 2) return true;
+    if (catNormalized.startsWith(wordNormalized) && catNormalized.length <= wordNormalized.length + 2) return true;
     
     // Check if word has common Hebrew prefixes (ה, ו, ב, ל)
     const prefixes = ['ה', 'ו', 'ב', 'ל'];
     for (const p of prefixes) {
       if (word.startsWith(p) && word.substring(1) === cat) return true;
       if (word.startsWith(p) && word.substring(1).startsWith(cat) && word.length <= cat.length + 3) return true;
+      if (wordNormalized.startsWith(p) && wordNormalized.substring(1) === catNormalized) return true;
+      if (wordNormalized.startsWith(p) && wordNormalized.substring(1).startsWith(catNormalized) && wordNormalized.length <= catNormalized.length + 3) return true;
     }
 
     // Support bidirectional "contains" for multi-word categories
     if (word.length >= 3 && cat.includes(word)) return true;
     if (cat.length >= 3 && word.includes(cat)) return true;
+    if (wordNormalized.length >= 3 && catNormalized.includes(wordNormalized)) return true;
+    if (catNormalized.length >= 3 && wordNormalized.includes(catNormalized)) return true;
     
     return false;
   };
   
+  // 🎯 FIX 1: Greedy multi-word category matching
+  // First, try to match multi-word categories (e.g., "יין לבן" before "יין")
+  // This ensures "יין לבן חצי יבש" matches "יין לבן" (hard) + "חצי יבש" (soft)
   const matchedHardCategories = [];
   const matchedSoftCategories = [];
-
-  const unmatchedWords = queryWords.filter(word => {
-    // Check hard categories first
-    const hardMatch = normalizedHardCategories.find(cat => isVariationMatch(word, cat));
-    if (hardMatch) {
-      matchedHardCategories.push(hardMatch);
-      return false;
-    }
-    
-    // Check soft categories
-    const softMatch = normalizedSoftCategories.find(cat => isVariationMatch(word, cat));
-    if (softMatch) {
-      matchedSoftCategories.push(softMatch);
-      return false;
-    }
-    
-    return true;
+  const matchedWordIndices = new Set();
+  
+  // Sort categories by word count (longest first) to prefer multi-word matches
+  const sortedHardCategories = [...normalizedHardCategories].sort((a, b) => {
+    const aWords = a.split(/\s+/).length;
+    const bWords = b.split(/\s+/).length;
+    return bWords - aWords; // Descending order
   });
+  
+  const sortedSoftCategories = [...normalizedSoftCategories].sort((a, b) => {
+    const aWords = a.split(/\s+/).length;
+    const bWords = b.split(/\s+/).length;
+    return bWords - aWords;
+  });
+  
+  // Try to match hard categories (multi-word first)
+  for (const cat of sortedHardCategories) {
+    const catWords = cat.split(/\s+/);
+    
+    // Try to find consecutive matching words in query
+    for (let i = 0; i <= queryWords.length - catWords.length; i++) {
+      const querySlice = queryWords.slice(i, i + catWords.length);
+      
+      // Check if all words in category match consecutive query words
+      const allMatch = catWords.every((catWord, idx) => 
+        isVariationMatch(querySlice[idx], catWord)
+      );
+      
+      if (allMatch) {
+        // Check if these indices haven't been matched yet
+        const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
+        const alreadyMatched = sliceIndices.some(idx => matchedWordIndices.has(idx));
+        
+        if (!alreadyMatched) {
+          matchedHardCategories.push(cat);
+          sliceIndices.forEach(idx => matchedWordIndices.add(idx));
+          break; // Move to next category
+        }
+      }
+    }
+  }
+  
+  // Try to match soft categories (multi-word first)
+  for (const cat of sortedSoftCategories) {
+    const catWords = cat.split(/\s+/);
+    
+    for (let i = 0; i <= queryWords.length - catWords.length; i++) {
+      const querySlice = queryWords.slice(i, i + catWords.length);
+      
+      const allMatch = catWords.every((catWord, idx) => 
+        isVariationMatch(querySlice[idx], catWord)
+      );
+      
+      if (allMatch) {
+        const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
+        const alreadyMatched = sliceIndices.some(idx => matchedWordIndices.has(idx));
+        
+        if (!alreadyMatched) {
+          matchedSoftCategories.push(cat);
+          sliceIndices.forEach(idx => matchedWordIndices.add(idx));
+          break;
+        }
+      }
+    }
+  }
+  
+  // Collect unmatched words
+  const unmatchedWords = queryWords.filter((_, idx) => !matchedWordIndices.has(idx));
   
   const isPerfectMatch = unmatchedWords.length === 0;
   
