@@ -7737,13 +7737,16 @@ app.post("/search", async (req, res) => {
   // 🚀 PHASE 0: FAST SIMPLE SEARCH (Regex/Perfect Match)
   // We try this first. If it's a perfect match or LLM approved, we return it immediately.
   // ============================================================
+  // Hoist filterCheck so it's accessible throughout the search handler
+  let filterCheck = null;
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
-    
-    const { results: simpleResults, isPerfectFilterMatch, filterCheck, queryWords } = 
+
+    const { results: simpleResults, isPerfectFilterMatch, filterCheck: fc, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, searchLimit);
+    filterCheck = fc;
 
     if (simpleResults.length > 0) {
       let approvedProducts = [];
