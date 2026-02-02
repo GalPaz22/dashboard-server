@@ -8666,8 +8666,34 @@ app.post("/search", async (req, res) => {
             console.log(`[${requestId}] 🎯 SOFT CATEGORY FILTER ON TEXT MATCHES: ${beforeFilterCount} → ${highQualityTextMatches.length} (filtered by query-extracted: ${JSON.stringify(queryExtractedSoftCatsArray)})`);
           }
 
+          // 🛡️ HARD CATEGORY FILTER ON TEXT MATCHES: If query extracted a hard category (e.g., "יין לבן"),
+          // filter out text matches that don't belong to that category.
+          // This prevents "יין אדום יבש" from appearing when searching "יין לבן חצי יבש"
+          const queryExtractedHardCats = hardFilters.category || [];
+          const queryExtractedHardCatsArray = Array.isArray(queryExtractedHardCats) ? queryExtractedHardCats.filter(Boolean) : (queryExtractedHardCats ? [queryExtractedHardCats] : []);
+
+          if (queryExtractedHardCatsArray.length > 0 && highQualityTextMatches.length > 0) {
+            const beforeHardFilterCount = highQualityTextMatches.length;
+
+            highQualityTextMatches = highQualityTextMatches.filter(product => {
+              if (!product.category) return false;
+              const productCategories = Array.isArray(product.category) ? product.category : [product.category];
+              // Product must match at least one of the query-extracted hard categories
+              return queryExtractedHardCatsArray.some(hardCat =>
+                productCategories.some(pCat =>
+                  pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+                )
+              );
+            });
+
+            const filteredOutCount = beforeHardFilterCount - highQualityTextMatches.length;
+            if (filteredOutCount > 0) {
+              console.log(`[${requestId}] 🛡️ HARD CATEGORY FILTER ON TEXT MATCHES: ${beforeHardFilterCount} → ${highQualityTextMatches.length} (removed ${filteredOutCount} products not matching query hard category [${queryExtractedHardCatsArray.join(', ')}])`);
+            }
+          }
+
           if (highQualityTextMatches.length > 0) {
-            console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches (after soft category filter)`);
+            console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches (after category filters)`);
             
             // Log tier 1 text match results with their categories
             console.log(`[${requestId}] 📊 TIER 1 TEXT MATCH - Top matches with extracted filters:`);
@@ -8827,7 +8853,13 @@ app.post("/search", async (req, res) => {
               console.log(`[${requestId}] Step 3: Performing category-filtered search...`);
 
               const categoryFilteredHardFilters = { ...hardFilters };
-              if (hardCategoriesArray.length > 0) {
+              // 🎯 CRITICAL: Query-extracted hard category (from LLM) takes precedence over product-extracted
+              // e.g., query "יין לבן חצי יבש" → LLM extracts "יין לבן" → ALWAYS use "יין לבן", never let
+              // product-extracted categories like "יין אדום" leak in from text matches
+              if (hardFilters.category && hardFilters.category.length > 0) {
+                // Query-extracted category is authoritative - keep it
+                console.log(`[${requestId}] 🛡️ HARD CATEGORY AUTHORITY: Using QUERY-EXTRACTED category [${hardFilters.category}] (ignoring product-extracted: [${hardCategoriesArray.join(', ')}])`);
+              } else if (hardCategoriesArray.length > 0) {
                 categoryFilteredHardFilters.category = hardCategoriesArray;
               }
 
@@ -9192,18 +9224,44 @@ app.post("/search", async (req, res) => {
     
       if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
-        
+
         try {
-          
+
           const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
-          
-          // Always send all results to LLM for maximum flexibility
-          // The LLM will use soft category context to make informed decisions
+
+          // 🛡️ PRE-RERANK HARD CATEGORY FILTER: Only send products matching query hard category to LLM
+          // This ensures the LLM can only select from products in the correct category
+          const preRerankHardCats = hardFilters.category || [];
+          const preRerankHardCatsArray = Array.isArray(preRerankHardCats) ? preRerankHardCats.filter(Boolean) : (preRerankHardCats ? [preRerankHardCats] : []);
+
+          let resultsForRerank = combinedResults;
+          if (preRerankHardCatsArray.length > 0) {
+            const beforePreRerank = combinedResults.length;
+            resultsForRerank = combinedResults.filter(product => {
+              const productCategories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
+              if (productCategories.length === 0) return false;
+              return preRerankHardCatsArray.some(hardCat =>
+                productCategories.some(pCat =>
+                  pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+                )
+              );
+            });
+            const preRerankFiltered = beforePreRerank - resultsForRerank.length;
+            if (preRerankFiltered > 0) {
+              console.log(`[${requestId}] 🛡️ [PRE-RERANK HARD CATEGORY GATE] Filtered ${preRerankFiltered} products not matching [${preRerankHardCatsArray.join(', ')}] before LLM reranking (${beforePreRerank} → ${resultsForRerank.length})`);
+            }
+            // If filtering removed everything, fall back to all results
+            if (resultsForRerank.length === 0) {
+              console.log(`[${requestId}] ⚠️ Pre-rerank filter removed all results - falling back to unfiltered`);
+              resultsForRerank = combinedResults;
+            }
+          }
+
           // For fast mode, limit to 10 products for faster processing
           const llmLimit = shouldUseFastLLM ? 10 : searchLimit;
-          console.log(`[${requestId}] Sending ${combinedResults.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
-          
-          reorderedData = await reorderFn(combinedResults, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile);
+          console.log(`[${requestId}] Sending ${resultsForRerank.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
+
+          reorderedData = await reorderFn(resultsForRerank, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile);
           
           // Record success
           aiCircuitBreaker.recordSuccess();
@@ -9443,31 +9501,66 @@ app.post("/search", async (req, res) => {
       const reorderedIds = reorderedData.map(item => item._id);
       const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
       console.log(`[${requestId}] reorderedIds length: ${reorderedIds.length}, sample:`, reorderedIds.slice(0, 3));
-      const orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
+      let orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
       console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
-      const reorderedProductIds = new Set(reorderedIds.map(id => id.toString()));
-      let remainingResults = [];
-      
-      console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${reorderedIds.length} LLM-selected`);
-      
-      // CRITICAL: Re-run vector search with category filter from LLM-selected products
-      // This ensures vector search respects the category of the top results
-      if (orderedProducts.length > 0 && queryEmbedding) {
-        const topProductCategories = [];
-        orderedProducts.slice(0, 3).forEach(product => {
-          const categories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
-          categories.forEach(cat => {
-            if (cat && !topProductCategories.includes(cat)) {
-              topProductCategories.push(cat);
-            }
-          });
+
+      // 🛡️ HARD CATEGORY ENFORCEMENT ON LLM RERANK RESULTS:
+      // If query extracted a hard category (e.g., "יין לבן"), filter LLM-selected products
+      // to only include those matching the query's hard category.
+      // This ensures the LLM doesn't sneak in products from wrong categories.
+      const queryHardCatsForRerank = hardFilters.category || [];
+      const queryHardCatsForRerankArray = Array.isArray(queryHardCatsForRerank) ? queryHardCatsForRerank.filter(Boolean) : (queryHardCatsForRerank ? [queryHardCatsForRerank] : []);
+
+      if (queryHardCatsForRerankArray.length > 0 && orderedProducts.length > 0) {
+        const beforeRerankFilter = orderedProducts.length;
+        orderedProducts = orderedProducts.filter(product => {
+          if (!product.category) return false;
+          const productCategories = Array.isArray(product.category) ? product.category : [product.category];
+          return queryHardCatsForRerankArray.some(hardCat =>
+            productCategories.some(pCat =>
+              pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+            )
+          );
         });
-        
-        if (topProductCategories.length > 0) {
-          console.log(`[${requestId}] 🔄 Re-running vector search with category filter: [${topProductCategories.join(', ')}]`);
-          
+        const rerankFiltered = beforeRerankFilter - orderedProducts.length;
+        if (rerankFiltered > 0) {
+          console.log(`[${requestId}] 🛡️ [HARD CATEGORY GATE] LLM Rerank: Filtered out ${rerankFiltered} products not matching query hard category [${queryHardCatsForRerankArray.join(', ')}]`);
+        }
+      }
+
+      const reorderedProductIds = new Set(orderedProducts.map(p => p._id.toString()));
+      let remainingResults = [];
+
+      console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${orderedProducts.length} LLM-selected (after hard category gate)`);
+
+      // CRITICAL: Re-run vector search with category filter
+      // 🛡️ PRIORITY: Use query-extracted hard category if available, otherwise fall back to LLM-product categories
+      if (orderedProducts.length > 0 && queryEmbedding) {
+        let categoriesForVectorRerun;
+
+        if (queryHardCatsForRerankArray.length > 0) {
+          // 🛡️ Use query-extracted hard category - this is the authoritative source
+          categoriesForVectorRerun = queryHardCatsForRerankArray;
+          console.log(`[${requestId}] 🛡️ VECTOR RE-RUN: Using QUERY-EXTRACTED hard category [${categoriesForVectorRerun.join(', ')}]`);
+        } else {
+          // Fallback: extract from LLM-selected products
+          categoriesForVectorRerun = [];
+          orderedProducts.slice(0, 3).forEach(product => {
+            const categories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
+            categories.forEach(cat => {
+              if (cat && !categoriesForVectorRerun.includes(cat)) {
+                categoriesForVectorRerun.push(cat);
+              }
+            });
+          });
+          console.log(`[${requestId}] 🔄 VECTOR RE-RUN: Using PRODUCT-EXTRACTED categories [${categoriesForVectorRerun.join(', ')}]`);
+        }
+
+        if (categoriesForVectorRerun.length > 0) {
+          console.log(`[${requestId}] 🔄 Re-running vector search with category filter: [${categoriesForVectorRerun.join(', ')}]`);
+
           // Build hard filters with extracted category
-          const categoryFilteredHardFilters = { ...hardFilters, category: topProductCategories };
+          const categoryFilteredHardFilters = { ...hardFilters, category: categoriesForVectorRerun };
           
           // Run new vector search with category filter - INCREASED LIMIT for more semantic results
           const categoryFilteredVectorResults = await collection.aggregate(
@@ -9518,6 +9611,24 @@ app.post("/search", async (req, res) => {
       } else {
         // No vector search possible, use original remaining results
         remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
+      }
+
+      // 🛡️ HARD CATEGORY GATE on remaining results: Filter out products not matching query hard category
+      if (queryHardCatsForRerankArray.length > 0 && remainingResults.length > 0) {
+        const beforeRemaining = remainingResults.length;
+        remainingResults = remainingResults.filter(product => {
+          const productCategories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
+          if (productCategories.length === 0) return false;
+          return queryHardCatsForRerankArray.some(hardCat =>
+            productCategories.some(pCat =>
+              pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+            )
+          );
+        });
+        const remainingFiltered = beforeRemaining - remainingResults.length;
+        if (remainingFiltered > 0) {
+          console.log(`[${requestId}] 🛡️ [HARD CATEGORY GATE] Remaining results: Filtered out ${remainingFiltered} products not matching query hard category [${queryHardCatsForRerankArray.join(', ')}]`);
+        }
       }
 
       // Construct finalResults and deduplicate
