@@ -4119,8 +4119,9 @@ async function reorderResultsWithGPT(
       ? `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
-- Return EXACTLY ${isEmergencyMode ? 15 : 4} products maximum. NO MORE THAN ${isEmergencyMode ? 15 : 4} PRODUCTS EVER.
-- If given more products, select only the ${isEmergencyMode ? 15 : 4} most relevant ones.
+- Return ONLY relevant products, up to ${explain ? (isEmergencyMode ? 15 : 4) : (isEmergencyMode ? 15 : 8)} maximum.
+- Quality over quantity - don't include products that don't match the search intent.
+- If there are fewer relevant products, return only those that match well.
 - You must respond in the EXACT same language as the search query.
 - Explanations must be in the same language as the query (Hebrew if query is Hebrew, English if query is English).
 
@@ -4143,8 +4144,9 @@ The search query intent to analyze is provided separately in the user content.`
       : `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
-- Return EXACTLY ${isEmergencyMode ? 15 : 4} products maximum. NO MORE THAN ${isEmergencyMode ? 15 : 4} PRODUCTS EVER.
-- If given more products, select only the ${isEmergencyMode ? 15 : 4} most relevant ones.
+- Return ONLY relevant products, up to ${explain ? (isEmergencyMode ? 15 : 4) : (isEmergencyMode ? 15 : 8)} maximum.
+- Quality over quantity - don't include products that don't match the search intent.
+- If there are fewer relevant products, return only those that match well.
 - You must respond in the EXACT same language as the search query.
 
 STRICT RULES:
@@ -4165,10 +4167,11 @@ The search query intent to analyze is provided separately in the user content.`;
 Products to rank:
 ${JSON.stringify(productData, null, 2)}`;
 
-    const responseSchema = explain 
+    const responseSchema = explain
       ? {
           type: Type.ARRAY,
           maxItems: isEmergencyMode ? 15 : 4,
+          minItems: 0,  // Allow empty array if no relevant results
           items: {
             type: Type.OBJECT,
             properties: {
@@ -4186,7 +4189,8 @@ ${JSON.stringify(productData, null, 2)}`;
         }
       : {
           type: Type.ARRAY,
-          maxItems: isEmergencyMode ? 15 : 4,
+          maxItems: isEmergencyMode ? 15 : 8,  // Up to 8 in non-explain mode
+          minItems: 0,  // Allow empty array if no relevant results
           items: {
             type: Type.OBJECT,
             properties: {
@@ -7492,9 +7496,54 @@ app.post("/fast-search", async (req, res) => {
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
-    // STEP 2: Handle Results
-    // If ALL query words match categories → BROAD search (return all)
-    // If ANY word doesn't match → SPECIFIC search (LLM validation)
+    // STEP 2: Check if filters were extracted from textual match
+    // ============================================================
+    const hasTextualFilters = filterCheck && (
+      (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) ||
+      (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0)
+    );
+
+    console.log(`[${requestId}] Textual filters extracted: ${hasTextualFilters ? 'YES' : 'NO'}`);
+    if (hasTextualFilters) {
+      console.log(`[${requestId}]   Hard: ${filterCheck.matchedHardCategories?.join(', ') || 'none'}`);
+      console.log(`[${requestId}]   Soft: ${filterCheck.matchedSoftCategories?.join(', ') || 'none'}`);
+    }
+
+    // ============================================================
+    // STEP 3: If no textual filters → try LLM filter extraction
+    // ============================================================
+    let llmExtractedFilters = null;
+    if (!hasTextualFilters && !isPerfectFilterMatch) {
+      console.log(`[${requestId}] 🤖 No textual filters found → trying LLM filter extraction...`);
+
+      try {
+        const extractionStart = Date.now();
+        llmExtractedFilters = await extractFiltersBrief(
+          query,
+          req.store.categories || [],
+          req.store.types || [],
+          req.store.softCategories || '',
+          'wine shop'
+        );
+        const extractionTime = Date.now() - extractionStart;
+
+        const hasLLMFilters = llmExtractedFilters && (
+          llmExtractedFilters.category ||
+          (llmExtractedFilters.softCategory && llmExtractedFilters.softCategory.length > 0)
+        );
+
+        if (hasLLMFilters) {
+          console.log(`[${requestId}] ✅ LLM extracted filters (${extractionTime}ms):`, JSON.stringify(llmExtractedFilters));
+        } else {
+          console.log(`[${requestId}] ℹ️ LLM found no filters (${extractionTime}ms) - will use LLM reranking`);
+        }
+      } catch (err) {
+        console.error(`[${requestId}] ❌ LLM filter extraction failed:`, err.message);
+      }
+    }
+
+    // ============================================================
+    // STEP 4: Handle Results
     // ============================================================
     let shouldUseSimpleResults = false;
     let validatedProducts = [];
