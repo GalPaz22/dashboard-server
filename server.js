@@ -117,6 +117,76 @@ async function initializeRedis() {
 initializeRedis();
 
 /* =========================================================== *\
+   MEMORY MONITORING & PROTECTION
+\* =========================================================== */
+
+// Memory usage tracking
+let lastMemoryWarning = 0;
+const MEMORY_WARNING_INTERVAL = 60000; // 1 minute between warnings
+const MEMORY_LIMIT_MB = 450; // Start warning at 450MB (below 512MB limit)
+const MEMORY_CRITICAL_MB = 480; // Critical threshold
+
+/**
+ * Check memory usage and log warnings
+ */
+function checkMemoryUsage(context = '') {
+  const usage = process.memoryUsage();
+  const heapUsedMB = Math.round(usage.heapUsed / 1024 / 1024);
+  const heapTotalMB = Math.round(usage.heapTotal / 1024 / 1024);
+  const rssMB = Math.round(usage.rss / 1024 / 1024);
+
+  // Log critical memory usage
+  if (heapUsedMB > MEMORY_CRITICAL_MB) {
+    console.error(`[MEMORY CRITICAL] ${context} - Heap: ${heapUsedMB}MB / Total: ${heapTotalMB}MB / RSS: ${rssMB}MB`);
+
+    // Force garbage collection if available (run node with --expose-gc flag)
+    if (global.gc) {
+      console.log('[MEMORY] Forcing garbage collection...');
+      global.gc();
+      const afterGC = process.memoryUsage();
+      const afterHeapMB = Math.round(afterGC.heapUsed / 1024 / 1024);
+      console.log(`[MEMORY] After GC: ${afterHeapMB}MB (freed ${heapUsedMB - afterHeapMB}MB)`);
+    }
+  } else if (heapUsedMB > MEMORY_LIMIT_MB) {
+    const now = Date.now();
+    if (now - lastMemoryWarning > MEMORY_WARNING_INTERVAL) {
+      console.warn(`[MEMORY WARNING] ${context} - Heap: ${heapUsedMB}MB / Total: ${heapTotalMB}MB / RSS: ${rssMB}MB`);
+      lastMemoryWarning = now;
+    }
+  }
+
+  return { heapUsedMB, heapTotalMB, rssMB };
+}
+
+/**
+ * Middleware to monitor memory usage per request
+ */
+function memoryMonitoringMiddleware(req, res, next) {
+  const startMemory = process.memoryUsage().heapUsed;
+  const startTime = Date.now();
+
+  // Check memory before processing
+  const beforeMemory = checkMemoryUsage(`Before ${req.method} ${req.path}`);
+
+  // Override res.json to check memory after response
+  const originalJson = res.json.bind(res);
+  res.json = function(data) {
+    const endMemory = process.memoryUsage().heapUsed;
+    const memoryDelta = Math.round((endMemory - startMemory) / 1024 / 1024);
+    const duration = Date.now() - startTime;
+
+    if (memoryDelta > 50) {
+      console.warn(`[MEMORY] ${req.method} ${req.path} used ${memoryDelta}MB in ${duration}ms`);
+    }
+
+    checkMemoryUsage(`After ${req.method} ${req.path}`);
+    return originalJson(data);
+  };
+
+  next();
+}
+
+/* =========================================================== *\
    PAGINATION SESSION MANAGEMENT (Memory Leak Prevention)
 \* =========================================================== */
 
@@ -569,8 +639,13 @@ async function warmCache() {
 }
 
 const app = express();
-app.use(bodyParser.json());
+
+// 🎯 MEMORY PROTECTION: Limit request body size to prevent OOM
+app.use(bodyParser.json({ limit: '1mb' }));
 app.use(cors({ origin: "*" }));
+
+// 🎯 MEMORY MONITORING: Track memory usage per request
+app.use(memoryMonitoringMiddleware);
 
 // Initialize Google Generative AI client
 const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
@@ -1697,6 +1772,16 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
   }
 
   pipeline.push({ $limit: limit });
+
+  // 🎯 MEMORY OPTIMIZATION: Exclude heavy fields to reduce payload size
+  pipeline.push({
+    $project: {
+      embedding: 0,  // Exclude 1536-dimensional vector (~12KB each)
+      description2: 0,  // Exclude long descriptions
+      description3: 0
+    }
+  });
+
   return pipeline;
 };
 
@@ -1837,6 +1922,15 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
       }
     });
   }
+
+  // 🎯 MEMORY OPTIMIZATION: Exclude heavy fields to reduce payload size
+  pipeline.push({
+    $project: {
+      embedding: 0,  // Exclude 1536-dimensional vector (~12KB each)
+      description2: 0,  // Exclude long descriptions
+      description3: 0
+    }
+  });
 
   return pipeline;
 }
@@ -8012,11 +8106,17 @@ app.post("/search", async (req, res) => {
       let searchMode = '';
 
       if (isPerfectFilterMatch) {
-        // 🎯 PERFECT MATCH: Return all matching products (category-based search)
-        // Even if one product has exact name match, if it's a category search, return all
-        approvedProducts = simpleResults; // No limit for category searches
+        // 🎯 PERFECT MATCH: Return matching products (category-based search)
+        // 🎯 MEMORY PROTECTION: Limit even perfect matches to prevent OOM
+        const MAX_PERFECT_MATCH_RESULTS = 100;
+        approvedProducts = simpleResults.slice(0, MAX_PERFECT_MATCH_RESULTS);
         searchMode = 'perfect-filter-match';
-        console.log(`[${requestId}] 🎯 Perfect filter match detected - returning ALL ${approvedProducts.length} products from categories`);
+
+        if (simpleResults.length > MAX_PERFECT_MATCH_RESULTS) {
+          console.log(`[${requestId}] 🎯 Perfect filter match detected - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
+        } else {
+          console.log(`[${requestId}] 🎯 Perfect filter match detected - returning ${approvedProducts.length} products from categories`);
+        }
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
         const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
