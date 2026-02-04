@@ -794,7 +794,12 @@ app.get("/get-session-clicks", async (req, res) => {
     const db = client.db(dbName);
     const clickEventsCollection = db.collection("product_click_events");
 
-    const sessionClicks = await clickEventsCollection.find({ sessionId: sessionId }).sort({ timestamp: 1 }).toArray();
+    // 🎯 MEMORY OPTIMIZATION: Limit to 1000 most recent clicks to prevent OOM on old sessions
+    const sessionClicks = await clickEventsCollection
+      .find({ sessionId: sessionId })
+      .sort({ timestamp: 1 })
+      .limit(1000)
+      .toArray();
 
     if (sessionClicks.length === 0) {
       return res.status(404).json({ message: "No clicks found for this session", sessionClicks: [] });
@@ -7208,8 +7213,14 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
     if (searchLimit > 0) {
       results = await collection.find(searchQuery).limit(searchLimit).toArray();
     } else {
-      // No limit for perfect category matches - return all matching products
-      results = await collection.find(searchQuery).toArray();
+      // 🎯 MEMORY OPTIMIZATION: Limit perfect category matches to 2000 products to prevent OOM
+      // Even for broad categories like "wine", this ensures memory safety
+      const MAX_CATEGORY_RESULTS = 2000;
+      results = await collection.find(searchQuery).limit(MAX_CATEGORY_RESULTS).toArray();
+
+      if (results.length === MAX_CATEGORY_RESULTS) {
+        console.warn(`[SIMPLE SEARCH] Category match returned ${MAX_CATEGORY_RESULTS} results (limit reached for memory safety)`);
+      }
     }
   }
 
@@ -13948,22 +13959,70 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
 
     // Fallback: if session_id exists, try to find it in existing tracking data
     if (!targetDbName && sessionId) {
-      const client = await getMongoClient();
-      const usersDb = client.db('semantix');
-      const allUsers = await usersDb.collection('users').find({}).toArray();
-      
-      for (const user of allUsers) {
-        const userDbName = user.credentials?.dbName;
-        if (!userDbName) continue;
-        
-        const userDb = client.db(userDbName);
-        const clickCount = await userDb.collection('product_clicks').countDocuments({ session_id: sessionId }, { limit: 1 });
-        
-        if (clickCount > 0) {
-          targetDbName = userDbName;
-          apiKey = user.credentials.apiKey;
-          console.log(`[${requestId}] 🎯 Matched session_id to DB: ${targetDbName}`);
-          break;
+      // 🎯 MEMORY OPTIMIZATION: Use Redis cache for session_id -> dbName lookups
+      const cacheKey = `session:dbName:${sessionId}`;
+
+      if (redisClient && redisReady) {
+        try {
+          const cachedDbName = await redisClient.get(cacheKey);
+          if (cachedDbName) {
+            targetDbName = cachedDbName;
+
+            // Get apiKey from user record
+            const client = await getMongoClient();
+            const usersDb = client.db('semantix');
+            const user = await usersDb.collection('users').findOne({ 'credentials.dbName': cachedDbName });
+            if (user) {
+              apiKey = user.credentials.apiKey;
+              console.log(`[${requestId}] 🎯 Matched session_id to DB (cached): ${targetDbName}`);
+            }
+          }
+        } catch (cacheError) {
+          console.warn(`[${requestId}] Redis cache lookup failed:`, cacheError.message);
+        }
+      }
+
+      // If not in cache, search (with STRICT LIMIT to prevent OOM)
+      if (!targetDbName) {
+        const client = await getMongoClient();
+        const usersDb = client.db('semantix');
+
+        // 🎯 CRITICAL FIX: Limit to 50 users to prevent memory exhaustion
+        const recentUsers = await usersDb.collection('users')
+          .find({})
+          .sort({ _id: -1 }) // Most recent users first
+          .limit(50)
+          .toArray();
+
+        console.log(`[${requestId}] ℹ️ Searching ${recentUsers.length} recent users for session_id match (limited for memory safety)`);
+
+        for (const user of recentUsers) {
+          const userDbName = user.credentials?.dbName;
+          if (!userDbName) continue;
+
+          const userDb = client.db(userDbName);
+          const clickCount = await userDb.collection('product_clicks').countDocuments({ session_id: sessionId }, { limit: 1 });
+
+          if (clickCount > 0) {
+            targetDbName = userDbName;
+            apiKey = user.credentials.apiKey;
+            console.log(`[${requestId}] 🎯 Matched session_id to DB: ${targetDbName}`);
+
+            // Cache for 24 hours
+            if (redisClient && redisReady) {
+              try {
+                await redisClient.setEx(cacheKey, 86400, targetDbName);
+                console.log(`[${requestId}] 📦 Cached session_id -> DB mapping`);
+              } catch (cacheError) {
+                console.warn(`[${requestId}] Failed to cache mapping:`, cacheError.message);
+              }
+            }
+            break;
+          }
+        }
+
+        if (!targetDbName) {
+          console.warn(`[${requestId}] ⚠️ Session ${sessionId} not found in ${recentUsers.length} recent users - may be from older store`);
         }
       }
     }
@@ -14002,7 +14061,12 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
     if (sessionId && targetDbName !== 'semantix_tracking') {
       try {
         const clicksCollection = db.collection('product_clicks');
-        const clicks = await clicksCollection.find({ session_id: sessionId }).toArray();
+        // 🎯 MEMORY OPTIMIZATION: Limit to 500 most recent clicks to prevent OOM
+        const clicks = await clicksCollection
+          .find({ session_id: sessionId })
+          .sort({ timestamp: -1 })
+          .limit(500)
+          .toArray();
         
         if (clicks.length > 0) {
           console.log(`[${requestId}] 🔗 Linked order to ${clicks.length} product clicks`);
@@ -14173,21 +14237,61 @@ app.post("/webhooks/woocommerce/order-created", express.json({ limit: '10mb' }),
 
     // Fallback: find by session_id in existing data
     if (!targetDbName && sessionId) {
-      const client = await getMongoClient();
-      const usersDb = client.db('semantix');
-      const allUsers = await usersDb.collection('users').find({}).toArray();
+      // 🎯 MEMORY OPTIMIZATION: Use Redis cache for session_id -> dbName lookups
+      const cacheKey = `session:dbName:${sessionId}`;
 
-      for (const user of allUsers) {
-        const userDbName = user.credentials?.dbName;
-        if (!userDbName) continue;
+      if (redisClient && redisReady) {
+        try {
+          const cachedDbName = await redisClient.get(cacheKey);
+          if (cachedDbName) {
+            targetDbName = cachedDbName;
+            console.log(`[${requestId}] 🎯 Matched session_id to DB (cached): ${targetDbName}`);
+          }
+        } catch (cacheError) {
+          console.warn(`[${requestId}] Redis cache lookup failed:`, cacheError.message);
+        }
+      }
 
-        const userDb = client.db(userDbName);
-        const clickCount = await userDb.collection('product_clicks').countDocuments({ session_id: sessionId }, { limit: 1 });
+      // If not in cache, search (with STRICT LIMIT to prevent OOM)
+      if (!targetDbName) {
+        const client = await getMongoClient();
+        const usersDb = client.db('semantix');
 
-        if (clickCount > 0) {
-          targetDbName = userDbName;
-          console.log(`[${requestId}] 🎯 Matched session_id to DB: ${targetDbName}`);
-          break;
+        // 🎯 CRITICAL FIX: Limit to 50 users to prevent memory exhaustion
+        const recentUsers = await usersDb.collection('users')
+          .find({})
+          .sort({ _id: -1 }) // Most recent users first
+          .limit(50)
+          .toArray();
+
+        console.log(`[${requestId}] ℹ️ Searching ${recentUsers.length} recent users for session_id match (limited for memory safety)`);
+
+        for (const user of recentUsers) {
+          const userDbName = user.credentials?.dbName;
+          if (!userDbName) continue;
+
+          const userDb = client.db(userDbName);
+          const clickCount = await userDb.collection('product_clicks').countDocuments({ session_id: sessionId }, { limit: 1 });
+
+          if (clickCount > 0) {
+            targetDbName = userDbName;
+            console.log(`[${requestId}] 🎯 Matched session_id to DB: ${targetDbName}`);
+
+            // Cache for 24 hours
+            if (redisClient && redisReady) {
+              try {
+                await redisClient.setEx(cacheKey, 86400, targetDbName);
+                console.log(`[${requestId}] 📦 Cached session_id -> DB mapping`);
+              } catch (cacheError) {
+                console.warn(`[${requestId}] Failed to cache mapping:`, cacheError.message);
+              }
+            }
+            break;
+          }
+        }
+
+        if (!targetDbName) {
+          console.warn(`[${requestId}] ⚠️ WooCommerce session ${sessionId} not found in ${recentUsers.length} recent users - may be from older store`);
         }
       }
     }
