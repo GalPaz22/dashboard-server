@@ -117,6 +117,116 @@ async function initializeRedis() {
 initializeRedis();
 
 /* =========================================================== *\
+   PAGINATION SESSION MANAGEMENT (Memory Leak Prevention)
+\* =========================================================== */
+
+// Constants for pagination limits
+const MAX_PAGINATION_DEPTH = 50; // Maximum number of batches per session
+const PAGINATION_SESSION_TTL = 3600; // 1 hour TTL for pagination sessions
+
+/**
+ * Store pagination session data in Redis to prevent token bloat
+ * @param {string} sessionId - Unique session identifier
+ * @param {Object} data - Data to store (deliveredIds, topProductEmbeddings, etc.)
+ * @param {number} ttl - Time to live in seconds (default: 1 hour)
+ * @returns {Promise<boolean>} - Success status
+ */
+async function storePaginationSession(sessionId, data, ttl = PAGINATION_SESSION_TTL) {
+  if (!redisClient || !redisReady) {
+    console.warn('[PAGINATION] Redis not available, pagination data will be lost');
+    return false;
+  }
+
+  try {
+    const key = `pagination:${sessionId}`;
+    await redisClient.setEx(key, ttl, JSON.stringify(data));
+    console.log(`[PAGINATION] Stored session ${sessionId} (${Math.round(JSON.stringify(data).length / 1024)}KB, TTL: ${ttl}s)`);
+    return true;
+  } catch (error) {
+    console.error(`[PAGINATION] Failed to store session ${sessionId}:`, error.message);
+    return false;
+  }
+}
+
+/**
+ * Retrieve pagination session data from Redis
+ * @param {string} sessionId - Unique session identifier
+ * @returns {Promise<Object|null>} - Session data or null if not found
+ */
+async function getPaginationSession(sessionId) {
+  if (!redisClient || !redisReady) {
+    console.warn('[PAGINATION] Redis not available, cannot retrieve session');
+    return null;
+  }
+
+  try {
+    const key = `pagination:${sessionId}`;
+    const data = await redisClient.get(key);
+    if (!data) {
+      console.log(`[PAGINATION] Session ${sessionId} not found or expired`);
+      return null;
+    }
+
+    const parsed = JSON.parse(data);
+    console.log(`[PAGINATION] Retrieved session ${sessionId} (${Math.round(data.length / 1024)}KB)`);
+    return parsed;
+  } catch (error) {
+    console.error(`[PAGINATION] Failed to retrieve session ${sessionId}:`, error.message);
+    return null;
+  }
+}
+
+/**
+ * Update pagination session with new delivered IDs
+ * @param {string} sessionId - Unique session identifier
+ * @param {Array} newDeliveredIds - New product IDs to add
+ * @param {number} batchNumber - Current batch number
+ * @returns {Promise<Object|null>} - Updated session data or null on failure
+ */
+async function updatePaginationSession(sessionId, newDeliveredIds, batchNumber) {
+  if (!redisClient || !redisReady) {
+    return null;
+  }
+
+  try {
+    // Check pagination depth limit
+    if (batchNumber > MAX_PAGINATION_DEPTH) {
+      console.warn(`[PAGINATION] Session ${sessionId} exceeded max depth (${batchNumber}/${MAX_PAGINATION_DEPTH})`);
+      throw new Error(`Maximum pagination depth exceeded (${MAX_PAGINATION_DEPTH} batches)`);
+    }
+
+    const session = await getPaginationSession(sessionId);
+    if (!session) {
+      return null;
+    }
+
+    // Append new delivered IDs
+    const updatedDeliveredIds = [...(session.deliveredIds || []), ...newDeliveredIds];
+    const updatedSession = {
+      ...session,
+      deliveredIds: updatedDeliveredIds,
+      batchNumber: batchNumber,
+      lastUpdate: Date.now()
+    };
+
+    // Store updated session
+    await storePaginationSession(sessionId, updatedSession);
+    return updatedSession;
+  } catch (error) {
+    console.error(`[PAGINATION] Failed to update session ${sessionId}:`, error.message);
+    throw error;
+  }
+}
+
+/**
+ * Generate a unique pagination session ID
+ * @returns {string} - Unique session ID
+ */
+function generatePaginationSessionId() {
+  return `${Date.now()}-${crypto.randomBytes(8).toString('hex')}`;
+}
+
+/* =========================================================== *\
    AI CIRCUIT BREAKER & FALLBACK SYSTEM
 \* =========================================================== */
 
@@ -5355,15 +5465,42 @@ app.get("/search/load-more", async (req, res) => {
       });
     }
     
-    const { query, filters, offset, timestamp, type, extractedCategories, session_id } = paginationData;
-    
+    const { query, filters, offset, timestamp, type, extractedCategories, session_id, paginationSessionId } = paginationData;
+
     // Check if token is expired (24 hours)
     const tokenAge = Date.now() - timestamp;
     if (tokenAge > 86400000) {
-      return res.status(410).json({ 
+      return res.status(410).json({
         error: "Pagination token expired",
         requestId: requestId
       });
+    }
+
+    // 🎯 MEMORY OPTIMIZATION: Retrieve large data from Redis
+    let paginationSession = null;
+    if (paginationSessionId) {
+      paginationSession = await getPaginationSession(paginationSessionId);
+
+      if (!paginationSession) {
+        console.warn(`[${requestId}] Pagination session ${paginationSessionId} not found - continuing without deliveredIds`);
+      } else {
+        console.log(`[${requestId}] Retrieved pagination session: ${paginationSession.deliveredIds?.length || 0} delivered IDs, batch ${paginationSession.batchNumber || 1}`);
+
+        // Check pagination depth limit
+        if (paginationSession.batchNumber >= MAX_PAGINATION_DEPTH) {
+          return res.status(429).json({
+            error: `Maximum pagination depth exceeded (${MAX_PAGINATION_DEPTH} batches)`,
+            requestId: requestId,
+            message: "Please refine your search to get more specific results"
+          });
+        }
+
+        // Restore topProductEmbeddings from Redis if they exist
+        if (paginationSession.topProductEmbeddings && extractedCategories) {
+          extractedCategories.topProductEmbeddings = paginationSession.topProductEmbeddings;
+          console.log(`[${requestId}] 🧬 Restored ${paginationSession.topProductEmbeddings.length} product embeddings from Redis`);
+        }
+      }
     }
     
     // Check if this is a category-filtered request or complex tier-2 request
@@ -6001,14 +6138,54 @@ app.get("/search/load-more", async (req, res) => {
     }
     
     // Create next pagination token if there's more
-    const nextToken = hasMore ? Buffer.from(JSON.stringify({
-      query,
-      filters,
-      offset: nextOffset,
-      timestamp: timestamp, // Keep original timestamp
-      extractedCategories: extractedCategories, // Include extracted categories for subsequent load-more
-      session_id: session_id // 👤 Maintain personalization context
-    })).toString('base64') : null;
+    let nextToken = null;
+    if (hasMore) {
+      // 🎯 MEMORY OPTIMIZATION: Update pagination session with newly delivered IDs
+      if (paginationSessionId && paginationSession) {
+        try {
+          const newDeliveredIds = paginatedResults.map(p => p._id);
+          const nextBatchNumber = (paginationSession.batchNumber || 1) + 1;
+
+          await updatePaginationSession(paginationSessionId, newDeliveredIds, nextBatchNumber);
+
+          // Create lightweight token with session reference
+          nextToken = Buffer.from(JSON.stringify({
+            query,
+            filters,
+            offset: nextOffset,
+            timestamp: timestamp, // Keep original timestamp
+            type: type,
+            extractedCategories: extractedCategories, // Lightweight categories (no embeddings)
+            session_id: session_id, // 👤 Maintain personalization context
+            paginationSessionId: paginationSessionId // 🎯 Reference to Redis session
+          })).toString('base64');
+
+          console.log(`[${requestId}] 🎯 Updated pagination session batch ${nextBatchNumber}, total delivered: ${(paginationSession.deliveredIds?.length || 0) + newDeliveredIds.length}`);
+        } catch (sessionError) {
+          console.error(`[${requestId}] Failed to update pagination session:`, sessionError.message);
+          // Fallback to basic token without session
+          nextToken = Buffer.from(JSON.stringify({
+            query,
+            filters,
+            offset: nextOffset,
+            timestamp: timestamp,
+            extractedCategories: extractedCategories,
+            session_id: session_id
+          })).toString('base64');
+        }
+      } else {
+        // No pagination session - create basic token
+        nextToken = Buffer.from(JSON.stringify({
+          query,
+          filters,
+          offset: nextOffset,
+          timestamp: timestamp,
+          type: type,
+          extractedCategories: extractedCategories,
+          session_id: session_id
+        })).toString('base64');
+      }
+    }
     
     console.log(`[${requestId}] Returning ${paginatedResults.length} products (${startIndex}-${endIndex} of ${cachedResults.length})`);
     
@@ -10132,15 +10309,39 @@ app.post("/search", async (req, res) => {
         }
       }
 
+      // 🎯 MEMORY OPTIMIZATION: Store large data in Redis instead of token
+      const paginationSessionId = generatePaginationSessionId();
+
+      // Store large data structures in Redis
+      const sessionData = {
+        topProductEmbeddings: extractedFromLLM.topProductEmbeddings || [],
+        deliveredIds: limitedResults.map(p => p._id),
+        batchNumber: 1,
+        lastUpdate: Date.now()
+      };
+
+      await storePaginationSession(paginationSessionId, sessionData);
+
+      // Create lightweight token without embeddings or deliveredIds
+      const lightweightExtractedCategories = {
+        hardCategories: extractedFromLLM.hardCategories,
+        softCategories: extractedFromLLM.softCategories,
+        tier2BoostMap: extractedFromLLM.tier2BoostMap
+        // topProductEmbeddings removed - stored in Redis
+      };
+
       nextToken = Buffer.from(JSON.stringify({
         query,
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
-        extractedCategories: extractedFromLLM, // Categories + boost map for Tier 2
+        extractedCategories: lightweightExtractedCategories, // Lightweight categories only
         type: 'complex-tier2', // Mark as complex query tier 2
-        session_id: session_id // 👤 Personalization context
+        session_id: session_id, // 👤 Personalization context
+        paginationSessionId: paginationSessionId // 🎯 Reference to Redis session
       })).toString('base64');
+
+      console.log(`[${requestId}] 🎯 MEMORY OPTIMIZATION: Token size reduced from ~${Math.round(JSON.stringify(extractedFromLLM).length / 1024)}KB to ~${Math.round(JSON.stringify(lightweightExtractedCategories).length / 1024)}KB`);
       
       console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 3 textual matches`);
       console.log(`[${requestId}] 📊 LLM-extracted categories (from 3 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
@@ -10226,13 +10427,27 @@ app.post("/search", async (req, res) => {
         }
       }
 
+      // 🎯 MEMORY OPTIMIZATION: Use pagination session for simple queries too
+      const simplePaginationSessionId = generatePaginationSessionId();
+
+      // Store delivered IDs in Redis
+      const simpleSessionData = {
+        deliveredIds: limitedResults.map(p => p._id),
+        batchNumber: 1,
+        lastUpdate: Date.now()
+      };
+
+      await storePaginationSession(simplePaginationSessionId, simpleSessionData);
+
       nextToken = Buffer.from(JSON.stringify({
         query,
         filters: enhancedFilters,
         offset: limitedResults.length,
         timestamp: Date.now(),
+        type: 'simple',
         extractedCategories: extractedForSimple, // Include extracted categories for load-more
-        session_id: session_id // 👤 Personalization context
+        session_id: session_id, // 👤 Personalization context
+        paginationSessionId: simplePaginationSessionId // 🎯 Reference to Redis session
       })).toString('base64');
     }
     
