@@ -7206,7 +7206,13 @@ function classifySpecificityFallback(query) {
  */
 async function performSimpleSearch(db, collection, query, store, limit = 10) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
-  
+
+  // 🎯 MEMORY PROTECTION: Limit query complexity to prevent OOM
+  if (queryWords.length > 8) {
+    console.warn(`[SIMPLE-SEARCH] Query too complex (${queryWords.length} words), limiting to 8 words for memory safety`);
+    queryWords.splice(8);
+  }
+
   // 1. Check perfect filter match
   const filterCheck = detectPerfectFilterMatch(
     query,
@@ -7237,31 +7243,26 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       // 🎯 CRITICAL: Hard categories are MANDATORY (AND condition)
       if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
         filterCheck.matchedHardCategories.forEach(cat => {
-          // Each hard category must match in either 'category' OR 'type' field
+          // 🎯 MEMORY OPTIMIZATION: Use exact match instead of regex for better performance
+          // MongoDB can use indexes for exact matches but not for regex
+          const lowerCat = cat.toLowerCase();
           andConditions.push({
             $or: [
-              { category: { $regex: cat, $options: 'i' } },
-              { type: { $regex: cat, $options: 'i' } }
+              { category: lowerCat },
+              { type: lowerCat }
             ]
           });
         });
       }
-      
+
       // 🎯 Soft categories are OPTIONAL (only add if no hard categories, or as additional filter)
       if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
-        const softConditions = filterCheck.matchedSoftCategories.map(cat => ({
-          softCategory: { $regex: cat, $options: 'i' }
-        }));
+        // 🎯 MEMORY OPTIMIZATION: Use $in operator instead of regex for memory efficiency
+        const lowerSoftCats = filterCheck.matchedSoftCategories.map(cat => cat.toLowerCase());
+        const softConditions = { softCategory: { $in: lowerSoftCats } };
         
-        // If there are hard categories, soft categories are additional AND filters
-        // If there are NO hard categories, soft categories are OR filters
-        if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
-          // With hard categories: require at least one soft category match (AND)
-          andConditions.push({ $or: softConditions });
-        } else {
-          // Without hard categories: match any soft category (OR)
-          andConditions.push({ $or: softConditions });
-        }
+        // Add soft category filter (works with or without hard categories)
+        andConditions.push(softConditions);
       }
       
       searchQuery = { $and: andConditions };
@@ -7273,11 +7274,12 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       });
     } else {
       // 🎯 REGULAR SEARCH: Use original fuzzy word matching
+      // 🎯 CRITICAL MEMORY FIX: Limit regex to indexed fields only, skip descriptions
       const fuzzyPatterns = queryWords.map(word => ({
         exact: word,
         fuzzy: generateFuzzyRegex(word)
       }));
-      
+
       searchQuery = {
         $and: [
           // Stock status filter: instock OR no stockStatus field
@@ -7287,16 +7289,13 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
               { stockStatus: { $exists: false } }
             ]
           },
-          // Text search filters
+          // 🎯 MEMORY OPTIMIZATION: Only search indexed fields (name, category, type)
+          // REMOVED: softCategory and description regex to prevent OOM
           ...fuzzyPatterns.map(pattern => ({
             $or: [
               { name: { $regex: pattern.fuzzy, $options: 'i' } },
-              { category: { $regex: pattern.fuzzy, $options: 'i' } },
-              { type: { $regex: pattern.fuzzy, $options: 'i' } },
-              { softCategory: { $regex: pattern.fuzzy, $options: 'i' } },
-              // 🎯 SAFE SEARCH: Don't use regex on long text fields to avoid 502/OOM
-              // Use a simple inclusion check instead (no fuzzy for descriptions)
-              { description1: { $regex: pattern.exact, $options: 'i' } }
+              { category: { $regex: pattern.exact, $options: 'i' } },
+              { type: { $regex: pattern.exact, $options: 'i' } }
             ]
           }))
         ]
@@ -7305,12 +7304,19 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
     
     // Apply limit only if searchLimit > 0 (for non-perfect matches)
     if (searchLimit > 0) {
-      results = await collection.find(searchQuery).limit(searchLimit).toArray();
+      // 🎯 MEMORY OPTIMIZATION: Add maxTimeMS to prevent runaway queries
+      results = await collection.find(searchQuery)
+        .limit(searchLimit)
+        .maxTimeMS(5000)  // Kill query after 5 seconds
+        .toArray();
     } else {
       // 🎯 MEMORY OPTIMIZATION: Limit perfect category matches to 2000 products to prevent OOM
       // Even for broad categories like "wine", this ensures memory safety
       const MAX_CATEGORY_RESULTS = 2000;
-      results = await collection.find(searchQuery).limit(MAX_CATEGORY_RESULTS).toArray();
+      results = await collection.find(searchQuery)
+        .limit(MAX_CATEGORY_RESULTS)
+        .maxTimeMS(10000)  // Kill query after 10 seconds for large result sets
+        .toArray();
 
       if (results.length === MAX_CATEGORY_RESULTS) {
         console.warn(`[SIMPLE SEARCH] Category match returned ${MAX_CATEGORY_RESULTS} results (limit reached for memory safety)`);
@@ -7698,41 +7704,36 @@ app.post("/fast-search", async (req, res) => {
  * @returns {String} - Fuzzy regex pattern
  */
 function generateFuzzyRegex(word) {
+  // 🎯 CRITICAL MEMORY FIX: Simplified regex patterns to reduce memory usage
+  // Complex patterns with .{0,X} wildcards cause extreme memory consumption
+
   // Escape special regex characters first
   const escapedWord = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  
-  // Don't apply fuzzy to very short words (< 3 chars)
-  if (word.length < 3) {
+
+  // 🎯 MEMORY OPTIMIZATION: Use exact match for short words (< 4 chars)
+  if (word.length < 4) {
     return escapedWord;
   }
-  
-  // Common Hebrew suffixes
+
+  // 🎯 MEMORY OPTIMIZATION: For longer words, only allow optional Hebrew suffix
+  // This keeps patterns simple and memory-efficient
+  // Instead of complex stem matching with wildcards, just handle common suffixes
   const suffixes = ['ים', 'ית', 'ות', 'י', 'ה'];
-  
-  // Check if word already has a suffix, if so, allow the stem as well
+
+  // Check if word already has a suffix
   let stem = escapedWord;
   for (const s of suffixes) {
     if (word.endsWith(s)) {
       stem = word.substring(0, word.length - s.length).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      break;
+      // Return stem with optional suffix: "ספרד(י|ית|ים)?"
+      return stem + '(' + suffixes.slice(0, 3).join('|') + ')?';
     }
   }
 
-  // For 3-5 char words, allow optional suffix (ים, ית, י, ה)
-  // This makes "ישראלי" match "ישראל" and vice-versa
-  if (word.length <= 5) {
-    // If we have a stem, search for stem followed by optional suffix
-    // This handles "ספרדי" -> matches "ספרד" (stem) or "ספרדי", "ספרדית" etc.
-    return stem + '(' + suffixes.join('|') + ')?';
-  }
-  
-  // For longer words (6+), create a more flexible pattern
-  // Allow the word stem (first 75% of chars) + optional suffix
-  const stemLength = Math.floor(word.length * 0.75);
-  const longStem = word.substring(0, stemLength).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  
-  // Allow optional suffixes after the stem
-  return longStem + '.{0,' + (word.length - stemLength + 2) + '}';
+  // For words without suffix, allow optional suffix only
+  // This handles "ישראל" matching "ישראלי"
+  // ⚠️ Reduced from 5 suffixes to 2 to minimize regex complexity
+  return escapedWord + '(י|ים)?';
 }
 
 /**
