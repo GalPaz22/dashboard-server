@@ -1747,12 +1747,20 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
         compound: {
           should: shouldClauses,
           filter: filterClauses
-        }
+        },
+        // 🎯 CRITICAL MEMORY FIX: Limit results at $search stage to prevent memory exhaustion
+        // This prevents Atlas from loading thousands of documents into memory
+        count: { type: "total", threshold: Math.min(limit * 3, 150) }
       }
     };
     pipeline.push(searchStage);
+
+    // 🎯 MEMORY OPTIMIZATION: Add $limit immediately after $search
+    // This ensures MongoDB doesn't process more documents than needed
+    pipeline.push({ $limit: Math.min(limit * 2, 100) });
   } else {
     pipeline.push({ $match: {} });
+    pipeline.push({ $limit: Math.min(limit, 50) });
   }
 
   // Exclude already delivered IDs - kept as $match since Atlas Search filter doesn't support $nin
@@ -1771,6 +1779,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     });
   }
 
+  // Final limit to ensure we don't exceed requested amount
   pipeline.push({ $limit: limit });
 
   // 🎯 MEMORY OPTIMIZATION: Exclude heavy fields to reduce payload size
@@ -1893,15 +1902,18 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
   // Log vector search details
   console.log(`[VECTOR SEARCH] Filters: hard=${Object.keys(hardFilters).length}, soft=${softFilters ? Object.keys(softFilters).length : 0}`);
 
+  // 🎯 CRITICAL MEMORY FIX: Reduce numCandidates to prevent loading too many vectors
+  // numCandidates determines how many documents are examined during vector search
+  // High values (200+) cause memory exhaustion on broad searches
   const pipeline = [
     {
       $vectorSearch: {
         index: "vector_index",
         path: "embedding",
         queryVector: queryEmbedding,
-        numCandidates: Math.max(limit * 10, 200), // Required for ANN search
+        numCandidates: Math.min(limit * 5, 100), // Reduced from limit*10 to limit*5, max 100
         exact: false, // Use ANN (Approximate Nearest Neighbor)
-        limit: limit,
+        limit: Math.min(limit, 50), // Cap at 50 results
         filter: filter,
       },
     },
@@ -7307,19 +7319,19 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       // 🎯 MEMORY OPTIMIZATION: Add maxTimeMS to prevent runaway queries
       results = await collection.find(searchQuery)
         .limit(searchLimit)
-        .maxTimeMS(5000)  // Kill query after 5 seconds
+        .maxTimeMS(3000)  // Kill query after 3 seconds
         .toArray();
     } else {
-      // 🎯 MEMORY OPTIMIZATION: Limit perfect category matches to 2000 products to prevent OOM
-      // Even for broad categories like "wine", this ensures memory safety
-      const MAX_CATEGORY_RESULTS = 2000;
+      // 🎯 CRITICAL MEMORY FIX: Drastically reduce limit for broad searches like "red wine"
+      // Even 100 products is enough for user experience
+      const MAX_CATEGORY_RESULTS = 50;  // Changed from 2000 to 50
       results = await collection.find(searchQuery)
         .limit(MAX_CATEGORY_RESULTS)
-        .maxTimeMS(10000)  // Kill query after 10 seconds for large result sets
+        .maxTimeMS(3000)  // Reduced from 10s to 3s
         .toArray();
 
       if (results.length === MAX_CATEGORY_RESULTS) {
-        console.warn(`[SIMPLE SEARCH] Category match returned ${MAX_CATEGORY_RESULTS} results (limit reached for memory safety)`);
+        console.warn(`[SIMPLE SEARCH] Category match limited to ${MAX_CATEGORY_RESULTS} results for memory safety`);
       }
     }
   }
