@@ -10120,32 +10120,71 @@ app.post("/search", async (req, res) => {
 
           const reorderFn = syncMode === 'image' ? reorderImagesWithGPT : reorderResultsWithGPT;
 
-          // 🛡️ PRE-RERANK HARD CATEGORY FILTER: Only send products matching query hard category to LLM
-          // This ensures the LLM can only select from products in the correct category
+          // 🛡️ PRE-RERANK HARD FILTER: Only send products matching query-extracted hard filters to LLM
+          // This ensures the LLM only ranks products that match the basic criteria (category, type)
+          // Example: "italian red fruity wine" → filter to category="red wine" → LLM only sees red wines
           const preRerankHardCats = hardFilters.category || [];
           const preRerankHardCatsArray = Array.isArray(preRerankHardCats) ? preRerankHardCats.filter(Boolean) : (preRerankHardCats ? [preRerankHardCats] : []);
 
+          const preRerankTypes = hardFilters.type || [];
+          const preRerankTypesArray = Array.isArray(preRerankTypes) ? preRerankTypes.filter(Boolean) : (preRerankTypes ? [preRerankTypes] : []);
+
           let resultsForRerank = combinedResults;
-          if (preRerankHardCatsArray.length > 0) {
+          const hasHardFilters = preRerankHardCatsArray.length > 0 || preRerankTypesArray.length > 0;
+
+          if (hasHardFilters) {
             const beforePreRerank = combinedResults.length;
             resultsForRerank = combinedResults.filter(product => {
-              const productCategories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
-              if (productCategories.length === 0) return false;
-              return preRerankHardCatsArray.some(hardCat =>
-                productCategories.some(pCat =>
-                  pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
-                )
-              );
+              let categoryMatch = true;
+              let typeMatch = true;
+
+              // Check category filter if specified
+              if (preRerankHardCatsArray.length > 0) {
+                const productCategories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
+                if (productCategories.length === 0) {
+                  categoryMatch = false;
+                } else {
+                  categoryMatch = preRerankHardCatsArray.some(hardCat =>
+                    productCategories.some(pCat =>
+                      pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+                    )
+                  );
+                }
+              }
+
+              // Check type filter if specified
+              if (preRerankTypesArray.length > 0) {
+                const productType = product.type;
+                if (!productType) {
+                  typeMatch = false;
+                } else {
+                  typeMatch = preRerankTypesArray.some(filterType =>
+                    productType.toLowerCase().includes(filterType.toLowerCase()) || filterType.toLowerCase().includes(productType.toLowerCase())
+                  );
+                }
+              }
+
+              // Product must match BOTH category AND type (if specified)
+              return categoryMatch && typeMatch;
             });
+
             const preRerankFiltered = beforePreRerank - resultsForRerank.length;
             if (preRerankFiltered > 0) {
-              console.log(`[${requestId}] 🛡️ [PRE-RERANK HARD CATEGORY GATE] Filtered ${preRerankFiltered} products not matching [${preRerankHardCatsArray.join(', ')}] before LLM reranking (${beforePreRerank} → ${resultsForRerank.length})`);
+              const filterDesc = [];
+              if (preRerankHardCatsArray.length > 0) filterDesc.push(`category: [${preRerankHardCatsArray.join(', ')}]`);
+              if (preRerankTypesArray.length > 0) filterDesc.push(`type: [${preRerankTypesArray.join(', ')}]`);
+              console.log(`[${requestId}] 🛡️ [PRE-RERANK HARD FILTER] Filtered ${preRerankFiltered} products not matching extracted filters (${filterDesc.join(', ')}) before LLM (${beforePreRerank} → ${resultsForRerank.length})`);
+            } else {
+              console.log(`[${requestId}] 🛡️ [PRE-RERANK HARD FILTER] All ${beforePreRerank} products match extracted filters - proceeding to LLM`);
             }
+
             // If filtering removed everything, fall back to all results
             if (resultsForRerank.length === 0) {
               console.log(`[${requestId}] ⚠️ Pre-rerank filter removed all results - falling back to unfiltered`);
               resultsForRerank = combinedResults;
             }
+          } else {
+            console.log(`[${requestId}] ℹ️ No hard filters extracted - sending all ${combinedResults.length} products to LLM`);
           }
 
           // For fast mode, limit to 10 products for faster processing
