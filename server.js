@@ -2786,6 +2786,44 @@ async function getQueryEmbedding(cleanedText) {
   }, 604800);
 }
 
+/**
+ * Filters categories to keep only the most specific ones.
+ * Removes general categories when more specific variations exist.
+ * Example: ["earrings", "hoop earrings"] -> ["hoop earrings"]
+ * Example: ["wine", "red wine"] -> ["red wine"]
+ */
+function filterToMostSpecificCategories(categories) {
+  if (!categories) return categories;
+
+  // Convert to array if it's a string
+  const isString = typeof categories === 'string';
+  const categoryArray = isString ? [categories] : categories;
+
+  // If only one category, return as-is
+  if (categoryArray.length <= 1) return categories;
+
+  // Filter out categories that are substrings of other categories
+  const filtered = categoryArray.filter(cat => {
+    const catLower = cat.toLowerCase();
+    // Keep this category only if no other category contains it as a more specific version
+    return !categoryArray.some(otherCat => {
+      const otherLower = otherCat.toLowerCase();
+      // Check if otherCat is more specific (contains cat and is longer)
+      return otherCat !== cat &&
+             otherLower.includes(catLower) &&
+             otherLower.length > catLower.length;
+    });
+  });
+
+  console.log(`[CATEGORY FILTER] Original: ${JSON.stringify(categoryArray)} -> Filtered: ${JSON.stringify(filtered)}`);
+
+  // Return in the same format as input (string or array)
+  if (isString) {
+    return filtered.length > 0 ? filtered[0] : categories;
+  }
+  return filtered.length > 0 ? filtered : categories;
+}
+
 async function extractFiltersFromQueryEnhanced(query, categories, types, softCategories, example, context, customSystemInstruction = null) {
   const cacheKey = generateCacheKey('filters', query, categories, types, softCategories, example, context, customSystemInstruction);
   
@@ -3024,7 +3062,12 @@ ${example}.`;
         }
       }
     }
-    
+
+    // Filter to keep only the most specific categories (e.g., "hoop earrings" over "earrings")
+    if (filters.category) {
+      filters.category = filterToMostSpecificCategories(filters.category);
+    }
+
     // Record success
     aiCircuitBreaker.recordSuccess();
     
@@ -3160,6 +3203,11 @@ Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCa
       filters.category = validate(filters.category, categoriesList);
       filters.type = validate(filters.type, typesList);
       filters.softCategory = validate(filters.softCategory, softCategoriesList);
+
+      // Filter to keep only the most specific categories (e.g., "hoop earrings" over "earrings")
+      if (filters.category) {
+        filters.category = filterToMostSpecificCategories(filters.category);
+      }
 
       return filters;
     } catch (error) {
