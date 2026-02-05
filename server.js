@@ -2791,6 +2791,7 @@ async function getQueryEmbedding(cleanedText) {
  * Removes general categories when more specific variations exist.
  * Example: ["earrings", "hoop earrings"] -> ["hoop earrings"]
  * Example: ["wine", "red wine"] -> ["red wine"]
+ * Example: ["עגילים", "עגילי חישוק"] -> ["עגילי חישוק"]
  */
 function filterToMostSpecificCategories(categories) {
   if (!categories) return categories;
@@ -2802,16 +2803,60 @@ function filterToMostSpecificCategories(categories) {
   // If only one category, return as-is
   if (categoryArray.length <= 1) return categories;
 
-  // Filter out categories that are substrings of other categories
+  // Helper to extract root word by removing common Hebrew and English suffixes
+  const extractRoot = (word) => {
+    let root = word.toLowerCase().trim();
+
+    // Remove common Hebrew plural/construct suffixes: ים, ות, י, ה
+    // For construct forms (סמיכות): עגילים -> עגיל, עגילי -> עגיל
+    root = root.replace(/ים$/, '');  // Plural masculine
+    root = root.replace(/ות$/, '');  // Plural feminine
+    root = root.replace(/י$/, '');   // Construct form
+    root = root.replace(/ה$/, '');   // Definite article or feminine
+
+    // Remove common English plural: s, es
+    root = root.replace(/s$/, '');
+    root = root.replace(/es$/, '');
+
+    return root;
+  };
+
+  // Filter out categories that are substrings of other categories OR share the same root
   const filtered = categoryArray.filter(cat => {
     const catLower = cat.toLowerCase();
-    // Keep this category only if no other category contains it as a more specific version
+    const catRoot = extractRoot(cat);
+
+    // Keep this category only if no other category is more specific
     return !categoryArray.some(otherCat => {
+      if (otherCat === cat) return false;
+
       const otherLower = otherCat.toLowerCase();
-      // Check if otherCat is more specific (contains cat and is longer)
-      return otherCat !== cat &&
-             otherLower.includes(catLower) &&
-             otherLower.length > catLower.length;
+      const otherRoot = extractRoot(otherCat);
+
+      // Check 1: Direct substring match (e.g., "wine" in "red wine")
+      if (otherLower.includes(catLower) && otherLower.length > catLower.length) {
+        return true;
+      }
+
+      // Check 2: Hebrew construct form / root matching
+      // If both share the same root AND one has more words (more specific)
+      const catWords = cat.trim().split(/\s+/);
+      const otherWords = otherCat.trim().split(/\s+/);
+
+      // Check if the first words share the same root
+      if (catWords.length > 0 && otherWords.length > 0) {
+        const firstCatRoot = extractRoot(catWords[0]);
+        const firstOtherRoot = extractRoot(otherWords[0]);
+
+        // If roots match and other category has more words, it's more specific
+        if (firstCatRoot === firstOtherRoot &&
+            firstCatRoot.length >= 3 &&  // Require at least 3 chars for valid root
+            otherWords.length > catWords.length) {
+          return true;
+        }
+      }
+
+      return false;
     });
   });
 
