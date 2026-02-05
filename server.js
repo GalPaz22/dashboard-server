@@ -3573,7 +3573,24 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     }
   }
 
-  // Product name contains full query - with positional scoring
+  // Multi-word phrase match - CHECKED FIRST for higher priority
+  // CRITICAL: Multi-word queries matching product names should rank HIGHER than soft category matches
+  // Example: searching "piling cream" should prioritize products named "piling cream" over products with soft category "piling"
+  const queryWords = queryLower.split(/\s+/);
+  if (queryWords.length > 1) {
+    const queryPhrase = queryWords.join(' ');
+    if (productNameLower.includes(queryPhrase)) {
+      // Higher bonus if phrase at start - MUST be higher than single soft category match (100,000)
+      if (productNameLower.startsWith(queryPhrase + ' ') ||
+          productNameLower === queryPhrase ||
+          productNameLower.startsWith(queryPhrase)) {
+        return 150000; // Phrase at beginning - HIGHER than soft category match
+      }
+      return 120000; // Phrase anywhere in name - still higher than soft category match
+    }
+  }
+
+  // Product name contains full query (single word or already checked multi-word) - with positional scoring
   if (productNameLower.includes(queryLower)) {
     // HIGHER bonus if query appears at the START of product name
     // This makes "עגבניות טריות" rank higher than "רוטב עגבניות"
@@ -3612,21 +3629,6 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
       return 55000; // Cleaned query at beginning
     }
     return 50000; // (was 25000)
-  }
-  
-  // Multi-word phrase match - with positional scoring
-  const queryWords = queryLower.split(/\s+/);
-  if (queryWords.length > 1) {
-    const queryPhrase = queryWords.join(' ');
-    if (productNameLower.includes(queryPhrase)) {
-      // Higher bonus if phrase at start
-      if (productNameLower.startsWith(queryPhrase + ' ') ||
-          productNameLower === queryPhrase ||
-          productNameLower.startsWith(queryPhrase)) {
-        return 45000; // Phrase at beginning
-      }
-      return 40000; // (was 20000)
-    }
   }
 
   // HIGH-SIMILARITY MATCHES AT START - Catches singular/plural variants (עגבניה/עגבניות)
