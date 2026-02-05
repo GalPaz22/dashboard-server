@@ -4142,6 +4142,150 @@ Which products (if any) are semantically valid matches for this query?`;
   }, 7200); // Cache for 2 hours
 }
 
+/**
+ * Selects the most relevant products from a filtered set using LLM.
+ * Used when no textual matches exist but filters were extracted.
+ *
+ * @param {Array} filteredProducts - Products matching extracted filters
+ * @param {string} query - Original search query
+ * @param {string} context - Store context
+ * @param {number} maxResults - Maximum number of products to return (default: 6)
+ * @returns {Object} { success: boolean, products: Array, reason: string }
+ */
+async function selectRelevantProductsWithLLM(filteredProducts, query, context = "wine shop", maxResults = 6) {
+  if (!filteredProducts || filteredProducts.length === 0) {
+    return { success: false, products: [], reason: "No products to select from" };
+  }
+
+  // Limit candidates to reasonable number for LLM processing
+  const candidates = filteredProducts.slice(0, 30);
+
+  const cacheKey = generateCacheKey('select-products', query, candidates.map(p => p._id.toString()).join(','), maxResults);
+
+  return withCache(cacheKey, async () => {
+    try {
+      // Check circuit breaker
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        console.log(`[SELECT] Circuit breaker open, returning first ${maxResults} products for: "${query}"`);
+        return { success: true, products: candidates.slice(0, maxResults), reason: "Circuit breaker - default selection" };
+      }
+
+      const productData = candidates.map((p, index) => ({
+        index: index,
+        _id: p._id.toString(),
+        name: p.name || "No name",
+        description: p.description || "",
+        price: p.price || "No price",
+        category: p.category || "",
+        softCategory: p.softCategory || [],
+        type: p.type || ""
+      }));
+
+      const systemInstruction = `You are an expert at selecting the most relevant products for e-commerce search queries.
+
+Context: ${context}
+
+Your task: Select up to ${maxResults} MOST RELEVANT products from the filtered list that best match the user's search intent.
+
+CRITICAL RULES:
+1. Consider query intent - what is the user actually looking for?
+2. Prioritize products that semantically match the query, even if wording differs
+3. If the query mentions a BRAND, prioritize that brand
+4. If the query mentions specific ATTRIBUTES (e.g., "sweet", "dry", "aged"), prioritize products with those attributes
+5. Select DIVERSE products when possible (different brands, styles, price points)
+6. Return UP TO ${maxResults} products - you may return fewer if less are truly relevant
+
+Examples:
+- Query: "sweet red wine" → Prioritize red wines described as sweet/fruity/dessert
+- Query: "scotch whisky" → Prioritize scotch/single malt whiskies
+- Query: "budget wine" → Prioritize lower-priced wines
+- Query: "premium vodka" → Prioritize higher-end vodka brands
+
+Return:
+1. selectedIndices: Array of indices (0-${candidates.length - 1}) of the MOST relevant products (up to ${maxResults})
+2. reason: Brief explanation of selection criteria (max 30 words)`;
+
+      const userPrompt = `Search query: "${query}"
+
+Available products (already filtered by category/type):
+${productData.map((p, i) => `${i}. ${p.name} - ${p.price} (${p.category || 'no category'}) ${p.description ? '- ' + p.description.substring(0, 100) : ''}`).join('\n')}
+
+Select the ${maxResults} most relevant products for this query.`;
+
+      const response = await genAI.models.generateContent({
+        model: "gemini-2.5-flash-lite", // Fast model for quick selection
+        contents: [{ text: userPrompt }],
+        config: {
+          systemInstruction,
+          temperature: 0.2, // Slightly higher for diversity
+          thinkingConfig: {
+            thinkingBudget: 0,
+          },
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              selectedIndices: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: `Array of product indices (0-${candidates.length - 1}) that are most relevant (up to ${maxResults})`
+              },
+              reason: {
+                type: Type.STRING,
+                description: "Brief explanation of selection criteria (max 30 words)"
+              }
+            },
+            required: ["selectedIndices", "reason"]
+          }
+        }
+      });
+
+      let text = response.text ? response.text.trim() : null;
+
+      if (!text && response.candidates && response.candidates[0]) {
+        const candidate = response.candidates[0];
+        if (candidate.content && candidate.content.parts && candidate.content.parts[0]) {
+          text = candidate.content.parts[0].text;
+        }
+      }
+
+      if (!text) {
+        aiCircuitBreaker.recordFailure();
+        return { success: false, products: [], reason: "No response from LLM" };
+      }
+
+      const result = JSON.parse(text);
+      aiCircuitBreaker.recordSuccess();
+
+      // Validate indices and extract products
+      const validIndices = (result.selectedIndices || [])
+        .filter(idx => typeof idx === 'number' && idx >= 0 && idx < candidates.length)
+        .slice(0, maxResults); // Enforce max limit
+
+      if (validIndices.length === 0) {
+        return { success: false, products: [], reason: "LLM selected no valid products" };
+      }
+
+      const selectedProducts = validIndices.map(idx => candidates[idx]);
+
+      console.log(`[SELECT] LLM selected ${selectedProducts.length} products: ${selectedProducts.map(p => p.name).join(', ')}`);
+      console.log(`[SELECT] Reason: ${result.reason}`);
+
+      return {
+        success: true,
+        products: selectedProducts,
+        reason: result.reason || "LLM selection"
+      };
+
+    } catch (error) {
+      console.error(`[SELECT] Error selecting products with LLM:`, error.message);
+      aiCircuitBreaker.recordFailure();
+      // Fallback: return first N products
+      return { success: true, products: candidates.slice(0, maxResults), reason: `Selection error - default fallback: ${error.message}` };
+    }
+  }, 7200); // Cache for 2 hours
+}
+
 async function reorderResultsWithGPT(
   combinedResults,
   translatedQuery,
@@ -6704,7 +6848,154 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     }
 
     if (highQualityTextMatches.length === 0) {
-      console.log(`[${requestId}] Phase 1: No text matches found (even after LLM validation) - falling back to vector search with filters:`, JSON.stringify(extractedFilters));
+      console.log(`[${requestId}] Phase 1: No text matches found (even after LLM validation)`);
+
+      // 🎯 NEW PIPELINE: Try LLM filter extraction if simple extraction failed or got nothing
+      let hasFilters = (extractedFilters.category || extractedFilters.softCategory || extractedFilters.type);
+
+      if (!hasFilters && enableSimpleCategoryExtraction && categories) {
+        console.log(`[${requestId}] 🤖 No filters from simple extraction - trying LLM filter extraction...`);
+
+        try {
+          // Try LLM-based filter extraction with explain=true for better results
+          const llmExtractedFilters = await extractFiltersFromQueryEnhanced(query, categories, types, softCategories, true, context, null);
+
+          if (llmExtractedFilters.category || llmExtractedFilters.softCategory || llmExtractedFilters.type) {
+            console.log(`[${requestId}] ✅ LLM FILTER EXTRACTION SUCCESS: category="${llmExtractedFilters.category || 'none'}", softCategory="${llmExtractedFilters.softCategory || 'none'}", type="${llmExtractedFilters.type || 'none'}"`);
+            extractedFilters = llmExtractedFilters;
+            hasFilters = true;
+          } else {
+            console.log(`[${requestId}] ❌ LLM filter extraction found no filters`);
+          }
+        } catch (llmError) {
+          console.error(`[${requestId}] Error during LLM filter extraction:`, llmError.message);
+        }
+      }
+
+      // 🎯 If we have filters, check if query is a perfect match (e.g., "red wine" → filters: {category: "red wine"})
+      let isPerfectQueryFilterMatch = false;
+      if (hasFilters) {
+        const queryLower = query.toLowerCase().trim();
+        const allFilterValues = [];
+
+        if (extractedFilters.category) {
+          const cats = Array.isArray(extractedFilters.category) ? extractedFilters.category : [extractedFilters.category];
+          allFilterValues.push(...cats.map(c => c.toLowerCase().trim()));
+        }
+        if (extractedFilters.softCategory) {
+          const softCats = Array.isArray(extractedFilters.softCategory) ? extractedFilters.softCategory : [extractedFilters.softCategory];
+          allFilterValues.push(...softCats.map(c => c.toLowerCase().trim()));
+        }
+        if (extractedFilters.type) {
+          const typeVals = Array.isArray(extractedFilters.type) ? extractedFilters.type : [extractedFilters.type];
+          allFilterValues.push(...typeVals.map(t => t.toLowerCase().trim()));
+        }
+
+        // Check if query exactly matches one of the filter values
+        isPerfectQueryFilterMatch = allFilterValues.some(filterVal =>
+          queryLower === filterVal || filterVal === queryLower
+        );
+
+        if (isPerfectQueryFilterMatch) {
+          console.log(`[${requestId}] 🎯 Query "${query}" is a PERFECT match with extracted filters - skipping LLM product selection`);
+        }
+      }
+
+      // 🎯 If we have filters AND query is NOT a perfect match, get filtered products and send to LLM
+      if (hasFilters && !isPerfectQueryFilterMatch) {
+        console.log(`[${requestId}] 🤖 Getting filtered products for LLM selection...`);
+        console.log(`[${requestId}] 🤖 Filters:`, JSON.stringify(extractedFilters));
+
+        try {
+          // Get products matching the extracted filters
+          const softFiltersObj = extractedFilters.softCategory ? { softCategory: extractedFilters.softCategory } : null;
+          const filterPipeline = buildOptimizedFilterOnlyPipeline(extractedFilters, softFiltersObj, false, 50); // Get up to 50 candidates
+          const filteredProducts = await collection.aggregate(filterPipeline).toArray();
+
+          console.log(`[${requestId}] 🤖 Found ${filteredProducts.length} filtered products`);
+
+          if (filteredProducts.length > 0) {
+            // Send to LLM to select up to 6 most relevant products
+            console.log(`[${requestId}] 🤖 Sending ${filteredProducts.length} filtered products to LLM for relevance selection...`);
+
+            const llmSelectionResult = await selectRelevantProductsWithLLM(filteredProducts, query, context, 6);
+
+            if (llmSelectionResult.success && llmSelectionResult.products.length > 0) {
+              console.log(`[${requestId}] ✅ LLM selected ${llmSelectionResult.products.length} relevant products`);
+
+              const response = llmSelectionResult.products.map(product => ({
+                _id: product._id.toString(),
+                id: product.id,
+                name: product.name,
+                description: product.description,
+                price: product.price,
+                image: product.image,
+                url: product.url,
+                type: product.type,
+                specialSales: product.specialSales,
+                onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+                ItemID: product.ItemID,
+                highlight: true, // LLM-selected products are highlighted
+                softFilterMatch: false,
+                softCategoryMatches: 0,
+                simpleSearch: false,
+                filterOnly: false,
+                highTextMatch: false,
+                llmSelected: true,
+                explanation: null
+              }));
+
+              // Log query
+              try {
+                await logQuery(querycollection, query, extractedFilters, response, false);
+                console.log(`[${requestId}] Query logged to database (LLM filter + selection)`);
+              } catch (logError) {
+                console.error(`[${requestId}] Failed to log query:`, logError.message);
+              }
+
+              return res.json({
+                products: response,
+                pagination: {
+                  totalAvailable: response.length,
+                  returned: response.length,
+                  batchNumber: 1,
+                  hasMore: false,
+                  nextToken: null,
+                  autoLoadMore: false,
+                  secondBatchToken: null,
+                  hasCategoryFiltering: false,
+                  categoryFilterToken: null
+                },
+                metadata: {
+                  query: query,
+                  requestId: requestId,
+                  executionTime: Date.now() - req.startTime || 0,
+                  phase: 'llm-filter-selection',
+                  extractedCategories: {
+                    hardCategories: extractedFilters.category ? (Array.isArray(extractedFilters.category) ? extractedFilters.category : [extractedFilters.category]) : [],
+                    softCategories: extractedFilters.softCategory ? (Array.isArray(extractedFilters.softCategory) ? extractedFilters.softCategory : [extractedFilters.softCategory]) : [],
+                    textMatchCount: 0
+                  },
+                  tiers: {
+                    hasTextMatchTier: false,
+                    llmFilterSelection: true,
+                    description: `LLM filter extraction + product selection: ${response.length} results`
+                  }
+                }
+              });
+            } else {
+              console.log(`[${requestId}] ⚠️ LLM product selection failed: ${llmSelectionResult.reason || 'unknown'}`);
+            }
+          } else {
+            console.log(`[${requestId}] ⚠️ No products matched the extracted filters`);
+          }
+        } catch (filterError) {
+          console.error(`[${requestId}] Error during filtered product LLM selection:`, filterError.message);
+        }
+      }
+
+      // 🎯 FALLBACK: Vector search (if no filters, perfect match, or LLM selection failed)
+      console.log(`[${requestId}] Phase 1: Falling back to vector search with filters:`, JSON.stringify(extractedFilters));
 
       try {
         const queryEmbedding = await getQueryEmbedding(cleanedTextForSearch);
