@@ -8376,9 +8376,12 @@ app.post("/search", async (req, res) => {
       if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0 && approvedProducts.length > 0) {
         const beforeCount = approvedProducts.length;
         approvedProducts = approvedProducts.filter(product => {
-          // Check for perfect exact match - these can bypass category filtering
-          const exactMatchBonus = getExactMatchBonus(product.name, query, query);
-          const isPerfectExactMatch = exactMatchBonus >= 100000; // 100k = exact match
+          // Check for TRUE perfect exact match - only these can bypass category filtering
+          // We check the actual product name vs query, not the bonus score, to avoid
+          // multi-word partial matches (150k) from bypassing category filter
+          const productNameLower = normalizeQuoteCharacters(product.name?.toLowerCase().trim() || '');
+          const queryLower = normalizeQuoteCharacters(query.toLowerCase().trim());
+          const isPerfectExactMatch = productNameLower === queryLower;
 
           // Allow if: perfect exact match OR category matches
           if (isPerfectExactMatch) {
