@@ -8372,9 +8372,20 @@ app.post("/search", async (req, res) => {
       // 🛡️ HARD CATEGORY DEAL BREAKER: If we extracted hard categories, filter out any products
       // that don't match. This is the ultimate safety net - hard categories are sacred.
       // e.g., search "ליקר שוקולד" with hardCat="ליקר" → remove any "יין שוקולד" that leaked through.
+      // EXCEPTION: Perfect exact matches (100% name match to query) can bypass category filtering
       if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0 && approvedProducts.length > 0) {
         const beforeCount = approvedProducts.length;
         approvedProducts = approvedProducts.filter(product => {
+          // Check for perfect exact match - these can bypass category filtering
+          const exactMatchBonus = getExactMatchBonus(product.name, query, query);
+          const isPerfectExactMatch = exactMatchBonus >= 100000; // 100k = exact match
+
+          // Allow if: perfect exact match OR category matches
+          if (isPerfectExactMatch) {
+            console.log(`[${requestId}] 🎯 [PERFECT MATCH BYPASS] "${product.name}" has exact match - allowing outside category`);
+            return true;
+          }
+
           if (!product.category) return false;
           const productCats = Array.isArray(product.category) ? product.category : [product.category];
           return filterCheck.matchedHardCategories.some(hardCat =>
