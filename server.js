@@ -11289,12 +11289,19 @@ app.get("/potential-categories", async (req, res) => {
       .sort((a, b) => b.count - a.count)
       .slice(0, limit);
 
-    console.log(`[POTENTIAL CATEGORIES] Retrieved ${categoriesArray.length} categories for ${user.dbName} (minCount: ${minCount})`);
+    // Strong potential: terms searched more than 5 times (high-demand categories)
+    const strongPotential = Object.entries(potentialCategories)
+      .filter(([, data]) => (data.count || 0) > 5)
+      .sort(([, a], [, b]) => (b.count || 0) - (a.count || 0))
+      .map(([term]) => term);
+
+    console.log(`[POTENTIAL CATEGORIES] Retrieved ${categoriesArray.length} categories for ${user.dbName} (minCount: ${minCount}, strongPotential: ${strongPotential.length})`);
 
     return res.json({
       store: user.dbName,
       totalLearned: Object.keys(potentialCategories).length,
       returned: categoriesArray.length,
+      strongPotential,
       categories: categoriesArray
     });
   } catch (error) {
