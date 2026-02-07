@@ -3847,123 +3847,6 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
   }, 604800);
 }
 
-/**
- * 🎯 SYNONYM EXPANSION: Finds category synonyms in the query
- * When a user searches "כיסא נדנדה" but the category is "כורסא",
- * this function identifies that "כיסא" is a synonym for "כורסא"
- * and returns the mapping so the search can be expanded.
- *
- * @param {String} query - The search query
- * @param {Array|String} categories - Available product categories
- * @returns {Object|null} { expandedQuery, synonymMap } or null if no synonyms found
- */
-async function expandQueryWithCategorySynonyms(query, categories) {
-  if (!query || !categories) return null;
-
-  const categoriesList = Array.isArray(categories) ? categories : String(categories).split(',').map(c => c.trim());
-  if (categoriesList.length === 0) return null;
-
-  // Quick check: if any query word already matches a category exactly, no expansion needed
-  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
-  const categoriesLower = categoriesList.map(c => c.toLowerCase().trim());
-  const allWordsMatch = queryWords.every(w =>
-    categoriesLower.some(c => c === w || includesWholeWord(c, w) || includesWholeWord(w, c))
-  );
-  if (allWordsMatch) return null;
-
-  const cacheKey = generateCacheKey('synonym-expand', query, categoriesList.join(','));
-
-  return withCache(cacheKey, async () => {
-    try {
-      if (aiCircuitBreaker.shouldBypassAI()) {
-        return null;
-      }
-
-      const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash",
-        contents: [{ text: query }],
-        config: {
-          systemInstruction: `You are a Hebrew product search synonym expander.
-Given a search query and a list of product categories, check if any word in the query is a SYNONYM or SEMANTICALLY EQUIVALENT to one of the categories but NOT an exact textual match.
-
-Categories: ${categoriesList.join(', ')}
-
-RULES:
-1. ONLY map words that are genuinely synonymous or refer to the same type of product.
-   Examples: כיסא↔כורסא (both seating), ספה↔קאוצ׳ (both couches), מיטה↔מזרון (related sleeping furniture)
-2. Do NOT map words that are merely related but not synonymous.
-3. If a query word already appears in the categories list (exact or with Hebrew suffix variation), it does NOT need synonym expansion.
-4. Return the synonyms as an array of objects with "original" (query word) and "mapped" (category name) fields.
-5. Return expandedQuery with the synonym-replaced version of the full query.
-6. If no synonyms found, return {"expandedQuery": null, "synonyms": []}.
-
-Return JSON only.`,
-          temperature: 0.1,
-          thinkingConfig: { thinkingBudget: 0 },
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              expandedQuery: { type: Type.STRING, nullable: true },
-              synonyms: {
-                type: Type.ARRAY,
-                items: {
-                  type: Type.OBJECT,
-                  properties: {
-                    original: { type: Type.STRING, description: "Original query word" },
-                    mapped: { type: Type.STRING, description: "Matching category name" }
-                  },
-                  required: ["original", "mapped"]
-                },
-                description: "Array of synonym mappings from original query word to matching category name. Empty array if no synonyms found."
-              }
-            }
-          }
-        }
-      });
-
-      const content = response.text?.trim();
-      if (!content) return null;
-
-      const result = JSON.parse(content.replace(/^[^{]+/, '').replace(/[^}]+$/, ''));
-
-      // Convert synonyms array to synonymMap object
-      const synonymMap = {};
-      if (Array.isArray(result.synonyms)) {
-        result.synonyms.forEach(item => {
-          if (item.original && item.mapped) {
-            synonymMap[item.original] = item.mapped;
-          }
-        });
-      }
-
-      if (result.expandedQuery && Object.keys(synonymMap).length > 0) {
-        // Validate that synonym targets actually exist in categories
-        const validSynonyms = {};
-        for (const [original, mapped] of Object.entries(synonymMap)) {
-          const mappedLower = mapped.toLowerCase().trim();
-          const isValid = categoriesLower.some(c =>
-            c === mappedLower || c.includes(mappedLower) || mappedLower.includes(c)
-          );
-          if (isValid) {
-            validSynonyms[original] = mapped;
-          }
-        }
-
-        if (Object.keys(validSynonyms).length > 0) {
-          // synonym expansion applied
-          return { expandedQuery: result.expandedQuery, synonymMap: validSynonyms };
-        }
-      }
-
-      return null;
-    } catch (error) {
-      console.warn("[SYNONYM EXPANSION] Failed:", error.message);
-      return null;
-    }
-  }, 604800); // Cache for 7 days
-}
-
 function shouldUseOrLogicForCategories(query, categories) {
   if (!categories || !Array.isArray(categories) || categories.length < 2) {
     return false;
@@ -8508,70 +8391,6 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       }
     }
 
-    // 🎯 SYNONYM EXPANSION FALLBACK: When AND search returns 0 results,
-    // check if any query word is a synonym for a known category.
-    // e.g., "כיסא נדנדה" → "כיסא" is synonym for category "כורסא"
-    // → search category="כורסא" + name matches "נדנדה"
-    if (results.length === 0 && !isPerfectFilterMatch && queryWords.length >= 1) {
-      try {
-        const synonymResult = await expandQueryWithCategorySynonyms(
-          query,
-          store.categories || []
-        );
-
-        if (synonymResult && synonymResult.synonymMap && Object.keys(synonymResult.synonymMap).length > 0) {
-          console.log(`[SIMPLE-SEARCH] 🔄 Synonym expansion: "${query}" → synonyms: ${JSON.stringify(synonymResult.synonymMap)}`);
-
-          const matchedCategories = Object.values(synonymResult.synonymMap);
-          const synonymKeys = Object.keys(synonymResult.synonymMap).map(k => k.toLowerCase());
-
-          // Find query words that are NOT part of the synonym mapping (remaining search terms)
-          const remainingWords = queryWords.filter(w =>
-            !synonymKeys.some(syn => w.includes(syn) || syn.includes(w))
-          );
-
-          const andConditions = [
-            { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] }
-          ];
-
-          // Add category filter for synonym-matched categories
-          matchedCategories.forEach(cat => {
-            andConditions.push({
-              $or: [
-                { category: { $regex: cat, $options: 'i' } },
-                { type: { $regex: cat, $options: 'i' } }
-              ]
-            });
-          });
-
-          // Add remaining words as name/category/type search
-          remainingWords.forEach(word => {
-            const fuzzy = generateFuzzyRegex(word);
-            andConditions.push({
-              $or: [
-                { name: { $regex: fuzzy, $options: 'i' } },
-                { category: { $regex: word, $options: 'i' } },
-                { type: { $regex: word, $options: 'i' } }
-              ]
-            });
-          });
-
-          const synonymSearchQuery = { $and: andConditions };
-          results = await collection.find(synonymSearchQuery)
-            .limit(15)
-            .maxTimeMS(3000)
-            .toArray();
-
-          if (results.length > 0) {
-            console.log(`[SIMPLE-SEARCH] ✅ Synonym expansion found ${results.length} results (categories: ${matchedCategories.join(', ')})`);
-          } else {
-            console.log(`[SIMPLE-SEARCH] ℹ️ Synonym expansion returned 0 results`);
-          }
-        }
-      } catch (synErr) {
-        console.warn(`[SIMPLE-SEARCH] ⚠️ Synonym expansion failed:`, synErr.message);
-      }
-    }
   }
 
   return {
@@ -11705,6 +11524,48 @@ app.post("/search", async (req, res) => {
       });
       if (beforeHardGate !== finalResults.length) {
         console.log(`[${requestId}] 🛡️ [HARD CATEGORY FINAL GATE] Filtered out ${beforeHardGate - finalResults.length} products not matching hard categories [${hardFilters.category.join(', ')}]`);
+      }
+    }
+
+    // 🔄 ZERO-RESULT FALLBACK: If all search strategies returned 0 results,
+    // retry with no filters (plain text search) so the user sees something relevant
+    if (finalResults.length === 0 && query && query.trim().length > 0) {
+      console.log(`[${requestId}] ⚠️ 0 results after all search strategies — falling back to no-filter text search`);
+      try {
+        const noFilterPipeline = buildStandardSearchPipeline(
+          query,
+          query,
+          {}, // No hard filters
+          searchLimit * 2,
+          false,
+          false,
+          [],
+          {} // No soft filters
+        );
+        const noFilterResults = await collection.aggregate(noFilterPipeline).toArray();
+        if (noFilterResults.length > 0) {
+          finalResults = noFilterResults.map(product => ({
+            _id: product._id.toString(),
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            image: product.image,
+            url: product.url,
+            type: product.type,
+            category: product.category,
+            softCategory: product.softCategory,
+            specialSales: product.specialSales,
+            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+            ItemID: product.ItemID,
+            highlight: false
+          }));
+          console.log(`[${requestId}] ✅ No-filter fallback found ${finalResults.length} results`);
+        } else {
+          console.log(`[${requestId}] ℹ️ No-filter fallback also returned 0 results`);
+        }
+      } catch (fallbackErr) {
+        console.warn(`[${requestId}] ⚠️ No-filter fallback failed:`, fallbackErr.message);
       }
     }
 
