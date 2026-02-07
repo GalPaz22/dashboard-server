@@ -2881,6 +2881,9 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
     }
     
     // Use custom system instruction if provided, otherwise use default
+    // Build example section only if example is a non-empty string
+    const exampleSection = (example && typeof example === 'string' && example.trim()) ? `\n\nADDITIONAL EXAMPLES:\n${example}` : '';
+
     const systemInstruction = customSystemInstruction || `You are an expert at extracting structured data from e-commerce search queries. The user's context/domain is: ${context || 'online wine and alcohol shop'}.
 
 DOMAIN KNOWLEDGE: You should use your knowledge of the domain specified in the context above. For example:
@@ -2898,7 +2901,6 @@ Extract the following filters from the query if they exist:
 3. maxPrice (maximum price, indicated by the word 'עד').
 4. category - STRICT MATCHING REQUIRED. Available categories: ${categories}
    - You MUST find a SOLID MATCH between the query and an existing category
-
    - Look for exact or near-exact matches: "יין אדום" matches "יין אדום", "red wine" matches "יין אדום" if translated
    - Partial word matching is allowed ONLY if it clearly identifies a unique category: "אדום" can match "יין אדום" if unambiguous
    - DO NOT extract if the match is weak or ambiguous
@@ -2909,33 +2911,43 @@ Extract the following filters from the query if they exist:
    - The extracted type MUST exist EXACTLY in the provided list
    - You may map synonyms intelligently (e.g., "dry" → "dry" if in list), but the final value MUST be in the list
    - Do not ever make up a type that is not in the list
-6. softCategory - FLEXIBLE MATCHING ALLOWED with WINE/ALCOHOL DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}
+6. softCategory - FLEXIBLE MATCHING ALLOWED with DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}
    - Extract contextual preferences (e.g., origins, grape varieties, food pairings, occasions, regions)
    - You have MORE FLEXIBILITY here - you can intelligently map related terms
+   - EXTRACT AGGRESSIVELY: Extract EVERY relevant attribute you can identify from the query. If a query has multiple characteristics, extract ALL of them.
+   - GEOGRAPHIC TERMS: "italian"/"איטלקי" → look for "Italy"/"איטליה" in list. "French"/"צרפתי" → "France"/"צרפת". "Spanish"/"ספרדי" → "Spain"/"ספרד". Always map adjective forms to country/region names in the list.
+   - FOOD PAIRING: "for pasta"/"לפסטה" → look for "pasta"/"פסטה" in list. "for steak"/"לסטייק" → "steak"/"סטייק" or "meat"/"בשר".
+   - GRAPE VARIETIES: "cabernet"/"קברנה" → look for "cabernet sauvignon" in list. "merlot"/"מרלו" → "merlot" in list.
+   - STYLE/CHARACTER: "fruity"/"פירותי" → look for "fruity" in list. "dry"/"יבש" could be type or soft category.
+   - OCCASIONS: "for a gift"/"למתנה" → "gift"/"מתנה". "for dinner"/"לארוחת ערב" → look for dinner/meal in list.
    - USE YOUR WINE KNOWLEDGE: When users mention brand names, extract associated characteristics if they exist in the list
      * Example: "אלאמוס"/"Alamos" wine brand → extract "malbec" and "mendoza" if in list
      * Example: "שאטו מרגו"/"Chateau Margaux" → extract "bordeaux" and "cabernet sauvignon" if in list
      * Example: "בארולו"/"Barolo" → extract "piedmont" and "nebbiolo" if in list
-   - General mapping examples: "Toscany" → "Italy" (if Italy is in list), "pasta dish" → "pasta" (if pasta is in list)
-   - Geographic regions can map to countries if the country is in the list
-   - Food pairing mentions can map to items in the list
-   - Occasion mentions can map to items in the list
+   - General mapping: "Toscany" → "Italy" (if Italy is in list), "Rioja" → "Spain" (if Spain is in list)
    - BUT: The final extracted value MUST exist in the provided list: ${softCategories}
-   - You can extract multiple soft categories by separating them with a comma
+   - You can extract multiple soft categories as an array
 
 MATCHING STRICTNESS LEVELS:
 - category: STRICT - Requires solid, clear match. Must be exact or near-exact match with existing categories.
 - type: STRICT - Must exist exactly in the list, but synonyms can be mapped intelligently.
-- softCategory: FLEXIBLE - More play allowed, but final value must exist in the list.
+- softCategory: FLEXIBLE - Be aggressive. Extract every relevant attribute. Map synonyms, translations, adjective-to-noun forms. The more you extract, the better.
+
+EXTRACTION EXAMPLES:
+Query: "italian red wine for pasta" → {"category": "יין אדום", "softCategory": ["Italy", "pasta"]} (map "italian" to country, "pasta" to food pairing)
+Query: "יין אדום איטלקי פירותי" → {"category": "יין אדום", "softCategory": ["איטליה", "fruity"]} (map "איטלקי" to "איטליה", "פירותי" to "fruity")
+Query: "dry white wine from France" → {"category": "יין לבן", "type": "dry", "softCategory": ["France"]}
+Query: "cabernet sauvignon under 100" → {"softCategory": ["cabernet sauvignon"], "maxPrice": 100}
+Query: "sweet sparkling wine for a gift" → {"type": "sweet", "softCategory": ["sparkling", "gift"]}
+Query: "יין רוזה ספרדי עד 80 שקל" → {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
 
 CRITICAL VALIDATION:
 - Before extracting ANY value, verify it exists in the provided list
 - For category: Only extract if there's a solid, unambiguous match
-- For softCategory: You can be more creative with mapping, but the result must be in the provided list
+- For softCategory: Be creative with mapping — geographic adjectives to country names, food mentions to pairings, style adjectives to attributes. The result must be in the provided list.
 - If you cannot find a match in the lists, do NOT extract that filter
 
-Return the extracted filters in JSON format. Only extract values that exist in the provided lists.
-${example}.`;
+Return the extracted filters in JSON format. Only extract values that exist in the provided lists.${exampleSection}`;
 
     // If custom system instruction is provided, log it
     if (customSystemInstruction) {
@@ -2949,7 +2961,7 @@ ${example}.`;
         systemInstruction,
         temperature: 0.1,
         thinkingConfig: {
-          thinkingBudget: 0,
+          thinkingBudget: 1024, // Allow reasoning for complex multi-filter queries
         },
         responseMimeType: "application/json",
         responseSchema: {
@@ -2970,7 +2982,7 @@ ${example}.`;
             category: {
               oneOf: [
                 { type: Type.STRING },
-                { 
+                {
                   type: Type.ARRAY,
                   items: { type: Type.STRING }
                 }
@@ -2980,7 +2992,7 @@ ${example}.`;
             type: {
               oneOf: [
                 { type: Type.STRING },
-                { 
+                {
                   type: Type.ARRAY,
                   items: { type: Type.STRING }
                 }
@@ -2990,12 +3002,12 @@ ${example}.`;
             softCategory: {
               oneOf: [
                 { type: Type.STRING },
-                { 
+                {
                   type: Type.ARRAY,
                   items: { type: Type.STRING }
                 }
               ],
-              description: `Soft filter - FLEXIBLE MATCHING ALLOWED with WINE/ALCOHOL DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}. Use your wine/alcohol knowledge to extract relevant characteristics when brand names are mentioned (e.g., "Alamos" → "malbec", "mendoza"). You can intelligently map related terms (e.g., regions to countries, food mentions to pairings), but the final extracted value MUST exist in the provided list. Multiple values allowed, separated by comma.`
+              description: `Soft filter - FLEXIBLE MATCHING with DOMAIN KNOWLEDGE. Extract AGGRESSIVELY — every geographic term, grape variety, food pairing, occasion, style, and character attribute from the query. Map adjective forms to nouns (e.g., "italian" → "Italy", "איטלקי" → "איטליה"). Available soft categories: ${softCategories}. The final extracted value MUST exist in the provided list. Multiple values allowed as array.`
             }
           }
         }
@@ -3051,20 +3063,63 @@ ${example}.`;
       }
 
       const allValues = valueArr.map(v => String(v).trim());
-      const validValues = allValues.filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
+      let validValues = allValues.filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
+
+      // For softCategory: try fuzzy matching for values that didn't match exactly
+      // This catches cases like "italian" → "Italy", "איטלקי" → "איטליה", "פרימיטיבו" vs "פרמיטיבו"
+      if (name === 'softCategory') {
+        const unmatched = allValues.filter(v => !list.some(l => l.toLowerCase() === v.toLowerCase()));
+        for (const v of unmatched) {
+          const vLower = v.toLowerCase();
+          // Try substring match (e.g., "ital" in "italy" or "italy" in "italian")
+          let fuzzyMatch = list.find(l => {
+            const lLower = l.toLowerCase();
+            return (lLower.includes(vLower) || vLower.includes(lLower)) &&
+                   Math.min(vLower.length, lLower.length) >= 3; // Min 3 chars to avoid false positives
+          });
+          // Try Hebrew normalized match (removing optional י ו characters)
+          if (!fuzzyMatch) {
+            const vNormalized = vLower.replace(/[יו]/g, '');
+            fuzzyMatch = list.find(l => {
+              const lNormalized = l.toLowerCase().replace(/[יו]/g, '');
+              return lNormalized === vNormalized;
+            });
+          }
+          if (fuzzyMatch) {
+            validValues.push(v);
+            console.log(`[FILTER VALIDATION] 🔄 Fuzzy matched softCategory: "${v}" → "${fuzzyMatch}"`);
+          }
+        }
+      }
 
       // Capture rejected soft categories for learning
       if (name === 'softCategory') {
-        const rejected = allValues.filter(v => !list.some(l => l.toLowerCase() === v.toLowerCase()));
+        const rejected = allValues.filter(v => !validValues.includes(v));
         rejected.forEach(r => rejectedSoftCategories.push(r));
       }
 
       if (validValues.length > 0) {
         // Return original casing from the list for consistency
         const matchedValues = validValues.map(v => {
-          return list.find(l => l.toLowerCase() === v.toLowerCase());
-        });
-        return matchedValues.length === 1 ? matchedValues[0] : matchedValues;
+          const vLower = v.toLowerCase();
+          // Exact match first
+          let match = list.find(l => l.toLowerCase() === vLower);
+          if (match) return match;
+          // Fuzzy match: substring
+          match = list.find(l => {
+            const lLower = l.toLowerCase();
+            return (lLower.includes(vLower) || vLower.includes(lLower)) &&
+                   Math.min(vLower.length, lLower.length) >= 3;
+          });
+          if (match) return match;
+          // Fuzzy match: Hebrew normalization
+          const vNorm = vLower.replace(/[יו]/g, '');
+          match = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === vNorm);
+          return match || v; // Fallback to original value
+        }).filter(Boolean);
+        // Deduplicate (fuzzy matches might resolve to same list item)
+        const uniqueMatched = [...new Set(matchedValues)];
+        return uniqueMatched.length === 1 ? uniqueMatched[0] : uniqueMatched;
       } else {
         console.log(`[FILTER VALIDATION] ⚠️ Invalid ${name} extracted: ${JSON.stringify(values)} - not in list.`);
         return undefined;
@@ -3153,8 +3208,8 @@ async function extractFiltersBrief(query, categories, types, softCategories, con
         return extractFiltersFallback(query, categories);
       }
       
-      const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}. 
-Extract relevant filters from the query.
+      const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}.
+Extract relevant filters from the query. Be thorough — extract EVERY relevant filter you can identify.
 
 EXTRACT FROM THESE LISTS ONLY:
 - category: ${categories}
@@ -3168,10 +3223,20 @@ CRITICAL RULES:
 4. ONLY extract values that exist in the provided lists.
 5. Return JSON only. Return empty {} if nothing to extract.
 6. SYNONYM MATCHING: If a query word is a SYNONYM or semantically equivalent to a category in the list, map it to that category. For example, if the user searches "כיסא" and the category list contains "כורסא", extract "כורסא" as the category since they refer to similar products.
+7. SOFT CATEGORY — EXTRACT AGGRESSIVELY:
+   - Geographic adjectives → country/region names: "italian"/"איטלקי" → "Italy"/"איטליה", "French"/"צרפתי" → "France"/"צרפת", "Spanish"/"ספרדי" → "Spain"/"ספרד"
+   - Food pairings: "for pasta"/"לפסטה" → "pasta", "for steak" → "steak"/"meat"
+   - Grape varieties: "cabernet" → "cabernet sauvignon", "merlot" → "merlot"
+   - Occasions: "for a gift" → "gift"/"מתנה", "for dinner" → look in list
+   - Style: "fruity"/"פירותי" → "fruity", "full bodied" → "full body"
+   - Extract ALL matching soft categories, not just the first one
 
-Example for brand query:
+EXAMPLES:
 Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
-Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCategory": ["איטליה"]}`;
+Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCategory": ["איטליה"]}
+Query: "italian red wine for pasta" -> {"category": "יין אדום", "softCategory": ["Italy", "pasta"]}
+Query: "dry white wine from France" -> {"category": "יין לבן", "type": "dry", "softCategory": ["France"]}
+Query: "יין רוזה ספרדי עד 80" -> {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-2.5-flash",
@@ -3180,7 +3245,7 @@ Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCa
           systemInstruction,
           temperature: 0.1,
           thinkingConfig: {
-            thinkingBudget: 0,
+            thinkingBudget: 512, // Allow some reasoning for filter mapping
           },
           responseMimeType: "application/json",
           responseSchema: {
@@ -3188,8 +3253,9 @@ Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCa
             properties: {
               category: { type: Type.STRING },
               type: { type: Type.STRING },
-              softCategory: { 
-                oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }]
+              softCategory: {
+                oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }],
+                description: `Extract EVERY relevant attribute — geographic terms, grape varieties, food pairings, occasions, styles. Map adjective forms to nouns. Available: ${softCategories}`
               },
               price: { type: Type.NUMBER },
               minPrice: { type: Type.NUMBER },
