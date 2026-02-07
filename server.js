@@ -10926,6 +10926,27 @@ app.post("/search", async (req, res) => {
     // SORTING LOGIC:
     // - When soft filters exist (e.g., "Italian"): soft category matches ALWAYS come first
     // - For simple queries without soft filters: text matches come first
+
+    // TYPE-EXCLUSIVITY: When a type filter is active, mark products that ONLY have the
+    // searched type (e.g., type:"fabric") vs products with mixed types (e.g., type:["fabric","wood"]).
+    // Exclusive matches rank higher — user searching "fabric" wants pure fabric products first.
+    if (hardFilters && hardFilters.type) {
+      const searchedTypes = Array.isArray(hardFilters.type) ? hardFilters.type.map(t => t.toLowerCase()) : [hardFilters.type.toLowerCase()];
+      combinedResults.forEach(product => {
+        const productType = product.type;
+        if (!productType) {
+          product.typeExclusiveMatch = false;
+          return;
+        }
+        const productTypes = Array.isArray(productType) ? productType : [productType];
+        // Exclusive = product has ONLY the searched type(s) and nothing extra
+        const allProductTypesMatch = productTypes.every(pt =>
+          searchedTypes.some(st => pt.toLowerCase() === st)
+        );
+        product.typeExclusiveMatch = allProductTypesMatch;
+      });
+    }
+
     if (hasSoftFilters || isSimpleResult) {
       console.log(`[${requestId}] Sorting: ${hasSoftFilters ? 'soft-filter-first' : 'text-match-first'}`);
 
@@ -10946,6 +10967,13 @@ app.post("/search", async (req, res) => {
             const bColorMatch = b.colorMatch || false;
             if (aColorMatch !== bColorMatch) {
               return aColorMatch ? -1 : 1;
+            }
+          }
+
+          // TYPE-EXCLUSIVITY: Products matching ONLY the searched type rank above mixed-type products
+          if (a.typeExclusiveMatch !== undefined && b.typeExclusiveMatch !== undefined) {
+            if (a.typeExclusiveMatch !== b.typeExclusiveMatch) {
+              return a.typeExclusiveMatch ? -1 : 1;
             }
           }
 
@@ -10992,9 +11020,17 @@ app.post("/search", async (req, res) => {
         }
 
         // SIMPLE QUERIES WITHOUT SOFT FILTERS: Text matches come first
+
+        // TYPE-EXCLUSIVITY: Products matching ONLY the searched type rank above mixed-type products
+        if (a.typeExclusiveMatch !== undefined && b.typeExclusiveMatch !== undefined) {
+          if (a.typeExclusiveMatch !== b.typeExclusiveMatch) {
+            return a.typeExclusiveMatch ? -1 : 1;
+          }
+        }
+
         // TIER 1 PRIORITY: Strong text matches (exactMatchBonus >= 8000) ALWAYS come first
         // This ensures that "פלאם" (Brand) comes before "Plum" (Fruit) matches
-        const aIsTier1 = aTextBonus >= 8000; 
+        const aIsTier1 = aTextBonus >= 8000;
         const bIsTier1 = bTextBonus >= 8000;
 
         // Check if either is a "Tier 1" match (high quality text match)
@@ -11058,9 +11094,17 @@ app.post("/search", async (req, res) => {
       });
 
     } else {
-      // No special sorting conditions, just sort by RRF score
+      // No special sorting conditions, sort by type-exclusivity then RRF score
       console.log(`[${requestId}] Sorting by RRF score only`);
-      combinedResults.sort((a, b) => b.rrf_score - a.rrf_score);
+      combinedResults.sort((a, b) => {
+        // TYPE-EXCLUSIVITY: Products matching ONLY the searched type rank above mixed-type products
+        if (a.typeExclusiveMatch !== undefined && b.typeExclusiveMatch !== undefined) {
+          if (a.typeExclusiveMatch !== b.typeExclusiveMatch) {
+            return a.typeExclusiveMatch ? -1 : 1;
+          }
+        }
+        return b.rrf_score - a.rrf_score;
+      });
     }
 
     // CRITICAL FIX: Filter out fuzzy-only matches when true exact matches exist
