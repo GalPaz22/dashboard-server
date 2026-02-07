@@ -1834,13 +1834,16 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     // 🎯 Color filtering logic (similar to soft categories)
     // Colors are used for BOOSTING in scoring, not as hard filters
     // IMPORTANT: Only add color filters if the field is indexed
+    // Enhanced: Expand to similar colors for flexible matching (e.g., "לבן" also matches "קרם", "בז'")
     if (softFilters && softFilters.color && isFieldIndexed('colors')) {
       const colors = Array.isArray(softFilters.color) ? softFilters.color : [softFilters.color];
-      
+      // Expand colors to include similar shades
+      const expandedColors = getSimilarColors(colors);
+
       if (!invertSoftFilter) {
         // FOR COLOR SEARCH: Don't filter - boosting happens in post-processing
       } else {
-        // FOR NON-COLOR SEARCH: Exclude products with these colors
+        // FOR NON-COLOR SEARCH: Exclude products with these colors (and similar shades)
         filterClauses.push({
           compound: {
             should: [
@@ -1853,7 +1856,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
               },
               {
                 compound: {
-                  mustNot: colors.map(c => ({
+                  mustNot: expandedColors.map(c => ({
                     text: {
                       query: c,
                       path: "colors"
@@ -2136,23 +2139,26 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 
   // 🎯 Color filtering for vector search (similar to soft categories)
   // IMPORTANT: Only add color filters if the field is indexed
+  // Enhanced: Expand to similar colors for flexible matching (e.g., "לבן" also matches "קרם", "בז'")
   if (softFilters && softFilters.color && isFieldIndexed('colors')) {
     const colors = Array.isArray(softFilters.color) ? softFilters.color.filter(Boolean) : [softFilters.color].filter(Boolean);
-    
+
     // Only process if we have valid colors
     if (colors.length > 0) {
+      // Expand colors to include similar shades
+      const expandedColors = getSimilarColors(colors);
       if (!invertSoftFilter) {
         // FOR COLOR SEARCH
         if (enforceSoftCategoryFilter) {
-          // STRICT MODE: Require products to have AT LEAST ONE matching color
-          conditions.push({ colors: { $in: colors } });
+          // STRICT MODE: Require products to have AT LEAST ONE matching color (with similar shades)
+          conditions.push({ colors: { $in: expandedColors } });
         } else {
           // BOOST MODE: boosting happens in post-processing
         }
       } else {
-        // FOR NON-COLOR SEARCH: Exclude products with these colors
+        // FOR NON-COLOR SEARCH: Exclude products with these colors (and similar shades)
         conditions.push({
-          colors: { $nin: colors }
+          colors: { $nin: expandedColors }
         });
       }
     }
@@ -3163,6 +3169,8 @@ Extract the following filters from the query if they exist:
 7. color - FLEXIBLE MATCHING ALLOWED. Available colors: ${colors}
    - Extract any color-related terms from the query if they match a color in the provided list
    - Map synonyms and translations: "red"/"אדום", "white"/"לבן", "black"/"שחור", "blue"/"כחול", "pink"/"ורוד", etc.
+   - IMPORTANT: Hebrew feminine/plural forms are colors too: "אדומה"→"אדום", "לבנה"→"לבן", "שחורים"→"שחור", "כחולה"→"כחול"
+   - IMPORTANT: Color and softCategory are INDEPENDENT. A query like "כורסאת בד אדומה" should extract BOTH softCategory:"בד" AND color:"אדום". Never skip color because you already extracted a softCategory.
    - The final extracted value MUST exist in the provided list: ${colors}
    - You can extract multiple colors as an array
    - If no colors list is provided or empty, do NOT extract color
@@ -3180,6 +3188,9 @@ Query: "dry white wine from France" → {"category": "יין לבן", "type": "d
 Query: "cabernet sauvignon under 100" → {"softCategory": ["cabernet sauvignon"], "maxPrice": 100}
 Query: "sweet sparkling wine for a gift" → {"type": "sweet", "softCategory": ["sparkling", "gift"]}
 Query: "יין רוזה ספרדי עד 80 שקל" → {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
+Query: "כורסאת בד אדומה" → {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} (extract category, soft category AND color separately)
+Query: "ספה לבנה מעור" → {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material is softCategory, color is color — extract both)
+Query: "שולחן עץ שחור" → {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]} (material/style goes to softCategory, color goes to color)
 
 CRITICAL VALIDATION:
 - Before extracting ANY value, verify it exists in the provided list
@@ -3316,9 +3327,10 @@ Return the extracted filters in JSON format. Only extract values that exist in t
       const allValues = valueArr.map(v => String(v).trim());
       let validValues = allValues.filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
 
-      // For softCategory: try fuzzy matching for values that didn't match exactly
+      // For softCategory and color: try fuzzy matching for values that didn't match exactly
       // This catches cases like "italian" → "Italy", "איטלקי" → "איטליה", "פרימיטיבו" vs "פרמיטיבו"
-      if (name === 'softCategory') {
+      // For color: catches Hebrew suffix forms like "אדומה" → "אדום", "לבנה" → "לבן"
+      if (name === 'softCategory' || name === 'color') {
         const unmatched = allValues.filter(v => !list.some(l => l.toLowerCase() === v.toLowerCase()));
         for (const v of unmatched) {
           const vLower = v.toLowerCase();
@@ -3336,9 +3348,20 @@ Return the extracted filters in JSON format. Only extract values that exist in t
               return lNormalized === vNormalized;
             });
           }
+          // For color: try stripping Hebrew adjective suffixes (ה, ים, ות, ית)
+          if (!fuzzyMatch && name === 'color') {
+            const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
+            for (const suffix of hebrewSuffixes) {
+              if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
+                const stripped = vLower.slice(0, -suffix.length);
+                fuzzyMatch = list.find(l => l.toLowerCase() === stripped);
+                if (fuzzyMatch) break;
+              }
+            }
+          }
           if (fuzzyMatch) {
             validValues.push(v);
-            console.log(`[FILTERS] Fuzzy matched: "${v}" → "${fuzzyMatch}"`);
+            console.log(`[FILTERS] Fuzzy matched ${name}: "${v}" → "${fuzzyMatch}"`);
           }
         }
       }
@@ -3366,7 +3389,19 @@ Return the extracted filters in JSON format. Only extract values that exist in t
           // Fuzzy match: Hebrew normalization
           const vNorm = vLower.replace(/[יו]/g, '');
           match = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === vNorm);
-          return match || v; // Fallback to original value
+          if (match) return match;
+          // Fuzzy match: Hebrew suffix stripping for colors (אדומה→אדום, לבנה→לבן)
+          if (name === 'color') {
+            const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
+            for (const suffix of hebrewSuffixes) {
+              if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
+                const stripped = vLower.slice(0, -suffix.length);
+                match = list.find(l => l.toLowerCase() === stripped);
+                if (match) return match;
+              }
+            }
+          }
+          return v; // Fallback to original value
         }).filter(Boolean);
         // Deduplicate (fuzzy matches might resolve to same list item)
         const uniqueMatched = [...new Set(matchedValues)];
@@ -3452,8 +3487,10 @@ async function extractFiltersBrief(query, categories, types, softCategories, con
         return extractFiltersFallback(query, categories, colors);
       }
       
-      const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}. 
+      const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}.
 Extract relevant filters from the query. Be thorough — extract EVERY relevant filter you can identify.
+IMPORTANT: softCategory and color are INDEPENDENT fields. Always extract BOTH if the query contains material/style AND color.
+Hebrew feminine/plural forms are colors too: "אדומה"→"אדום", "לבנה"→"לבן", "שחורים"→"שחור".
 
 EXTRACT FROM THESE LISTS ONLY:
 - category: ${categories}
@@ -3481,7 +3518,10 @@ Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
 Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCategory": ["איטליה"]}
 Query: "italian red wine for pasta" -> {"category": "יין אדום", "softCategory": ["Italy", "pasta"]}
 Query: "dry white wine from France" -> {"category": "יין לבן", "type": "dry", "softCategory": ["France"]}
-Query: "יין רוזה ספרדי עד 80" -> {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}`;
+Query: "יין רוזה ספרדי עד 80" -> {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
+Query: "כורסאת בד אדומה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} (extract BOTH softCategory AND color)
+Query: "ספה לבנה מעור" -> {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material=softCategory, color=color)
+Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]}`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-2.5-flash",
@@ -8154,8 +8194,10 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       }
 
       // 🎯 Colors are OPTIONAL (boost, not deal-breaker) - same as soft categories
+      // Expand to similar colors for flexible matching (e.g., "לבן" also matches "קרם", "בז'")
       if (filterCheck.matchedColors && filterCheck.matchedColors.length > 0) {
-        const lowerColors = filterCheck.matchedColors.map(c => c.toLowerCase());
+        const expandedColors = getSimilarColors(filterCheck.matchedColors);
+        const lowerColors = expandedColors.map(c => c.toLowerCase());
         andConditions.push({ colors: { $in: lowerColors } });
       }
       
@@ -8164,6 +8206,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       console.log(`[SIMPLE-SEARCH] Perfect match - searching by categories:`, {
         hardCategories: filterCheck.matchedHardCategories,
         softCategories: filterCheck.matchedSoftCategories,
+        colors: filterCheck.matchedColors,
         requiresHardCategory: (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0)
       });
     } else {
@@ -8807,8 +8850,8 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     if (cat.startsWith(word) && cat.length <= word.length + 2) return true;
     if (catNormalized.startsWith(wordNormalized) && catNormalized.length <= wordNormalized.length + 2) return true;
     
-    // Check if word has common Hebrew prefixes (ה, ו, ב, ל)
-    const prefixes = ['ה', 'ו', 'ב', 'ל'];
+    // Check if word has common Hebrew prefixes (ה, ו, ב, ל, מ, ש, כ)
+    const prefixes = ['ה', 'ו', 'ב', 'ל', 'מ', 'ש', 'כ'];
     for (const p of prefixes) {
       if (word.startsWith(p) && word.substring(1) === cat) return true;
       if (word.startsWith(p) && word.substring(1).startsWith(cat) && word.length <= cat.length + 3) return true;
@@ -8906,15 +8949,32 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   });
 
   // Build a reverse map: for each query word, find matching store colors via similarity
+  // Enhanced: Try Hebrew suffix stripping (e.g., "אדומה" → "אדום", "לבנה" → "לבן")
   const colorTranslationMap = {};
+  const hebrewColorSuffixes = ['ה', 'ים', 'ות', 'ית']; // Common Hebrew adjective suffixes
   for (const qWord of queryWords) {
     const qWordLower = qWord.toLowerCase();
-    // Check if this query word is a key in the similarity map
-    if (colorSimilarityMap[qWordLower]) {
-      const similarColors = colorSimilarityMap[qWordLower].map(c => c.toLowerCase());
+    // Check if this query word is a key in the similarity map (exact match)
+    let matchedKey = colorSimilarityMap[qWordLower] ? qWordLower : null;
+
+    // If no exact match, try stripping Hebrew suffixes to find the base form
+    if (!matchedKey) {
+      for (const suffix of hebrewColorSuffixes) {
+        if (qWordLower.endsWith(suffix) && qWordLower.length > suffix.length + 2) {
+          const stripped = qWordLower.slice(0, -suffix.length);
+          if (colorSimilarityMap[stripped]) {
+            matchedKey = stripped;
+            break;
+          }
+        }
+      }
+    }
+
+    if (matchedKey) {
+      const similarColors = colorSimilarityMap[matchedKey].map(c => c.toLowerCase());
       // Find store colors that are in the similar colors list
       for (const storeColor of normalizedColors) {
-        if (similarColors.includes(storeColor) || storeColor === qWordLower) {
+        if (similarColors.includes(storeColor) || storeColor === matchedKey) {
           colorTranslationMap[qWordLower] = storeColor;
           break;
         }
