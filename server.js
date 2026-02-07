@@ -9938,14 +9938,15 @@ app.post("/search", async (req, res) => {
               ])].filter(Boolean);
 
               if (combinedSoftCategories.length > 0 && queryEmbedding) {
-                // SIMPLE QUERY TIER 2: Only return products WITH matching soft categories from Tier 1
-                // Skip textual search, use ONLY vector search filtered by soft categories for semantic similarity
-                console.log(`[${requestId}] 🎯 TIER 2 SOFT CATEGORY PRIORITY:`);
-                console.log(`[${requestId}]   1️⃣  QUERY-EXTRACTED (highest priority): ${JSON.stringify(llmSoftCategoriesArray)}`);
-                console.log(`[${requestId}]   2️⃣  PRODUCT-EXTRACTED (from LLM results): ${JSON.stringify(softCategoriesArray)}`);
-                console.log(`[${requestId}]   ✅ COMBINED (in priority order): ${JSON.stringify(combinedSoftCategories)}`);
-                console.log(`[${requestId}] 🔒 TIER 2 STRICT MODE: Will only return products WITH these soft categories`);
-                
+                // SIMPLE QUERY TIER 2: Broad vector search with soft category BOOSTING (not filtering)
+                // Skip textual search, use vector search with hard filters + soft category scoring
+                // Soft categories are NOT enforced as filters — they boost matching products in scoring
+                console.log(`[${requestId}] 🎯 TIER 2 SOFT CATEGORY BOOSTING (no LLM filter enforcement):`);
+                console.log(`[${requestId}]   1️⃣  QUERY-EXTRACTED (for boosting): ${JSON.stringify(llmSoftCategoriesArray)}`);
+                console.log(`[${requestId}]   2️⃣  PRODUCT-EXTRACTED (for boosting): ${JSON.stringify(softCategoriesArray)}`);
+                console.log(`[${requestId}]   ✅ COMBINED (boost order): ${JSON.stringify(combinedSoftCategories)}`);
+                console.log(`[${requestId}] 🔓 TIER 2 BROAD MODE: Soft categories used for BOOSTING, not filtering`);
+
                 // 🎯 CREATE BOOST MAP: Query-extracted categories get 10x higher boost than product-extracted
                 const tier2SoftCategoryBoosts = {};
                 llmSoftCategoriesArray.forEach(cat => {
@@ -9957,7 +9958,7 @@ app.post("/search", async (req, res) => {
                   }
                 });
                 console.log(`[${requestId}] 🎯 TIER 2 BOOST MAP:`, tier2SoftCategoryBoosts);
-                
+
                 // Use custom tier2 boost map instead of default store boosts
                 categoryFilteredResults = await executeExplicitSoftCategorySearch(
                   collection,
@@ -9973,8 +9974,8 @@ app.post("/search", async (req, res) => {
                   cleanedText,
                   [],
                   tier2SoftCategoryBoosts, // 🎯 Use custom boost map with 100x for query-extracted, 10x for product-extracted
-                  true, // skipTextualSearch = true for simple query Tier 2 (vector only + soft category strict matching)
-                  true  // enforceSoftCategoryFilter = true - Tier 2 products MUST match Tier 1 soft categories
+                  true, // skipTextualSearch = true for simple query Tier 2 (vector only)
+                  false  // enforceSoftCategoryFilter = false - Tier 2 NOT constrained by soft categories, boosting happens in scoring
                 );
 
                 // 🆕 TIER 2 ENHANCEMENT: Add product embedding similarity search
@@ -10724,6 +10725,35 @@ app.post("/search", async (req, res) => {
         if (remainingFiltered > 0) {
           console.log(`[${requestId}] 🛡️ [HARD CATEGORY GATE] Remaining results: Filtered out ${remainingFiltered} products not matching query hard category [${queryHardCatsForRerankArray.join(', ')}]`);
         }
+      }
+
+      // 🎯 POST-RERANK SOFT CATEGORY BOOST: After LLM reranking, boost soft category matches to the top
+      // This ensures that e.g., "italian" products appear first in tier 2 when searching "italian red wine for pasta"
+      const querySoftCatsForBoost = Array.isArray(softFilters.softCategory)
+        ? softFilters.softCategory.filter(Boolean)
+        : (softFilters.softCategory ? [softFilters.softCategory] : []);
+
+      if (querySoftCatsForBoost.length > 0 && remainingResults.length > 0) {
+        // Ensure all remaining results have soft category match info computed
+        remainingResults.forEach(r => {
+          if (r.softFilterMatch === undefined) {
+            const matchResult = calculateSoftCategoryMatches(r.softCategory, querySoftCatsForBoost);
+            r.softFilterMatch = matchResult.count > 0;
+            r.softCategoryMatches = matchResult.count;
+          }
+        });
+
+        // Sort: soft category matches come first, then by match count, then by score
+        remainingResults.sort((a, b) => {
+          const aHasSoft = a.softFilterMatch ? 1 : 0;
+          const bHasSoft = b.softFilterMatch ? 1 : 0;
+          if (aHasSoft !== bHasSoft) return bHasSoft - aHasSoft;
+          if ((a.softCategoryMatches || 0) !== (b.softCategoryMatches || 0)) return (b.softCategoryMatches || 0) - (a.softCategoryMatches || 0);
+          return (b.rrf_score || 0) - (a.rrf_score || 0);
+        });
+
+        const softMatchCount = remainingResults.filter(r => r.softFilterMatch).length;
+        console.log(`[${requestId}] 🎯 POST-RERANK SOFT CATEGORY BOOST: ${softMatchCount}/${remainingResults.length} remaining results match soft categories [${querySoftCatsForBoost.join(', ')}] — boosted to top`);
       }
 
       // Construct finalResults and deduplicate
