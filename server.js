@@ -4391,7 +4391,7 @@ async function reorderResultsWithGPT(
   explain = true,
   context,
   softFilters = null,
-  maxResults = 12, // 🎯 REDUCED: 12 products is the sweet spot for speed vs quality
+  maxResults = 25, // 🎯 Send 25 products to LLM for better ranking coverage
   useFastLLM = true, // 🎯 DEFAULT TO TRUE: Always use the fast model for reranking
   userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
   isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
@@ -4414,7 +4414,7 @@ async function reorderResultsWithGPT(
     const productData = limitedResults.map((p) => ({
       _id: p._id.toString(),
       name: p.name || "No name",
-        description: p.description1|| "No description",
+        description: (p.description1 || "No description").substring(0, 80),
       price: p.price || "No price",
         softFilterMatch: p.softFilterMatch || false,
       softCategories: p.softCategory || []
@@ -4451,11 +4451,14 @@ async function reorderResultsWithGPT(
       }
     }
 
-    const systemInstruction = explain 
+    const explainMaxItems = isEmergencyMode ? 15 : 8;
+    const noExplainMaxItems = isEmergencyMode ? 15 : 10;
+
+    const systemInstruction = explain
       ? `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
-- Return ONLY relevant products, up to ${explain ? (isEmergencyMode ? 15 : 4) : (isEmergencyMode ? 15 : 8)} maximum.
+- Return ONLY relevant products, up to ${explainMaxItems} maximum.
 - Quality over quantity - don't include products that don't match the search intent.
 - If there are fewer relevant products, return only those that match well.
 - You must respond in the EXACT same language as the search query.
@@ -4480,7 +4483,7 @@ The search query intent to analyze is provided separately in the user content.`
       : `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
-- Return ONLY relevant products, up to ${explain ? (isEmergencyMode ? 15 : 4) : (isEmergencyMode ? 15 : 8)} maximum.
+- Return ONLY relevant products, up to ${noExplainMaxItems} maximum.
 - Quality over quantity - don't include products that don't match the search intent.
 - If there are fewer relevant products, return only those that match well.
 - You must respond in the EXACT same language as the search query.
@@ -4489,7 +4492,7 @@ STRICT RULES:
 - You must ONLY rank products based on their relevance to the search intent
 - Products with "softFilterMatch": true are highly relevant suggestions that matched specific criteria. Prioritize them unless they are clearly irrelevant to the query.
 - You must ONLY return valid JSON in the exact format specified
-|- If there are less than ${isEmergencyMode ? 15 : 4} relevant products, return only the relevant ones. If there are no relevant products, return an empty array.
+- If there are less than ${noExplainMaxItems} relevant products, return only the relevant ones. If there are no relevant products, return an empty array.
 
 Context: ${context}${softCategoryContext}${personalizationContext}
 
@@ -4506,7 +4509,7 @@ ${JSON.stringify(productData, null, 2)}`;
     const responseSchema = explain
       ? {
           type: Type.ARRAY,
-          maxItems: isEmergencyMode ? 15 : 4,
+          maxItems: explainMaxItems,
           minItems: 0,  // Allow empty array if no relevant results
           items: {
             type: Type.OBJECT,
@@ -4525,7 +4528,7 @@ ${JSON.stringify(productData, null, 2)}`;
         }
       : {
           type: Type.ARRAY,
-          maxItems: isEmergencyMode ? 15 : 8,  // Up to 8 in non-explain mode
+          maxItems: noExplainMaxItems,
           minItems: 0,  // Allow empty array if no relevant results
           items: {
             type: Type.OBJECT,
@@ -4605,7 +4608,7 @@ async function reorderImagesWithGPT(
   explain = true,
   context,
   softFilters = null,
-  maxResults = 12, // 🎯 REDUCED for speed
+  maxResults = 25, // 🎯 Send 25 products to LLM for better ranking coverage
   useFastLLM = true, // 🎯 DEFAULT to fast model
   userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
   isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
@@ -10310,8 +10313,8 @@ app.post("/search", async (req, res) => {
             }
           }
 
-          // For fast mode, limit to 10 products for faster processing
-          const llmLimit = shouldUseFastLLM ? 10 : searchLimit;
+          // Send up to 25 products for LLM ranking - flash-lite handles this fast with truncated descriptions
+          const llmLimit = 25;
           console.log(`[${requestId}] Sending ${resultsForRerank.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
 
           reorderedData = await reorderFn(resultsForRerank, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile);
