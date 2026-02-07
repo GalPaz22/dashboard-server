@@ -8620,10 +8620,13 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     }
 
     // Support bidirectional "contains" for multi-word categories
-    if (word.length >= 3 && cat.includes(word)) return true;
-    if (cat.length >= 3 && word.includes(cat)) return true;
-    if (wordNormalized.length >= 3 && catNormalized.includes(wordNormalized)) return true;
-    if (catNormalized.length >= 3 && wordNormalized.includes(catNormalized)) return true;
+    // 🎯 FIX: Require the shorter string to be at least 70% of the longer string
+    // This prevents "פרי" (3 chars) matching inside "קמפרי" (5 chars) = 60% < 70%
+    // But still allows close matches like "ספרד"(4) in "ספרדי"(5) = 80% >= 70%
+    if (word.length >= 3 && cat.includes(word) && word.length >= cat.length * 0.7) return true;
+    if (cat.length >= 3 && word.includes(cat) && cat.length >= word.length * 0.7) return true;
+    if (wordNormalized.length >= 3 && catNormalized.includes(wordNormalized) && wordNormalized.length >= catNormalized.length * 0.7) return true;
+    if (catNormalized.length >= 3 && wordNormalized.includes(catNormalized) && catNormalized.length >= wordNormalized.length * 0.7) return true;
     
     return false;
   };
