@@ -3348,14 +3348,39 @@ Return the extracted filters in JSON format. Only extract values that exist in t
               return lNormalized === vNormalized;
             });
           }
-          // For color: try stripping Hebrew adjective suffixes (ה, ים, ות, ית)
-          if (!fuzzyMatch && name === 'color') {
+          // For color and softCategory: try stripping Hebrew adjective suffixes (ה, ים, ות, ית)
+          if (!fuzzyMatch) {
             const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
             for (const suffix of hebrewSuffixes) {
               if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
                 const stripped = vLower.slice(0, -suffix.length);
                 fuzzyMatch = list.find(l => l.toLowerCase() === stripped);
                 if (fuzzyMatch) break;
+                // Also try normalized match on stripped form
+                const strippedNorm = stripped.replace(/[יו]/g, '');
+                fuzzyMatch = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === strippedNorm);
+                if (fuzzyMatch) break;
+              }
+            }
+          }
+          // For color: try cross-language matching via colorSimilarityMap
+          if (!fuzzyMatch && name === 'color') {
+            // Forward lookup: extracted value → similar colors → find in list
+            if (colorSimilarityMap[vLower]) {
+              for (const similar of colorSimilarityMap[vLower]) {
+                fuzzyMatch = list.find(l => l.toLowerCase() === similar.toLowerCase());
+                if (fuzzyMatch) break;
+              }
+            }
+            // Reverse lookup: list items → their similar colors → check if extracted value is there
+            if (!fuzzyMatch) {
+              for (const listItem of list) {
+                const listLower = listItem.toLowerCase();
+                const similars = colorSimilarityMap[listLower];
+                if (similars && similars.some(s => s.toLowerCase() === vLower)) {
+                  fuzzyMatch = listItem;
+                  break;
+                }
               }
             }
           }
@@ -3390,14 +3415,34 @@ Return the extracted filters in JSON format. Only extract values that exist in t
           const vNorm = vLower.replace(/[יו]/g, '');
           match = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === vNorm);
           if (match) return match;
-          // Fuzzy match: Hebrew suffix stripping for colors (אדומה→אדום, לבנה→לבן)
-          if (name === 'color') {
+          // Fuzzy match: Hebrew suffix stripping (אדומה→אדום, לבנה→לבן, etc.)
+          if (name === 'color' || name === 'softCategory') {
             const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
             for (const suffix of hebrewSuffixes) {
               if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
                 const stripped = vLower.slice(0, -suffix.length);
                 match = list.find(l => l.toLowerCase() === stripped);
                 if (match) return match;
+                // Also try normalized match on stripped form
+                const strippedNorm = stripped.replace(/[יו]/g, '');
+                match = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === strippedNorm);
+                if (match) return match;
+              }
+            }
+          }
+          // Fuzzy match: cross-language color matching via colorSimilarityMap
+          if (name === 'color') {
+            if (colorSimilarityMap[vLower]) {
+              for (const similar of colorSimilarityMap[vLower]) {
+                match = list.find(l => l.toLowerCase() === similar.toLowerCase());
+                if (match) return match;
+              }
+            }
+            for (const listItem of list) {
+              const listLower = listItem.toLowerCase();
+              const similars = colorSimilarityMap[listLower];
+              if (similars && similars.some(s => s.toLowerCase() === vLower)) {
+                return listItem;
               }
             }
           }
@@ -3575,37 +3620,91 @@ Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": 
       const softCategoriesList = normalizeList(softCategories);
       const colorsList = normalizeList(colors);
 
-      // Simple validation with fuzzy matching for Hebrew spelling variations
-      const validate = (val, list) => {
+      // Validation with fuzzy matching for Hebrew spelling variations
+      const validate = (val, list, name) => {
         if (!val) return undefined;
-        const vals = Array.isArray(val) ? val : [val];
-        
+        // Handle comma-separated strings
+        let vals;
+        if (Array.isArray(val)) {
+          vals = val;
+        } else if (typeof val === 'string' && (name === 'softCategory' || name === 'color') && val.includes(',')) {
+          vals = val.split(',').map(v => v.trim()).filter(v => v.length > 0);
+        } else {
+          vals = [val];
+        }
+
         const valid = vals.map(v => {
           const vLower = String(v).toLowerCase().trim();
-          
-          // First try exact match
+
+          // 1. Exact match
           let match = list.find(l => l.toLowerCase().trim() === vLower);
           if (match) return match;
-          
-          // For Hebrew text, try fuzzy match (allowing missing י ו characters which are often optional)
-          // This handles cases like "פרמיטיבו" vs "פרימיטיבו"
+
+          // 2. Hebrew vowel normalization (allowing missing י ו characters)
           const vNormalized = vLower.replace(/[יו]/g, '');
           match = list.find(l => {
             const lNormalized = l.toLowerCase().trim().replace(/[יו]/g, '');
             return lNormalized === vNormalized;
           });
-          
-          return match;
+          if (match) return match;
+
+          // Additional fuzzy matching for softCategory and color
+          if (name === 'softCategory' || name === 'color') {
+            // 3. Substring/whole-word matching (e.g., "ital" in "italy")
+            match = list.find(l => {
+              const lLower = l.toLowerCase().trim();
+              return (includesWholeWord(lLower, vLower) || includesWholeWord(vLower, lLower)) &&
+                     Math.min(vLower.length, lLower.length) >= 3;
+            });
+            if (match) return match;
+
+            // 4. Hebrew suffix stripping (אדומה→אדום, לבנה→לבן, שחורים→שחור, כחולה→כחול)
+            const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
+            for (const suffix of hebrewSuffixes) {
+              if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
+                const stripped = vLower.slice(0, -suffix.length);
+                match = list.find(l => l.toLowerCase().trim() === stripped);
+                if (match) return match;
+                // Also try normalized match on stripped form
+                const strippedNorm = stripped.replace(/[יו]/g, '');
+                match = list.find(l => l.toLowerCase().trim().replace(/[יו]/g, '') === strippedNorm);
+                if (match) return match;
+              }
+            }
+
+            // 5. Cross-language color matching via colorSimilarityMap
+            if (name === 'color' && colorSimilarityMap[vLower]) {
+              const similarColors = colorSimilarityMap[vLower];
+              for (const similar of similarColors) {
+                match = list.find(l => l.toLowerCase().trim() === similar.toLowerCase());
+                if (match) return match;
+              }
+            }
+            // Also try reverse lookup: check if any list item maps to our value
+            if (name === 'color') {
+              for (const listItem of list) {
+                const listLower = listItem.toLowerCase().trim();
+                const similars = colorSimilarityMap[listLower];
+                if (similars && similars.some(s => s.toLowerCase() === vLower)) {
+                  return listItem;
+                }
+              }
+            }
+          }
+
+          return undefined;
         }).filter(Boolean);
-        
-        if (valid.length === 0) return undefined;
-        return valid.length === 1 ? valid[0] : valid;
+
+        // Deduplicate
+        const unique = [...new Set(valid)];
+        if (unique.length === 0) return undefined;
+        return unique.length === 1 ? unique[0] : unique;
       };
 
-      filters.category = validate(filters.category, categoriesList);
-      filters.type = validate(filters.type, typesList);
-      filters.softCategory = validate(filters.softCategory, softCategoriesList);
-      filters.color = validate(filters.color, colorsList);
+      filters.category = validate(filters.category, categoriesList, 'category');
+      filters.type = validate(filters.type, typesList, 'type');
+      filters.softCategory = validate(filters.softCategory, softCategoriesList, 'softCategory');
+      filters.color = validate(filters.color, colorsList, 'color');
 
       // Filter to keep only the most specific categories (e.g., "hoop earrings" over "earrings")
       if (filters.category) {
@@ -3666,9 +3765,9 @@ RULES:
    Examples: כיסא↔כורסא (both seating), ספה↔קאוצ׳ (both couches), מיטה↔מזרון (related sleeping furniture)
 2. Do NOT map words that are merely related but not synonymous.
 3. If a query word already appears in the categories list (exact or with Hebrew suffix variation), it does NOT need synonym expansion.
-4. Return the synonymMap with original query word → matching category name.
+4. Return the synonyms as an array of objects with "original" (query word) and "mapped" (category name) fields.
 5. Return expandedQuery with the synonym-replaced version of the full query.
-6. If no synonyms found, return {"expandedQuery": null, "synonymMap": {}}.
+6. If no synonyms found, return {"expandedQuery": null, "synonyms": []}.
 
 Return JSON only.`,
           temperature: 0.1,
@@ -3678,7 +3777,18 @@ Return JSON only.`,
             type: Type.OBJECT,
             properties: {
               expandedQuery: { type: Type.STRING, nullable: true },
-              synonymMap: { type: Type.OBJECT }
+              synonyms: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    original: { type: Type.STRING, description: "Original query word" },
+                    mapped: { type: Type.STRING, description: "Matching category name" }
+                  },
+                  required: ["original", "mapped"]
+                },
+                description: "Array of synonym mappings from original query word to matching category name. Empty array if no synonyms found."
+              }
             }
           }
         }
@@ -3689,10 +3799,20 @@ Return JSON only.`,
 
       const result = JSON.parse(content.replace(/^[^{]+/, '').replace(/[^}]+$/, ''));
 
-      if (result.expandedQuery && result.synonymMap && Object.keys(result.synonymMap).length > 0) {
+      // Convert synonyms array to synonymMap object
+      const synonymMap = {};
+      if (Array.isArray(result.synonyms)) {
+        result.synonyms.forEach(item => {
+          if (item.original && item.mapped) {
+            synonymMap[item.original] = item.mapped;
+          }
+        });
+      }
+
+      if (result.expandedQuery && Object.keys(synonymMap).length > 0) {
         // Validate that synonym targets actually exist in categories
         const validSynonyms = {};
-        for (const [original, mapped] of Object.entries(result.synonymMap)) {
+        for (const [original, mapped] of Object.entries(synonymMap)) {
           const mappedLower = mapped.toLowerCase().trim();
           const isValid = categoriesLower.some(c =>
             c === mappedLower || c.includes(mappedLower) || mappedLower.includes(c)
