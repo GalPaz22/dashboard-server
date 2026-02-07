@@ -414,6 +414,98 @@ function getSimilarColors(colors) {
   return Array.from(similarColors);
 }
 
+/**
+ * Fallback color extraction: scan query for known colors when LLM fails to extract
+ * Uses colorSimilarityMap to detect color terms (including shades) and maps them
+ * to the closest available color in the provided list.
+ * Also detects "בצבע X" (in color X) patterns.
+ */
+function extractColorFromQuery(query, colorsList) {
+  if (!query || !colorsList || colorsList.length === 0) return null;
+
+  const queryLower = query.toLowerCase().trim();
+  const queryWords = queryLower.split(/\s+/);
+  const colorsListLower = colorsList.map(c => c.toLowerCase().trim());
+  const detectedColors = [];
+
+  // 1. Check "בצבע X" pattern — the word after "בצבע" is always a color
+  const betzevaPat = /בצבע\s+(\S+)/g;
+  let m;
+  while ((m = betzevaPat.exec(queryLower)) !== null) {
+    const colorTerm = m[1];
+    const resolved = resolveColorToList(colorTerm, colorsList, colorsListLower);
+    if (resolved && !detectedColors.includes(resolved)) {
+      detectedColors.push(resolved);
+    }
+  }
+
+  // 2. Check each query word against colorSimilarityMap keys and the colors list
+  for (const word of queryWords) {
+    if (word === 'בצבע' || word.length < 2) continue;
+    const resolved = resolveColorToList(word, colorsList, colorsListLower);
+    if (resolved && !detectedColors.includes(resolved)) {
+      detectedColors.push(resolved);
+    }
+  }
+
+  if (detectedColors.length === 0) return null;
+  return detectedColors.length === 1 ? detectedColors[0] : detectedColors;
+}
+
+/**
+ * Resolve a color term to the closest matching color in the available list.
+ * Handles exact match, suffix stripping, and colorSimilarityMap cross-referencing.
+ */
+function resolveColorToList(colorTerm, colorsList, colorsListLower) {
+  const termLower = colorTerm.toLowerCase().trim();
+
+  // Direct match
+  const directIdx = colorsListLower.indexOf(termLower);
+  if (directIdx !== -1) return colorsList[directIdx];
+
+  // Suffix stripping (אדומה→אדום, לבנה→לבן, etc.)
+  const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
+  for (const suffix of hebrewSuffixes) {
+    if (termLower.endsWith(suffix) && termLower.length > suffix.length + 2) {
+      const stripped = termLower.slice(0, -suffix.length);
+      const idx = colorsListLower.indexOf(stripped);
+      if (idx !== -1) return colorsList[idx];
+    }
+  }
+
+  // colorSimilarityMap forward lookup: this color → similar colors → find in list
+  if (colorSimilarityMap[termLower]) {
+    for (const similar of colorSimilarityMap[termLower]) {
+      const idx = colorsListLower.indexOf(similar.toLowerCase());
+      if (idx !== -1) return colorsList[idx];
+    }
+  }
+
+  // colorSimilarityMap reverse lookup: list item → its similar colors → check if term is there
+  for (let i = 0; i < colorsList.length; i++) {
+    const listLower = colorsListLower[i];
+    const similars = colorSimilarityMap[listLower];
+    if (similars && similars.some(s => s.toLowerCase() === termLower)) {
+      return colorsList[i];
+    }
+  }
+
+  // Suffix-stripped + similarity map
+  for (const suffix of hebrewSuffixes) {
+    if (termLower.endsWith(suffix) && termLower.length > suffix.length + 2) {
+      const stripped = termLower.slice(0, -suffix.length);
+      if (colorSimilarityMap[stripped]) {
+        for (const similar of colorSimilarityMap[stripped]) {
+          const idx = colorsListLower.indexOf(similar.toLowerCase());
+          if (idx !== -1) return colorsList[idx];
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 /* =========================================================== *\
    ATLAS SEARCH INDEX MANAGEMENT
 \* =========================================================== */
@@ -3167,11 +3259,20 @@ Extract the following filters from the query if they exist:
    - BUT: The final extracted value MUST exist in the provided list: ${softCategories}
    - You can extract multiple soft categories as an array
 7. color - FLEXIBLE MATCHING ALLOWED. Available colors: ${colors}
-   - Extract any color-related terms from the query if they match a color in the provided list
+   - Extract ANY color-related term from the query, including shades, synonyms, and translations
    - Map synonyms and translations: "red"/"אדום", "white"/"לבן", "black"/"שחור", "blue"/"כחול", "pink"/"ורוד", etc.
    - IMPORTANT: Hebrew feminine/plural forms are colors too: "אדומה"→"אדום", "לבנה"→"לבן", "שחורים"→"שחור", "כחולה"→"כחול"
    - IMPORTANT: Color and softCategory are INDEPENDENT. A query like "כורסאת בד אדומה" should extract BOTH softCategory:"בד" AND color:"אדום". Never skip color because you already extracted a softCategory.
-   - The final extracted value MUST exist in the provided list: ${colors}
+   - SHADE/SYNONYM MAPPING: Map color shades and synonyms to the CLOSEST available color in the list:
+     * חמרה/maroon/בורדו/burgundy/wine → map to "אדום"/"red" if those exist in the list
+     * תכלת/sky blue/light blue → map to "כחול"/"blue" if those exist
+     * שמנת/cream/קרם/ivory/שנהב → map to "לבן"/"white" if those exist
+     * זית/olive/חאקי/khaki → map to "ירוק"/"green" if those exist
+     * ורוד/pink/סלמון/salmon → map to "ורוד"/"pink" or "אדום"/"red"
+     * בז׳/beige/tan/שמנת → map to "חום"/"brown" or "לבן"/"white"
+   - PATTERN: "בצבע X" (in color X) means X is a color — always extract it
+   - The final extracted value SHOULD map to the closest match in the provided list: ${colors}
+   - Even if the exact shade is not in the list, extract the PARENT/BASE color that IS in the list
    - You can extract multiple colors as an array
    - If no colors list is provided or empty, do NOT extract color
 
@@ -3189,14 +3290,17 @@ Query: "cabernet sauvignon under 100" → {"softCategory": ["cabernet sauvignon"
 Query: "sweet sparkling wine for a gift" → {"type": "sweet", "softCategory": ["sparkling", "gift"]}
 Query: "יין רוזה ספרדי עד 80 שקל" → {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
 Query: "כורסאת בד אדומה" → {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} (extract category, soft category AND color separately)
+Query: "כורסת בד בצבע חמרה" → {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} ("בצבע חמרה" means maroon color → map to "אדום" if "חמרה" is not in color list. "בד" is material → softCategory)
 Query: "ספה לבנה מעור" → {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material is softCategory, color is color — extract both)
 Query: "שולחן עץ שחור" → {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]} (material/style goes to softCategory, color goes to color)
+Query: "כיסא בורדו" → {"category": "כיסא", "color": ["אדום"]} (בורדו/burgundy is a shade of red → map to "אדום" if "בורדו" not in list)
 
 CRITICAL VALIDATION:
-- Before extracting ANY value, verify it exists in the provided list
-- For category: Only extract if there's a solid, unambiguous match
+- For category: Only extract if there's a solid, unambiguous match in the list
+- For type: Must exist exactly in the list
 - For softCategory: Be creative with mapping — geographic adjectives to country names, food mentions to pairings, style adjectives to attributes. The result must be in the provided list.
-- If you cannot find a match in the lists, do NOT extract that filter
+- For color: ALWAYS extract any color you detect, mapping shades/synonyms to the closest available color. "חמרה"→"אדום", "בורדו"→"אדום", "תכלת"→"כחול", "שמנת"→"לבן", etc.
+- If you cannot find a match for category/type/softCategory, do NOT extract that filter. But for COLOR, always try to map to the closest parent color.
 
 Return the extracted filters in JSON format. Only extract values that exist in the provided lists.${exampleSection}`;
 
@@ -3499,12 +3603,21 @@ Return the extracted filters in JSON format. Only extract values that exist in t
     if (filters.category) {
       filters.category = filterToMostSpecificCategories(filters.category);
     }
-    
+
+    // Fallback color extraction: if LLM didn't extract color, scan query for known colors
+    if (!filters.color && colorsList.length > 0) {
+      const detectedColor = extractColorFromQuery(query, colorsList);
+      if (detectedColor) {
+        filters.color = detectedColor;
+        console.log(`[FILTERS] Fallback color extraction: "${query}" → color: ${JSON.stringify(detectedColor)}`);
+      }
+    }
+
     // Record success
     aiCircuitBreaker.recordSuccess();
-    
+
     console.log(`[FILTERS] "${query}" → ${JSON.stringify(filters)}`);
-    
+
     return filters;
   } catch (error) {
     console.error("Error extracting enhanced filters:", error);
@@ -3537,7 +3650,7 @@ Extract relevant filters from the query. Be thorough — extract EVERY relevant 
 IMPORTANT: softCategory and color are INDEPENDENT fields. Always extract BOTH if the query contains material/style AND color.
 Hebrew feminine/plural forms are colors too: "אדומה"→"אדום", "לבנה"→"לבן", "שחורים"→"שחור".
 
-EXTRACT FROM THESE LISTS ONLY:
+EXTRACT FROM THESE LISTS:
 - category: ${categories}
 - type: ${types}
 - softCategory: ${softCategories}
@@ -3547,16 +3660,20 @@ CRITICAL RULES:
 1. If the query is a BRAND NAME or PRODUCT NAME (like "פלטר", "Arini", "מטר"), DO NOT extract it as a category or softCategory.
 2. For brand/product queries, you MAY extract general category (like "יין") but NEVER add the brand name itself to softCategory.
 3. USE YOUR DOMAIN KNOWLEDGE: If a brand is mentioned, extract its characteristics ONLY if they exist in the lists (e.g. "Arini" -> region: "Sicily" if Sicily is in softCategory list).
-4. ONLY extract values that exist in the provided lists.
-5. Return JSON only. Return empty {} if nothing to extract.
-6. SYNONYM MATCHING: If a query word is a SYNONYM or semantically equivalent to a category in the list, map it to that category. For example, if the user searches "כיסא" and the category list contains "כורסא", extract "כורסא" as the category since they refer to similar products.
-7. SOFT CATEGORY — EXTRACT AGGRESSIVELY:
+4. Return JSON only. Return empty {} if nothing to extract.
+5. SYNONYM MATCHING: If a query word is a SYNONYM or semantically equivalent to a category in the list, map it to that category. For example, if the user searches "כיסא" and the category list contains "כורסא", extract "כורסא" as the category since they refer to similar products.
+6. SOFT CATEGORY — EXTRACT AGGRESSIVELY:
    - Geographic adjectives → country/region names: "italian"/"איטלקי" → "Italy"/"איטליה", "French"/"צרפתי" → "France"/"צרפת", "Spanish"/"ספרדי" → "Spain"/"ספרד"
    - Food pairings: "for pasta"/"לפסטה" → "pasta", "for steak" → "steak"/"meat"
    - Grape varieties: "cabernet" → "cabernet sauvignon", "merlot" → "merlot"
    - Occasions: "for a gift" → "gift"/"מתנה", "for dinner" → look in list
    - Style: "fruity"/"פירותי" → "fruity", "full bodied" → "full body"
    - Extract ALL matching soft categories, not just the first one
+7. COLOR — EXTRACT AGGRESSIVELY, MAP SHADES TO CLOSEST AVAILABLE COLOR:
+   - "בצבע X" (in color X) → X is ALWAYS a color, extract it
+   - Map shades/synonyms to closest available color: חמרה/maroon/בורדו/burgundy → "אדום"/"red", תכלת/sky blue → "כחול"/"blue", שמנת/cream → "לבן"/"white", זית/olive → "ירוק"/"green"
+   - Hebrew adjective forms: "אדומה"→"אדום", "לבנה"→"לבן", "כחולה"→"כחול", "שחורים"→"שחור"
+   - Even if exact shade not in list, ALWAYS extract the parent/base color that IS in the list
 
 EXAMPLES:
 Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
@@ -3565,8 +3682,10 @@ Query: "italian red wine for pasta" -> {"category": "יין אדום", "softCate
 Query: "dry white wine from France" -> {"category": "יין לבן", "type": "dry", "softCategory": ["France"]}
 Query: "יין רוזה ספרדי עד 80" -> {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
 Query: "כורסאת בד אדומה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} (extract BOTH softCategory AND color)
+Query: "כורסת בד בצבע חמרה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} ("בצבע חמרה" = maroon color → map to "אדום". "בד" = material → softCategory)
 Query: "ספה לבנה מעור" -> {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material=softCategory, color=color)
-Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]}`;
+Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]}
+Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} (בורדו is a shade of red → map to "אדום")`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-2.5-flash",
@@ -3709,6 +3828,15 @@ Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": 
       // Filter to keep only the most specific categories (e.g., "hoop earrings" over "earrings")
       if (filters.category) {
         filters.category = filterToMostSpecificCategories(filters.category);
+      }
+
+      // Fallback color extraction: if LLM didn't extract color, scan query for known colors
+      if (!filters.color && colorsList.length > 0) {
+        const detectedColor = extractColorFromQuery(query, colorsList);
+        if (detectedColor) {
+          filters.color = detectedColor;
+          console.log(`[FILTERS-BRIEF] Fallback color extraction: "${query}" → color: ${JSON.stringify(detectedColor)}`);
+        }
       }
 
       return filters;
