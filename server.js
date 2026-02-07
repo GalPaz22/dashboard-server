@@ -117,6 +117,25 @@ async function initializeRedis() {
 initializeRedis();
 
 /* =========================================================== *\
+   TEXT MATCHING UTILITIES
+\* =========================================================== */
+
+/**
+ * Check if `text` contains `word` as a whole word (not as a substring within another word).
+ * For single-word text with no spaces, requires exact equality.
+ * For multi-word text, checks that `word` appears at word boundaries (spaces or string edges).
+ * This prevents false matches like "קמפרי" matching "פרי" (fruit is a suffix of campari).
+ */
+function includesWholeWord(text, word) {
+  if (text === word) return true;
+  // If neither has spaces, this is a single-token comparison - require exact match
+  if (!text.includes(' ') && !word.includes(' ')) return false;
+  // For multi-word strings, check word boundaries (spaces or string start/end)
+  const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(text);
+}
+
+/* =========================================================== *\
    MEMORY MONITORING & PROTECTION
 \* =========================================================== */
 
@@ -3306,7 +3325,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
           // Try substring match (e.g., "ital" in "italy" or "italy" in "italian")
           let fuzzyMatch = list.find(l => {
             const lLower = l.toLowerCase();
-            return (lLower.includes(vLower) || vLower.includes(lLower)) &&
+            return (includesWholeWord(lLower, vLower) || includesWholeWord(vLower, lLower)) &&
                    Math.min(vLower.length, lLower.length) >= 3; // Min 3 chars to avoid false positives
           });
           // Try Hebrew normalized match (removing optional י ו characters)
@@ -3340,7 +3359,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
           // Fuzzy match: substring
           match = list.find(l => {
             const lLower = l.toLowerCase();
-            return (lLower.includes(vLower) || vLower.includes(lLower)) &&
+            return (includesWholeWord(lLower, vLower) || includesWholeWord(vLower, lLower)) &&
                    Math.min(vLower.length, lLower.length) >= 3;
           });
           if (match) return match;
@@ -3581,7 +3600,7 @@ async function expandQueryWithCategorySynonyms(query, categories) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
   const categoriesLower = categoriesList.map(c => c.toLowerCase().trim());
   const allWordsMatch = queryWords.every(w =>
-    categoriesLower.some(c => c.includes(w) || w.includes(c))
+    categoriesLower.some(c => c === w || includesWholeWord(c, w) || includesWholeWord(w, c))
   );
   if (allWordsMatch) return null;
 
@@ -5400,7 +5419,7 @@ async function executeExplicitSoftCategorySearch(
           // Check if any of the product's soft categories match query-extracted ones
           const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
           return queryExtractedSoftCatsArray.some(qsc =>
-            productSoftCats.some(psc => psc.includes(qsc.toLowerCase().trim()) || qsc.toLowerCase().trim().includes(psc))
+            productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
           );
         });
 
@@ -7209,7 +7228,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           // Check if any of the product's soft categories match extracted ones
           const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
           return extractedSoftCatsArray.some(qsc =>
-            productSoftCats.some(psc => psc.includes(qsc.toLowerCase().trim()) || qsc.toLowerCase().trim().includes(psc))
+            productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
           );
         });
 
@@ -8355,7 +8374,7 @@ function scoreAndSliceRecommendations(candidates, matchedProducts, hardCats, sof
     if (hardCatArray.length > 0 && product.category) {
       const productCat = (typeof product.category === 'string' ? product.category : '').toLowerCase();
       const hardMatch = hardCatArray.some(hc =>
-        productCat.includes(hc.toLowerCase()) || hc.toLowerCase().includes(productCat)
+        productCat === hc.toLowerCase() || includesWholeWord(productCat, hc.toLowerCase()) || includesWholeWord(hc.toLowerCase(), productCat)
       );
       if (hardMatch) {
         score += 40; // Same hard category = strong signal
@@ -8368,7 +8387,7 @@ function scoreAndSliceRecommendations(candidates, matchedProducts, hardCats, sof
         ? product.softCategory
         : (product.softCategory ? [product.softCategory] : []);
       const overlapCount = productSoftCats.filter(sc =>
-        softCatArray.some(mc => sc.toLowerCase().includes(mc.toLowerCase()) || mc.toLowerCase().includes(sc.toLowerCase()))
+        softCatArray.some(mc => includesWholeWord(sc.toLowerCase(), mc.toLowerCase()) || includesWholeWord(mc.toLowerCase(), sc.toLowerCase()))
       ).length;
       score += Math.min(overlapCount * 15, 50);
     }
@@ -8797,11 +8816,11 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       if (wordNormalized.startsWith(p) && wordNormalized.substring(1).startsWith(catNormalized) && wordNormalized.length <= catNormalized.length + 3) return true;
     }
 
-    // Support bidirectional "contains" for multi-word categories
-    if (word.length >= 3 && cat.includes(word)) return true;
-    if (cat.length >= 3 && word.includes(cat)) return true;
-    if (wordNormalized.length >= 3 && catNormalized.includes(wordNormalized)) return true;
-    if (catNormalized.length >= 3 && wordNormalized.includes(catNormalized)) return true;
+    // Support bidirectional "contains" for multi-word categories (whole-word match only)
+    if (word.length >= 3 && includesWholeWord(cat, word)) return true;
+    if (cat.length >= 3 && includesWholeWord(word, cat)) return true;
+    if (wordNormalized.length >= 3 && includesWholeWord(catNormalized, wordNormalized)) return true;
+    if (catNormalized.length >= 3 && includesWholeWord(wordNormalized, catNormalized)) return true;
     
     return false;
   };
@@ -9272,7 +9291,7 @@ app.post("/search", async (req, res) => {
           if (!product.category) return false;
           const productCats = Array.isArray(product.category) ? product.category : [product.category];
           return filterCheck.matchedHardCategories.some(hardCat =>
-            productCats.some(pCat => pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase()))
+            productCats.some(pCat => pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase()))
           );
         });
         if (beforeCount !== approvedProducts.length) {
@@ -9647,7 +9666,7 @@ app.post("/search", async (req, res) => {
             const storeCategories = (categories || []).filter(c => typeof c === 'string').map(c => c.toLowerCase().trim());
             const queryContainsHardCategory = originalCategory && storeCategories.some(storeCat =>
               queryWordsLower.some(qw => qw === storeCat || storeCat === qw ||
-                (qw.length >= 3 && storeCat.includes(qw)) || (storeCat.length >= 3 && qw.includes(storeCat)))
+                (qw.length >= 3 && includesWholeWord(storeCat, qw)) || (storeCat.length >= 3 && includesWholeWord(qw, storeCat)))
             );
 
             if (queryContainsHardCategory) {
@@ -9797,7 +9816,7 @@ app.post("/search", async (req, res) => {
       const matchedSoftCategories = [];
       for (const term of queryTerms) {
         const matchedCategory = finalSoftCategories.find(cat =>
-          cat.toLowerCase().includes(term) || term.includes(cat.toLowerCase())
+          cat.toLowerCase() === term || includesWholeWord(cat.toLowerCase(), term) || includesWholeWord(term, cat.toLowerCase())
         );
         if (matchedCategory && !matchedSoftCategories.includes(matchedCategory)) {
           matchedSoftCategories.push(matchedCategory);
@@ -10067,7 +10086,7 @@ app.post("/search", async (req, res) => {
               // Check if any of the product's soft categories match query-extracted ones
               const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
               return queryExtractedSoftCatsArray.some(qsc =>
-                productSoftCats.some(psc => psc.includes(qsc.toLowerCase().trim()) || qsc.toLowerCase().trim().includes(psc))
+                productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
               );
             });
 
@@ -10089,7 +10108,7 @@ app.post("/search", async (req, res) => {
               // Product must match at least one of the query-extracted hard categories
               return queryExtractedHardCatsArray.some(hardCat =>
                 productCategories.some(pCat =>
-                  pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+                  pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase())
                 )
               );
             });
@@ -10692,7 +10711,7 @@ app.post("/search", async (req, res) => {
                 } else {
                   categoryMatch = preRerankHardCatsArray.some(hardCat =>
                 productCategories.some(pCat =>
-                  pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+                  pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase())
                 )
               );
                 }
@@ -10706,7 +10725,7 @@ app.post("/search", async (req, res) => {
                 } else {
                   typeMatch = preRerankTypesArray.some(filterType =>
                     productTypes.some(pType =>
-                      pType.toLowerCase().includes(filterType.toLowerCase()) || filterType.toLowerCase().includes(pType.toLowerCase())
+                      pType.toLowerCase() === filterType.toLowerCase() || includesWholeWord(pType.toLowerCase(), filterType.toLowerCase()) || includesWholeWord(filterType.toLowerCase(), pType.toLowerCase())
                     )
                   );
                 }
@@ -11000,7 +11019,7 @@ app.post("/search", async (req, res) => {
           const productCategories = Array.isArray(product.category) ? product.category : [product.category];
           return queryHardCatsForRerankArray.some(hardCat =>
             productCategories.some(pCat =>
-              pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+              pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase())
             )
           );
         });
@@ -11103,7 +11122,7 @@ app.post("/search", async (req, res) => {
           if (productCategories.length === 0) return false;
           return queryHardCatsForRerankArray.some(hardCat =>
             productCategories.some(pCat =>
-              pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase())
+              pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase())
             )
           );
         });
@@ -11370,7 +11389,7 @@ app.post("/search", async (req, res) => {
         if (!product.category) return false;
         const productCats = Array.isArray(product.category) ? product.category : [product.category];
         return hardFilters.category.some(hardCat =>
-          productCats.some(pCat => pCat.toLowerCase().includes(hardCat.toLowerCase()) || hardCat.toLowerCase().includes(pCat.toLowerCase()))
+          productCats.some(pCat => pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase()))
         );
       });
       if (beforeHardGate !== finalResults.length) {
