@@ -8850,8 +8850,8 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     if (cat.startsWith(word) && cat.length <= word.length + 2) return true;
     if (catNormalized.startsWith(wordNormalized) && catNormalized.length <= wordNormalized.length + 2) return true;
     
-    // Check if word has common Hebrew prefixes (ה, ו, ב, ל, מ, ש, כ)
-    const prefixes = ['ה', 'ו', 'ב', 'ל', 'מ', 'ש', 'כ'];
+    // Check if word has common Hebrew prefixes (ה, ו, ב, ל)
+    const prefixes = ['ה', 'ו', 'ב', 'ל'];
     for (const p of prefixes) {
       if (word.startsWith(p) && word.substring(1) === cat) return true;
       if (word.startsWith(p) && word.substring(1).startsWith(cat) && word.length <= cat.length + 3) return true;
@@ -8915,32 +8915,10 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     }
   }
   
-  // Try to match soft categories (multi-word first)
-  for (const cat of sortedSoftCategories) {
-    const catWords = cat.split(/\s+/);
-
-    for (let i = 0; i <= queryWords.length - catWords.length; i++) {
-      const querySlice = queryWords.slice(i, i + catWords.length);
-
-      const allMatch = catWords.every((catWord, idx) =>
-        isVariationMatch(querySlice[idx], catWord)
-      );
-
-      if (allMatch) {
-        const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
-        const alreadyMatched = sliceIndices.some(idx => matchedWordIndices.has(idx));
-
-        if (!alreadyMatched) {
-          matchedSoftCategories.push(cat);
-          sliceIndices.forEach(idx => matchedWordIndices.add(idx));
-          break;
-        }
-      }
-    }
-  }
-
-  // Try to match colors (treated like soft categories for matching)
-  // Enhanced: Also match via colorSimilarityMap for cross-language support (e.g., "red" → "אדום")
+  // 🎯 CRITICAL: Match colors BEFORE soft categories.
+  // When a word like "אדום" exists in BOTH colors and softCategories lists,
+  // we must classify it as a color. If soft categories run first, they "steal" the word
+  // via isVariationMatch (e.g., "אדומה".startsWith("אדום")), leaving nothing for color matching.
   const matchedColors = [];
   const sortedColors = [...normalizedColors].sort((a, b) => {
     const aWords = a.split(/\s+/).length;
@@ -9012,6 +8990,31 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     if (translated && !matchedColors.includes(translated)) {
       matchedColors.push(translated);
       matchedWordIndices.add(i);
+    }
+  }
+
+  // Try to match soft categories (multi-word first)
+  // Runs AFTER colors so that color words (אדום, לבן, etc.) are already claimed
+  for (const cat of sortedSoftCategories) {
+    const catWords = cat.split(/\s+/);
+
+    for (let i = 0; i <= queryWords.length - catWords.length; i++) {
+      const querySlice = queryWords.slice(i, i + catWords.length);
+
+      const allMatch = catWords.every((catWord, idx) =>
+        isVariationMatch(querySlice[idx], catWord)
+      );
+
+      if (allMatch) {
+        const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
+        const alreadyMatched = sliceIndices.some(idx => matchedWordIndices.has(idx));
+
+        if (!alreadyMatched) {
+          matchedSoftCategories.push(cat);
+          sliceIndices.forEach(idx => matchedWordIndices.add(idx));
+          break;
+        }
+      }
     }
   }
 
