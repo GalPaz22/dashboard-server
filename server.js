@@ -10380,8 +10380,8 @@ app.post("/search", async (req, res) => {
                 }
               }
 
-              // Extract soft categories
-              if (product.softCategory && Array.isArray(product.softCategory)) {
+              // Extract soft categories (skip for single product match - use hard category only for expansion)
+              if (!shouldExtractFromSingleOnly && product.softCategory && Array.isArray(product.softCategory)) {
                 product.softCategory.forEach(cat => {
                   if (cat && cat.trim()) extractedSoftCategories.add(cat.trim());
                 });
