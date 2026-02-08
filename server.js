@@ -349,8 +349,10 @@ const colorSimilarityMap = {
   // Yellows/Golds (Hebrew + English)
   'צהוב': ['צהוב', 'צהוב בהיר', 'צהוב כהה', 'זהב', 'חרדל', 'לימון', 'yellow'],
   'yellow': ['yellow', 'צהוב', 'gold', 'mustard', 'lemon'],
-  'זהב': ['זהב', 'צהוב', 'צהוב כהה', 'חרדל', 'gold'],
-  'gold': ['gold', 'זהב', 'golden', 'yellow'],
+  'זהב': ['זהב', 'זהובה', 'זהוב', 'צהוב', 'צהוב כהה', 'חרדל', 'gold'],
+  'זהובה': ['זהובה', 'זהב', 'זהוב', 'gold'],
+  'זהוב': ['זהוב', 'זהב', 'זהובה', 'gold'],
+  'gold': ['gold', 'זהב', 'זהובה', 'זהוב', 'golden', 'yellow'],
   'חרדל': ['חרדל', 'צהוב כהה', 'זהב', 'צהוב', 'mustard'],
   
   // Oranges (Hebrew + English)
@@ -379,8 +381,10 @@ const colorSimilarityMap = {
   'אפור': ['אפור', 'אפור בהיר', 'אפור כהה', 'כסף', 'פחם', 'gray', 'grey'],
   'gray': ['gray', 'grey', 'אפור', 'silver', 'charcoal', 'slate'],
   'grey': ['grey', 'gray', 'אפור', 'silver', 'charcoal', 'slate'],
-  'כסף': ['כסף', 'אפור', 'אפור בהיר', 'מטאלי', 'silver'],
-  'silver': ['silver', 'כסף', 'gray', 'grey', 'metallic'],
+  'כסף': ['כסף', 'כסופה', 'כסוף', 'אפור', 'אפור בהיר', 'מטאלי', 'silver'],
+  'כסופה': ['כסופה', 'כסף', 'כסוף', 'silver'],
+  'כסוף': ['כסוף', 'כסף', 'כסופה', 'silver'],
+  'silver': ['silver', 'כסף', 'כסופה', 'כסוף', 'gray', 'grey', 'metallic'],
   'שמנת': ['שמנת', 'לבן', 'קרם', 'בז\'', 'שנהב', 'cream'],
   'cream': ['cream', 'שמנת', 'ivory', 'off-white', 'beige'],
   'קרם': ['קרם', 'שמנת', 'לבן', 'בז\'', 'שנהב', 'cream']
@@ -3242,6 +3246,8 @@ Extract the following filters from the query if they exist:
    - The extracted type MUST exist EXACTLY in the provided list
    - You may map synonyms intelligently (e.g., "dry" → "dry" if in list), but the final value MUST be in the list
    - Do not ever make up a type that is not in the list
+   - NEVER add trailing commas or punctuation to extracted values
+   - IMPORTANT: Colors are NOT types. Words like כסף/כסופה/silver/זהב/gold are COLORS, not types. Extract them to the color field instead.
 6. softCategory - FLEXIBLE MATCHING ALLOWED with DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}
    - Extract contextual preferences (e.g., origins, grape varieties, food pairings, occasions, regions)
    - You have MORE FLEXIBILITY here - you can intelligently map related terms
@@ -3270,6 +3276,8 @@ Extract the following filters from the query if they exist:
      * זית/olive/חאקי/khaki → map to "ירוק"/"green" if those exist
      * ורוד/pink/סלמון/salmon → map to "ורוד"/"pink" or "אדום"/"red"
      * בז׳/beige/tan/שמנת → map to "חום"/"brown" or "לבן"/"white"
+     * כסף/כסופה/silver/כסוף → map to "כסף"/"silver" (these are COLORS, never types)
+     * זהב/זהובה/gold/זהוב → map to "זהב"/"gold" (these are COLORS, never types)
    - PATTERN: "בצבע X" (in color X) means X is a color — always extract it
    - The final extracted value SHOULD map to the closest match in the provided list: ${colors}
    - Even if the exact shade is not in the list, extract the PARENT/BASE color that IS in the list
@@ -3294,6 +3302,8 @@ Query: "כורסת בד בצבע חמרה" → {"category": "כורסא", "softC
 Query: "ספה לבנה מעור" → {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material is softCategory, color is color — extract both)
 Query: "שולחן עץ שחור" → {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]} (material/style goes to softCategory, color goes to color)
 Query: "כיסא בורדו" → {"category": "כיסא", "color": ["אדום"]} (בורדו/burgundy is a shade of red → map to "אדום" if "בורדו" not in list)
+Query: "טבעת כסופה חלקה" → {"category": "טבעת", "color": ["כסף"]} ("כסופה" is feminine for "כסף"/silver — it's a COLOR, not a type. "חלקה" = smooth, goes to softCategory if in list)
+Query: "שרשרת זהובה" → {"category": "שרשרת", "color": ["זהב"]} ("זהובה" is feminine for "זהב"/gold — COLOR, not type)
 
 CRITICAL VALIDATION:
 - For category: Only extract if there's a solid, unambiguous match in the list
@@ -3428,7 +3438,8 @@ Return the extracted filters in JSON format. Only extract values that exist in t
         valueArr = [values];
       }
 
-      const allValues = valueArr.map(v => String(v).trim());
+      // Clean trailing/leading punctuation from LLM-extracted values (e.g., "כסף 925," → "כסף 925")
+      const allValues = valueArr.map(v => String(v).trim().replace(/^[,;.!?\s]+|[,;.!?\s]+$/g, '')).filter(v => v.length > 0);
       let validValues = allValues.filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
 
       // For softCategory and color: try fuzzy matching for values that didn't match exactly
@@ -3672,8 +3683,10 @@ CRITICAL RULES:
 7. COLOR — EXTRACT AGGRESSIVELY, MAP SHADES TO CLOSEST AVAILABLE COLOR:
    - "בצבע X" (in color X) → X is ALWAYS a color, extract it
    - Map shades/synonyms to closest available color: חמרה/maroon/בורדו/burgundy → "אדום"/"red", תכלת/sky blue → "כחול"/"blue", שמנת/cream → "לבן"/"white", זית/olive → "ירוק"/"green"
-   - Hebrew adjective forms: "אדומה"→"אדום", "לבנה"→"לבן", "כחולה"→"כחול", "שחורים"→"שחור"
+   - METALLIC COLORS: כסף/כסופה/כסוף/silver → "כסף"/"silver", זהב/זהובה/זהוב/gold → "זהב"/"gold". These are COLORS, NEVER types.
+   - Hebrew adjective forms: "אדומה"→"אדום", "לבנה"→"לבן", "כחולה"→"כחול", "שחורים"→"שחור", "כסופה"→"כסף", "זהובה"→"זהב"
    - Even if exact shade not in list, ALWAYS extract the parent/base color that IS in the list
+8. NEVER add trailing commas, periods, or punctuation to extracted values. Return clean values only.
 
 EXAMPLES:
 Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
@@ -3685,7 +3698,9 @@ Query: "כורסאת בד אדומה" -> {"category": "כורסא", "softCategor
 Query: "כורסת בד בצבע חמרה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} ("בצבע חמרה" = maroon color → map to "אדום". "בד" = material → softCategory)
 Query: "ספה לבנה מעור" -> {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material=softCategory, color=color)
 Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]}
-Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} (בורדו is a shade of red → map to "אדום")`;
+Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} (בורדו is a shade of red → map to "אדום")
+Query: "טבעת כסופה חלקה" -> {"category": "טבעת", "color": ["כסף"]} ("כסופה" = silver → COLOR not type)
+Query: "שרשרת זהובה" -> {"category": "שרשרת", "color": ["זהב"]} ("זהובה" = gold → COLOR not type)`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-2.5-flash",
@@ -3752,8 +3767,11 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
           vals = [val];
         }
 
-        const valid = vals.map(v => {
-          const vLower = String(v).toLowerCase().trim();
+        // Clean trailing/leading punctuation from LLM-extracted values
+        const cleanedVals = vals.map(v => String(v).trim().replace(/^[,;.!?\s]+|[,;.!?\s]+$/g, '')).filter(v => v.length > 0);
+
+        const valid = cleanedVals.map(v => {
+          const vLower = v.toLowerCase().trim();
 
           // 1. Exact match
           let match = list.find(l => l.toLowerCase().trim() === vLower);
@@ -4540,7 +4558,7 @@ ${productData.map((p, i) => `${i}. ${p.name} (${p.category})`).join('\n')}
 Are these results GOOD ENOUGH to return, or should we run a complex semantic search?`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite",
+        model: "gemini-2.5-flash",
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
@@ -4681,7 +4699,7 @@ ${productData.map((p, i) => `${i}. ${p.name} (${p.category || 'no category'})`).
 Which products (if any) are semantically valid matches for this query?`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite", // Fast model for quick validation
+        model: "gemini-2.5-flash", // Fast model for quick validation
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
@@ -4821,7 +4839,7 @@ ${productData.map((p, i) => `${i}. ${p.name} - ${p.price} (${p.category || 'no c
 Select the ${maxResults} most relevant products for this query.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite", // Fast model for quick selection
+        model: "gemini-2.5-flash", // Fast model for quick selection
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
@@ -4916,8 +4934,8 @@ async function reorderResultsWithGPT(
     
   return withCache(cacheKey, async () => {
     try {
-      // 🎯 FORCE FAST MODEL: gemini-2.5-flash-lite is optimized for low-latency JSON tasks
-      const modelName = "gemini-2.5-flash-lite";
+      // 🎯 FORCE FAST MODEL: gemini-2.5-flash is optimized for low-latency JSON tasks
+      const modelName = "gemini-2.5-flash";
       
 
       console.log(`[RERANK] 🚀 Using ${modelName} to rerank ${limitedResults.length} products`);
@@ -5066,7 +5084,7 @@ ${JSON.stringify(productData, null, 2)}`;
         };
 
     // Use fast model if requested (for /fast-search)
-    // 🎯 We already declared modelName above to be gemini-2.5-flash-lite for speed
+    // 🎯 We already declared modelName above to be gemini-2.5-flash for speed
 
     const response = await genAI.models.generateContent({
       model: modelName,
@@ -5372,7 +5390,7 @@ PRIORITIZE query-matching products STRONGLY.`;
            };
 
       // Use fast model if requested (for /fast-search)
-      const modelName = "gemini-2.5-flash-lite";
+      const modelName = "gemini-2.5-flash";
 
        const response = await genAI.models.generateContent({
         model: modelName,
@@ -8158,7 +8176,7 @@ BROAD_CATEGORY queries are:
 Return your classification. For specific_product, also estimate how many exact matches likely exist (usually 1-5).`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite", // Use fast model for quick classification
+        model: "gemini-2.5-flash", // Use fast model for quick classification
         contents: [{ text: query }],
         config: {
           systemInstruction,
