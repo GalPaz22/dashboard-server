@@ -4542,7 +4542,7 @@ ${productData.map((p, i) => `${i}. ${p.name} (${p.category})`).join('\n')}
 Are these results GOOD ENOUGH to return, or should we run a complex semantic search?`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite",
+        model: "gemini-2.5-flash",
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
@@ -4683,7 +4683,7 @@ ${productData.map((p, i) => `${i}. ${p.name} (${p.category || 'no category'})`).
 Which products (if any) are semantically valid matches for this query?`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite", // Fast model for quick validation
+        model: "gemini-2.5-flash", // Fast model for quick validation
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
@@ -4823,7 +4823,7 @@ ${productData.map((p, i) => `${i}. ${p.name} - ${p.price} (${p.category || 'no c
 Select the ${maxResults} most relevant products for this query.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite", // Fast model for quick selection
+        model: "gemini-2.5-flash", // Fast model for quick selection
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
@@ -4919,7 +4919,7 @@ async function reorderResultsWithGPT(
   return withCache(cacheKey, async () => {
     try {
       // 🎯 FORCE FAST MODEL: gemini-2.5-flash-lite is optimized for low-latency JSON tasks
-      const modelName = "gemini-2.5-flash-lite";
+      const modelName = "gemini-2.5-flash";
       
 
       console.log(`[RERANK] 🚀 Using ${modelName} to rerank ${limitedResults.length} products`);
@@ -5374,7 +5374,7 @@ PRIORITIZE query-matching products STRONGLY.`;
            };
 
       // Use fast model if requested (for /fast-search)
-      const modelName = "gemini-2.5-flash-lite";
+      const modelName = "gemini-2.5-flash";
 
        const response = await genAI.models.generateContent({
         model: modelName,
@@ -8160,7 +8160,7 @@ BROAD_CATEGORY queries are:
 Return your classification. For specific_product, also estimate how many exact matches likely exist (usually 1-5).`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash-lite", // Use fast model for quick classification
+        model: "gemini-2.5-flash", // Use fast model for quick classification
         contents: [{ text: query }],
         config: {
           systemInstruction,
