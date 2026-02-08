@@ -740,8 +740,10 @@ function extractHardCodedCategories(query, categories = '') {
 
     // Create pattern with word boundaries
     // Replace spaces with \s+ to match any whitespace
+    // Use (^|\s)...(\\s|$) instead of \b because \b only works with ASCII
+    // word characters and fails silently with Hebrew/Unicode text
     const patternString = escapedCategory.replace(/\s+/g, '\\s+');
-    const pattern = new RegExp(`\\b${patternString}\\b`, 'i');
+    const pattern = new RegExp(`(?:^|\\s)${patternString}(?:\\s|$)`, 'i');
 
     categoryPatterns.push({
       pattern,
