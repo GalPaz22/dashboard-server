@@ -3428,7 +3428,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
         valueArr = [values];
       }
 
-      const allValues = valueArr.map(v => String(v).trim());
+      const allValues = valueArr.map(v => String(v).trim().replace(/^,+|,+$/g, '').trim());
       let validValues = allValues.filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
 
       // For softCategory and color: try fuzzy matching for values that didn't match exactly
@@ -3753,7 +3753,7 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
         }
 
         const valid = vals.map(v => {
-          const vLower = String(v).toLowerCase().trim();
+          const vLower = String(v).trim().replace(/^,+|,+$/g, '').trim().toLowerCase();
 
           // 1. Exact match
           let match = list.find(l => l.toLowerCase().trim() === vLower);
