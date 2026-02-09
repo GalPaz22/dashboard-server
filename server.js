@@ -8419,12 +8419,17 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
 async function findAiRecommendations(collection, matchedProducts, limit = 5) {
   if (!matchedProducts || matchedProducts.length === 0) return [];
 
-  // Extract hard categories from matched products
+  // Extract hard categories from matched products (handle both string and array)
   const hardCats = new Set();
   matchedProducts.forEach(p => {
     if (p.category) {
-      const cat = typeof p.category === 'string' ? p.category.trim() : '';
-      if (cat) hardCats.add(cat);
+      if (Array.isArray(p.category)) {
+        p.category.forEach(cat => {
+          if (cat && cat.trim()) hardCats.add(cat.trim());
+        });
+      } else if (typeof p.category === 'string' && p.category.trim()) {
+        hardCats.add(p.category.trim());
+      }
     }
   });
 
@@ -8437,6 +8442,13 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
       softCats.add(p.softCategory);
     }
   });
+
+  console.log(`[AI RECOMMEND] Extracted from ${matchedProducts.length} matched product(s): ${hardCats.size} hard categories, ${softCats.size} soft categories`);
+  if (hardCats.size > 0) {
+    console.log(`[AI RECOMMEND] Hard categories: ${[...hardCats].join(', ')}`);
+  } else {
+    console.warn(`[AI RECOMMEND] ⚠️ WARNING: No hard categories extracted! Matched products:`, matchedProducts.map(p => ({ name: p.name, category: p.category })));
+  }
 
   // Calculate price range from matched products (±40%)
   const prices = matchedProducts.map(p => parseFloat(p.price)).filter(p => p > 0);
@@ -8460,7 +8472,8 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
   // Filter by hard category - keep recommendations in the same category (exact match)
   if (hardCats.size > 0) {
     query.category = { $in: [...hardCats] };
-    console.log(`[AI RECOMMEND] Filtering by hard category: ${[...hardCats].join(', ')}`);
+  } else {
+    console.warn(`[AI RECOMMEND] ⚠️ No hard category filter - recommendations will be unfiltered by category!`);
   }
 
   // Add price range filter if we have a valid price
