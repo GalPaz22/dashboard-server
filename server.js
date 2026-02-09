@@ -4901,10 +4901,10 @@ async function reorderResultsWithGPT(
   translatedQuery,
   query,
   alreadyDelivered = [],
-  explain = true,
+  explain = false, // ⚡ OPTIMIZATION: Disabled by default for faster reranking
   context,
   softFilters = null,
-  maxResults = 25, // 🎯 Send 25 products to LLM for better ranking coverage
+  maxResults = 15, // ⚡ OPTIMIZATION: Reduced from 25 to 15 for ~40% speed improvement
   useFastLLM = true, // 🎯 DEFAULT TO TRUE: Always use the fast model for reranking
   userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
   isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
@@ -8268,6 +8268,58 @@ function classifySpecificityFallback(query) {
 }
 
 /**
+ * Calculate relevance confidence score to determine if LLM validation can be skipped
+ * @param {Array} products - Search results to score
+ * @param {string} query - Original search query
+ * @param {Object} filterCheck - Filter detection results
+ * @returns {{ isHighConfidence: boolean, score: number, topProducts: Array, reason: string }}
+ */
+function calculateRelevanceScore(products, query, filterCheck) {
+  if (!products || products.length === 0) {
+    return { isHighConfidence: false, score: 0, topProducts: [], reason: 'No results' };
+  }
+
+  // Score each product based on exact match bonus
+  const scoredProducts = products.map(product => {
+    const exactMatchBonus = getExactMatchBonus(product.name, query, query);
+    return { product, exactMatchBonus };
+  });
+
+  // Sort by exact match bonus (highest first)
+  scoredProducts.sort((a, b) => b.exactMatchBonus - a.exactMatchBonus);
+
+  // HIGH CONFIDENCE CRITERIA:
+  // 1. At least one product with exactMatchBonus >= 60000 (strong exact match)
+  // 2. Top 3 products all have exactMatchBonus >= 50000 (multiple good matches)
+  // 3. At least 5 products found with decent scores (>= 40000)
+
+  const topScore = scoredProducts[0]?.exactMatchBonus || 0;
+  const hasStrongMatch = topScore >= 60000;
+
+  const top3Scores = scoredProducts.slice(0, 3).map(sp => sp.exactMatchBonus);
+  const allTop3Good = top3Scores.length >= 3 && top3Scores.every(s => s >= 50000);
+
+  const decentMatches = scoredProducts.filter(sp => sp.exactMatchBonus >= 40000).length;
+  const hasMultipleGoodMatches = decentMatches >= 5;
+
+  // Calculate aggregate confidence score (0-100)
+  const score = (hasStrongMatch ? 40 : 0) +
+                (allTop3Good ? 30 : 0) +
+                (hasMultipleGoodMatches ? 30 : 0);
+
+  const isHighConfidence = score >= 60; // Require 60/100 for high confidence
+
+  return {
+    isHighConfidence,
+    score,
+    topProducts: scoredProducts.map(sp => sp.product),
+    reason: hasStrongMatch ? 'Strong exact match' :
+            allTop3Good ? 'Multiple good matches' :
+            'Ambiguous results'
+  };
+}
+
+/**
  * 🎯 CORE SIMPLE SEARCH LOGIC
  * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
  */
@@ -8591,11 +8643,13 @@ app.post("/fast-search", async (req, res) => {
     }
 
     // ============================================================
-    // STEP 3: If no textual filters → try LLM filter extraction
+    // STEP 3: LLM Category Extraction (when textual extraction fails)
     // ============================================================
     let llmExtractedFilters = null;
-    if (!hasTextualFilters && !isPerfectFilterMatch) {
-      console.log(`[${requestId}] 🤖 No textual filters found → trying LLM filter extraction...`);
+    let llmExtractedCategories = [];
+
+    if (!hasTextualFilters && !isPerfectFilterMatch && simpleResults.length > 0) {
+      console.log(`[${requestId}] 🤖 No textual filters found → trying LLM category extraction...`);
 
       try {
         const extractionStart = Date.now();
@@ -8609,19 +8663,38 @@ app.post("/fast-search", async (req, res) => {
         );
         const extractionTime = Date.now() - extractionStart;
 
-        const hasLLMFilters = llmExtractedFilters && (
-          llmExtractedFilters.category ||
-          (llmExtractedFilters.softCategory && llmExtractedFilters.softCategory.length > 0) ||
-          (llmExtractedFilters.color && llmExtractedFilters.color.length > 0)
-        );
+        // Check if LLM found any useful categories
+        if (llmExtractedFilters && llmExtractedFilters.category) {
+          const categories = Array.isArray(llmExtractedFilters.category)
+            ? llmExtractedFilters.category
+            : [llmExtractedFilters.category];
+          llmExtractedCategories = categories.filter(Boolean);
 
-        if (hasLLMFilters) {
-          console.log(`[${requestId}] ✅ LLM extracted filters (${extractionTime}ms):`, JSON.stringify(llmExtractedFilters));
+          if (llmExtractedCategories.length > 0) {
+            console.log(`[${requestId}] ✅ LLM extracted categories (${extractionTime}ms): ${llmExtractedCategories.join(', ')}`);
+
+            // Filter simple results by LLM-extracted categories
+            const categoryFilteredResults = simpleResults.filter(product => {
+              const productCategory = product.category ? product.category.toLowerCase() : '';
+              return llmExtractedCategories.some(cat =>
+                productCategory.includes(cat.toLowerCase()) || cat.toLowerCase().includes(productCategory)
+              );
+            });
+
+            if (categoryFilteredResults.length > 0) {
+              console.log(`[${requestId}] 🎯 LLM category filter: ${simpleResults.length} → ${categoryFilteredResults.length} products`);
+              simpleResults = categoryFilteredResults; // Use filtered results
+            } else {
+              console.log(`[${requestId}] ⚠️ LLM categories filtered out all results - keeping original results`);
+            }
+          } else {
+            console.log(`[${requestId}] ℹ️ LLM found no categories (${extractionTime}ms)`);
+          }
         } else {
-          console.log(`[${requestId}] ℹ️ LLM found no filters (${extractionTime}ms) - will use LLM reranking`);
+          console.log(`[${requestId}] ℹ️ LLM extraction returned no filters (${extractionTime}ms)`);
         }
       } catch (err) {
-        console.error(`[${requestId}] ❌ LLM filter extraction failed:`, err.message);
+        console.error(`[${requestId}] ❌ LLM category extraction failed:`, err.message);
       }
     }
 
@@ -8630,6 +8703,7 @@ app.post("/fast-search", async (req, res) => {
     // ============================================================
     let shouldUseSimpleResults = false;
     let validatedProducts = [];
+    let relevanceScore = null; // For optimization metrics
 
     if (simpleResults.length > 0) {
       if (isPerfectFilterMatch) {
@@ -8638,19 +8712,31 @@ app.post("/fast-search", async (req, res) => {
         validatedProducts = simpleResults; // No slicing!
         console.log(`[${requestId}] 🎯 PERFECT FILTER MATCH (BROAD): All words match categories → returning ALL ${validatedProducts.length} products`);
       } else {
-        // 🎯 NOT PERFECT → LLM validates (SPECIFIC search)
-        console.log(`[${requestId}] 🔍 NOT perfect filter match (${filterCheck.unmatchedWords.length} unmatched: ${filterCheck.unmatchedWords.join(', ')}) → LLM validation`);
-        
-        const validationStart = Date.now();
-        const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
-        const validationTime = Date.now() - validationStart;
+        // 🎯 NOT PERFECT → Check confidence score first
+        console.log(`[${requestId}] 🔍 NOT perfect filter match (${filterCheck.unmatchedWords.length} unmatched: ${filterCheck.unmatchedWords.join(', ')})`);
 
-        if (validation.isGoodMatch && validation.validProducts.length > 0) {
+        // NEW: Calculate relevance confidence score
+        relevanceScore = calculateRelevanceScore(simpleResults, query, filterCheck);
+
+        if (relevanceScore.isHighConfidence) {
+          // NEW: Skip LLM validation for high-confidence results
           shouldUseSimpleResults = true;
-          validatedProducts = validation.validProducts.slice(0, FAST_LIMIT);
-          console.log(`[${requestId}] ✅ LLM APPROVED simple results (${validationTime}ms): ${validation.validProducts.length} products - ${validation.reason}`);
+          validatedProducts = relevanceScore.topProducts.slice(0, FAST_LIMIT);
+          console.log(`[${requestId}] ⚡ HIGH CONFIDENCE (score: ${relevanceScore.score}) - skipping LLM validation - ${relevanceScore.reason}`);
         } else {
-          console.log(`[${requestId}] ❌ LLM REJECTED simple results (${validationTime}ms): ${validation.reason} - falling back to full search`);
+          // Run LLM validation only for ambiguous cases
+          console.log(`[${requestId}] 🤔 LOW CONFIDENCE (score: ${relevanceScore.score}) - running LLM validation...`);
+          const validationStart = Date.now();
+          const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
+          const validationTime = Date.now() - validationStart;
+
+          if (validation.isGoodMatch && validation.validProducts.length > 0) {
+            shouldUseSimpleResults = true;
+            validatedProducts = validation.validProducts.slice(0, FAST_LIMIT);
+            console.log(`[${requestId}] ✅ LLM APPROVED simple results (${validationTime}ms): ${validation.validProducts.length} products - ${validation.reason}`);
+          } else {
+            console.log(`[${requestId}] ❌ LLM REJECTED simple results (${validationTime}ms): ${validation.reason} - falling back to full search`);
+          }
         }
       }
     } else {
@@ -8741,6 +8827,17 @@ app.post("/fast-search", async (req, res) => {
 
       const searchMode = isPerfectFilterMatch ? 'perfect-filter-match' : 'simple-validated';
       console.log(`[${requestId}] ⚡ FAST SEARCH (${searchMode}) completed in ${executionTime}ms - returning ${allProducts.length} products (${aiRecommendations.length} AI recommendations)`);
+
+      // ⚡ OPTIMIZATION METRICS
+      const validationSkipped = relevanceScore?.isHighConfidence || false;
+      console.log(`[${requestId}] ⚡ OPTIMIZATION METRICS:`, {
+        llmCategoryExtraction: llmExtractedCategories.length > 0,
+        llmExtractedCategories: llmExtractedCategories,
+        tier2_relevanceScore: relevanceScore?.score || null,
+        tier2_validationSkipped: validationSkipped,
+        tier2_validationReason: relevanceScore?.reason || 'perfect match',
+        executionTime: executionTime
+      });
 
       // 🧠 SMART CATEGORY LEARNING: Learn from unmatched words in fast-search
       if (filterCheck?.unmatchedWords?.length > 0) {
