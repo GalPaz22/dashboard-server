@@ -5792,9 +5792,14 @@ async function executeExplicitSoftCategorySearch(
     ...softCategoryResults,
     ...nonSoftCategoryResults
   ];
-  
-  // Sort by RRF score to ensure high text matches bubble up across both lists
-  combinedResults.sort((a, b) => b.rrf_score - a.rrf_score);
+
+  // Sort: PRIMARY by exact match bonus (text quality), SECONDARY by RRF score (soft category boosts)
+  // This ensures text matches ALWAYS rank above soft-category-only matches
+  combinedResults.sort((a, b) => {
+    const exactDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+    if (exactDiff !== 0) return exactDiff;
+    return b.rrf_score - a.rrf_score;
+  });
   
   console.log(`Soft category matches: ${softCategoryResults.length} (boosted +10000 + multi-category), Non-soft category matches: ${nonSoftCategoryResults.length}`);
   
@@ -6163,16 +6168,17 @@ app.get("/search/auto-load-more", async (req, res) => {
         req.store.softCategoriesBoost
       );
       } else {
-        console.log(`[${requestId}] Using standard search`);
-        
+        console.log(`[${requestId}] Using standard search${isFastSearchMode ? ' (FAST MODE - text only)' : ''}`);
+
         // Using user-specified or default limits (defined at the top of the endpoint)
         // searchLimit and vectorLimit are already defined above
-      
+
       const searchPromises = [
         collection.aggregate(buildStandardSearchPipeline(
           cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray(),
-        queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
+        // Skip vector search in fast mode - only use text matches for LLM
+        (queryEmbedding && !isFastSearchMode) ? collection.aggregate(buildStandardVectorSearchPipeline(
           queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
         )).toArray() : Promise.resolve([]),
         // Also search with Hebrew translation if available (for English brand names like "balvini")
@@ -6306,7 +6312,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         collection.aggregate(buildStandardSearchPipeline(
           cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, isImageModeWithSoftCategories, deliveredIds
         )).toArray(),
-        queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
+        // Skip vector search in fast mode - only use text matches for LLM
+        (queryEmbedding && !isFastSearchMode) ? collection.aggregate(buildStandardVectorSearchPipeline(
           queryEmbedding, hardFilters, vectorLimit, useOrLogic, deliveredIds
         )).toArray() : Promise.resolve([])
       ];
@@ -9315,10 +9322,11 @@ app.post("/search", async (req, res) => {
       }
 
       // 🎯 EMERGENCY FALLBACK: If results < 5 and a hard category was extracted,
-      // trigger a lightning-fast semantic expansion
-      const shouldTriggerEmergencyExpansion = (approvedProducts.length < 5 || simpleResults.length < 5) && 
-                                              filterCheck.matchedHardCategories && 
-                                              filterCheck.matchedHardCategories.length > 0;
+      // trigger a lightning-fast semantic expansion (skip in fast mode - text only)
+      const shouldTriggerEmergencyExpansion = (approvedProducts.length < 5 || simpleResults.length < 5) &&
+                                              filterCheck.matchedHardCategories &&
+                                              filterCheck.matchedHardCategories.length > 0 &&
+                                              !isFastSearchMode;
 
       if (shouldTriggerEmergencyExpansion) {
         console.log(`[${requestId}] ⚠️ EMERGENCY EXPANSION: Low results (${approvedProducts.length}) for hard category search "${query}". Running ultra-fast semantic fallback.`);
@@ -9398,6 +9406,8 @@ app.post("/search", async (req, res) => {
         } catch (emergencyErr) {
           console.warn(`[${requestId}] ⚠️ Emergency expansion failed, returning original small result set:`, emergencyErr.message);
         }
+      } else if (isFastSearchMode && (approvedProducts.length < 5 || simpleResults.length < 5)) {
+        console.log(`[${requestId}] ⚡ FAST MODE: Skipping emergency vector expansion (${approvedProducts.length} results)`);
       }
 
       // 🛡️ HARD CATEGORY DEAL BREAKER: If we extracted hard categories, filter out any products
@@ -10789,9 +10799,14 @@ app.post("/search", async (req, res) => {
               };
             });
             
-            // Re-sort by boosted score - LLM will now receive the BEST personalized products first
+            // Re-sort: PRIMARY by exact match (text quality), SECONDARY by personalization+RRF
+            // This ensures text matches ALWAYS rank first, then personalized, then soft category
             if (combinedResults.some(p => (p.profileBoost || 0) > 0)) {
-              combinedResults.sort((a, b) => (b.boostedScore || b.rrf_score || 0) - (a.boostedScore || a.rrf_score || 0));
+              combinedResults.sort((a, b) => {
+                const exactDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
+                if (exactDiff !== 0) return exactDiff;
+                return (b.boostedScore || b.rrf_score || 0) - (a.boostedScore || a.rrf_score || 0);
+              });
               // personalization applied
               console.log(`[${requestId}] 👤 Top 3 personalized products:`, combinedResults.slice(0, 3).map(p => ({
                 name: p.name,
