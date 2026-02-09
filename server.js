@@ -8457,9 +8457,10 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
     ]
   };
 
-  // Filter by hard category - keep recommendations in the same category
+  // Filter by hard category - keep recommendations in the same category (exact match)
   if (hardCats.size > 0) {
-    query.category = { $in: [...hardCats].map(c => new RegExp(c, 'i')) };
+    query.category = { $in: [...hardCats] };
+    console.log(`[AI RECOMMEND] Filtering by hard category: ${[...hardCats].join(', ')}`);
   }
 
   // Add price range filter if we have a valid price
@@ -8469,11 +8470,14 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
 
   // Fetch more candidates than needed so we can sort/prioritize
   const candidates = await collection.find(query).limit(limit * 4).toArray();
+  console.log(`[AI RECOMMEND] Found ${candidates.length} candidates (price: ${minPrice.toFixed(0)}-${maxPrice.toFixed(0)})`);
 
   if (candidates.length === 0 && hardCats.size > 0) {
     // Fallback: relax price constraint, keep hard category
+    console.log(`[AI RECOMMEND] No candidates with price filter - relaxing price constraint, keeping category: ${[...hardCats].join(', ')}`);
     delete query.price;
     const fallbackCandidates = await collection.find(query).limit(limit * 4).toArray();
+    console.log(`[AI RECOMMEND] Fallback found ${fallbackCandidates.length} candidates (any price)`);
     return scoreAndSliceRecommendations(fallbackCandidates, matchedProducts, hardCats, softCats, avgPrice, limit);
   }
 
@@ -8530,7 +8534,9 @@ function scoreAndSliceRecommendations(candidates, matchedProducts, hardCats, sof
   // Sort by score descending
   scored.sort((a, b) => b.score - a.score);
 
-  return scored.slice(0, limit).map(({ product }) => product);
+  const recommendations = scored.slice(0, limit).map(({ product }) => product);
+  console.log(`[AI RECOMMEND] Returning ${recommendations.length} recommendations (scored from ${candidates.length} candidates)`);
+  return recommendations;
 }
 
 app.post("/fast-search", async (req, res) => {
@@ -8686,7 +8692,7 @@ app.post("/fast-search", async (req, res) => {
         if (exactMatches.length > 0 && exactMatches.length <= 2) {
           console.log(`[${requestId}] 🤖 Found ${exactMatches.length} exact match(es) - fetching AI recommendations...`);
           const recStart = Date.now();
-          const rawRecommendations = await findAiRecommendations(collection, validatedProducts, 5);
+          const rawRecommendations = await findAiRecommendations(collection, exactMatches, 5);
           const recTime = Date.now() - recStart;
 
           aiRecommendations = rawRecommendations.map(product => {
