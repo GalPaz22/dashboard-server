@@ -781,14 +781,55 @@ function extractHardCodedCategories(query, categories = '') {
   return extractedCategories.length > 0 ? (extractedCategories.length === 1 ? extractedCategories[0] : extractedCategories) : null;
 }
 
-function extractFiltersFallback(query, categories = '', colors = '') {
+function extractFiltersFallback(query, categories = '', types = '', softCategories = '', colors = '') {
   const queryLower = query.toLowerCase().trim();
   const filters = {};
-  
-  // Extract categories dynamically based on user's category list
+
+  // ⚡ IMPROVED: Match each word individually AND full phrase against ALL fields
+  const queryWords = queryLower.split(/\s+/).filter(w => w.length >= 2);
+
+  // Helper: Check if a word/phrase matches any item in a list (case-insensitive, partial match)
+  const matchInList = (text, list) => {
+    if (!list) return null;
+    const items = typeof list === 'string' ? list.split(',').map(s => s.trim()) : list;
+
+    // Try exact match first
+    for (const item of items) {
+      const itemLower = item.toLowerCase();
+      if (text === itemLower || text.includes(itemLower) || itemLower.includes(text)) {
+        return item;
+      }
+    }
+    return null;
+  };
+
+  // Extract categories (check full query and each word)
   const dynamicCategory = extractHardCodedCategories(query, categories);
   if (dynamicCategory) {
     filters.category = dynamicCategory;
+  }
+
+  // Extract types (check each word - e.g., "כשר", "יבש", "מתוק")
+  if (!filters.type) {
+    for (const word of queryWords) {
+      const matchedType = matchInList(word, types);
+      if (matchedType) {
+        filters.type = matchedType;
+        break; // Take first match
+      }
+    }
+  }
+
+  // Extract soft categories (check each word - e.g., "ישראלי", "איטלקי", "פירותי")
+  const matchedSoftCategories = [];
+  for (const word of queryWords) {
+    const matched = matchInList(word, softCategories);
+    if (matched && !matchedSoftCategories.includes(matched)) {
+      matchedSoftCategories.push(matched);
+    }
+  }
+  if (matchedSoftCategories.length > 0) {
+    filters.softCategory = matchedSoftCategories;
   }
 
   // Extract colors dynamically based on user's color list (same logic as categories)
@@ -3219,7 +3260,7 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
     // Check circuit breaker - use fallback if AI is unavailable
     if (aiCircuitBreaker.shouldBypassAI()) {
       // ai bypass - fallback filter extraction
-      return extractFiltersFallback(query, categories, colors);
+      return extractFiltersFallback(query, categories, types, softCategories, colors);
     }
     
     // Use custom system instruction if provided, otherwise use default
@@ -3320,14 +3361,20 @@ Return the extracted filters in JSON format. Only extract values that exist in t
       // Using custom system instruction
     }
 
-    const response = await genAI.models.generateContent({
+    // ⚡ TIMEOUT WRAPPER: Prevent hanging LLM calls
+    const timeoutMs = 10000; // 10 seconds max
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => reject(new Error('LLM filter extraction timeout')), timeoutMs);
+    });
+
+    const llmPromise = genAI.models.generateContent({
       model: "gemini-2.5-flash",
       contents: [{ text: query }],
       config: {
         systemInstruction,
         temperature: 0.1,
         thinkingConfig: {
-          thinkingBudget: 1024, // Allow reasoning for complex multi-filter queries
+          thinkingBudget: 256, // ⚡ REDUCED: From 1024 to 256 for faster responses
         },
         responseMimeType: "application/json",
         responseSchema: {
@@ -3390,6 +3437,9 @@ Return the extracted filters in JSON format. Only extract values that exist in t
       }
     });
 
+    // Race between LLM call and timeout
+    const response = await Promise.race([llmPromise, timeoutPromise]);
+
     let content = response.text ? response.text.trim() : null;
     
     // If response.text is not available, try to extract from response structure
@@ -3406,8 +3456,40 @@ Return the extracted filters in JSON format. Only extract values that exist in t
     
     // Clean up the content - remove any leading/trailing characters that aren't part of JSON
     content = content.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
-    
-    const filters = JSON.parse(content);
+
+    // ⚡ ROBUST JSON PARSING: Try to fix incomplete JSON
+    let filters;
+    try {
+      filters = JSON.parse(content);
+    } catch (parseError) {
+      console.error("Failed to parse LLM response, attempting to fix:", parseError.message);
+      console.error("Content:", content.substring(0, 200));
+
+      // Try to fix common issues: missing closing braces/brackets
+      let fixedContent = content;
+
+      // Count opening and closing braces
+      const openBraces = (content.match(/{/g) || []).length;
+      const closeBraces = (content.match(/}/g) || []).length;
+      const openBrackets = (content.match(/\[/g) || []).length;
+      const closeBrackets = (content.match(/]/g) || []).length;
+
+      // Add missing closing characters
+      if (openBraces > closeBraces) {
+        fixedContent += '}'.repeat(openBraces - closeBraces);
+      }
+      if (openBrackets > closeBrackets) {
+        fixedContent += ']'.repeat(openBrackets - closeBrackets);
+      }
+
+      try {
+        filters = JSON.parse(fixedContent);
+        console.log("✅ Successfully fixed and parsed JSON");
+      } catch (fixError) {
+        console.error("❌ Could not fix JSON, using fallback");
+        throw parseError; // Re-throw original error to trigger fallback
+      }
+    }
     
     // Helper to normalize string or array lists into a clean array
     const normalizeList = (list) => {
@@ -3638,7 +3720,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
     
     // Use fallback filter extraction
     console.log(`[FILTERS] Using fallback extraction for: "${query}"`);
-    return extractFiltersFallback(query, categories, colors);
+    return extractFiltersFallback(query, categories, types, softCategories, colors);
   }
   }, 604800);
 }
@@ -3653,7 +3735,7 @@ async function extractFiltersBrief(query, categories, types, softCategories, con
   return withCache(cacheKey, async () => {
     try {
       if (aiCircuitBreaker.shouldBypassAI()) {
-        return extractFiltersFallback(query, categories, colors);
+        return extractFiltersFallback(query, categories, types, softCategories, colors);
       }
       
       const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}.
@@ -9116,41 +9198,57 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   const normalizeQuotes = (str) => {
     return str.replace(/[׳']/g, ''); // Remove both geresh and apostrophe for fuzzy matching
   };
-  
+
+  // ⚡ CRITICAL: Normalize Hebrew final letters for proper matching
+  // יפן (nun-sofit) should match יפני (nun-regular + yod)
+  const normalizeFinalLetters = (str) => {
+    return str
+      .replace(/ך/g, 'כ')  // kaf-sofit → kaf
+      .replace(/ם/g, 'מ')  // mem-sofit → mem
+      .replace(/ן/g, 'נ')  // nun-sofit → nun
+      .replace(/ף/g, 'פ')  // peh-sofit → peh
+      .replace(/ץ/g, 'צ'); // tzadi-sofit → tzadi
+  };
+
   // Hebrew Variations Map (Common roots and their variations)
   const isVariationMatch = (word, cat) => {
-    // Try exact match first
-    if (word === cat) return true;
+    // Normalize final letters for both word and category
+    const wordNorm = normalizeFinalLetters(word);
+    const catNorm = normalizeFinalLetters(cat);
+
+    // Try exact match first (after normalization)
+    if (wordNorm === catNorm) return true;
     
     // 🎯 FIX 2: Handle geresh/apostrophe variations (ג'ין vs גין)
-    // Try matching with normalized quotes removed
-    const wordNormalized = normalizeQuotes(word);
-    const catNormalized = normalizeQuotes(cat);
-    if (wordNormalized === catNormalized) return true;
-    
+    // Try matching with normalized quotes removed (also normalize final letters)
+    const wordQuotesNorm = normalizeQuotes(wordNorm);
+    const catQuotesNorm = normalizeQuotes(catNorm);
+    if (wordQuotesNorm === catQuotesNorm) return true;
+
     // Check if word is category with common Hebrew suffixes (י, ית, ים, ות, ה)
-    if (word.startsWith(cat) && word.length <= cat.length + 2) return true;
-    if (wordNormalized.startsWith(catNormalized) && wordNormalized.length <= catNormalized.length + 2) return true;
-    
+    // CRITICAL: Use normalized versions for comparison (יפני vs יפן)
+    if (wordNorm.startsWith(catNorm) && wordNorm.length <= catNorm.length + 2) return true;
+    if (wordQuotesNorm.startsWith(catQuotesNorm) && wordQuotesNorm.length <= catQuotesNorm.length + 2) return true;
+
     // Check if category is word with suffix (e.g., cat="ספרד", word="ספרדי")
-    if (cat.startsWith(word) && cat.length <= word.length + 2) return true;
-    if (catNormalized.startsWith(wordNormalized) && catNormalized.length <= wordNormalized.length + 2) return true;
+    if (catNorm.startsWith(wordNorm) && catNorm.length <= wordNorm.length + 2) return true;
+    if (catQuotesNorm.startsWith(wordQuotesNorm) && catQuotesNorm.length <= wordQuotesNorm.length + 2) return true;
     
     // Check if word has common Hebrew prefixes (ה, ו, ב, ל)
     const prefixes = ['ה', 'ו', 'ב', 'ל'];
     for (const p of prefixes) {
-      if (word.startsWith(p) && word.substring(1) === cat) return true;
-      if (word.startsWith(p) && word.substring(1).startsWith(cat) && word.length <= cat.length + 3) return true;
-      if (wordNormalized.startsWith(p) && wordNormalized.substring(1) === catNormalized) return true;
-      if (wordNormalized.startsWith(p) && wordNormalized.substring(1).startsWith(catNormalized) && wordNormalized.length <= catNormalized.length + 3) return true;
+      if (wordNorm.startsWith(p) && wordNorm.substring(1) === catNorm) return true;
+      if (wordNorm.startsWith(p) && wordNorm.substring(1).startsWith(catNorm) && wordNorm.length <= catNorm.length + 3) return true;
+      if (wordQuotesNorm.startsWith(p) && wordQuotesNorm.substring(1) === catQuotesNorm) return true;
+      if (wordQuotesNorm.startsWith(p) && wordQuotesNorm.substring(1).startsWith(catQuotesNorm) && wordQuotesNorm.length <= catQuotesNorm.length + 3) return true;
     }
 
     // Support bidirectional "contains" for multi-word categories (whole-word match only)
-    if (word.length >= 3 && includesWholeWord(cat, word)) return true;
-    if (cat.length >= 3 && includesWholeWord(word, cat)) return true;
-    if (wordNormalized.length >= 3 && includesWholeWord(catNormalized, wordNormalized)) return true;
-    if (catNormalized.length >= 3 && includesWholeWord(wordNormalized, catNormalized)) return true;
-    
+    if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
+    if (catNorm.length >= 3 && includesWholeWord(wordNorm, catNorm)) return true;
+    if (wordQuotesNorm.length >= 3 && includesWholeWord(catQuotesNorm, wordQuotesNorm)) return true;
+    if (catQuotesNorm.length >= 3 && includesWholeWord(wordQuotesNorm, catQuotesNorm)) return true;
+
     return false;
   };
   
@@ -9314,16 +9412,21 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
 
   // Collect unmatched words
   const unmatchedWords = queryWords.filter((_, idx) => !matchedWordIndices.has(idx));
-  
+
   const isPerfectMatch = unmatchedWords.length === 0;
-  
-  return { 
-    isPerfectMatch, 
+
+  // 🔍 DEBUG: Log matching results
+  const result = {
+    isPerfectMatch,
     unmatchedWords,
     matchedHardCategories: [...new Set(matchedHardCategories)],
     matchedSoftCategories: [...new Set(matchedSoftCategories)],
     matchedColors: [...new Set(matchedColors)]
   };
+
+  console.log(`[FILTER MATCH] Query: "${query}" → isPerfect: ${isPerfectMatch}, unmatched: [${unmatchedWords.join(', ')}], hard: [${result.matchedHardCategories.join(', ')}], soft: [${result.matchedSoftCategories.join(', ')}]`);
+
+  return result;
 }
 
 app.post("/simple-search", async (req, res) => {
@@ -9495,9 +9598,20 @@ app.post("/search", async (req, res) => {
   const vectorLimit = searchLimit * 3; // INCREASED: 3x for stronger semantic search
   
   console.log(`[${requestId}] Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
-  
-  const defaultSoftCategories = "פסטה,לזניה,פיצה,בשר,עוף,דגים,מסיבה,ארוחת ערב,חג,גבינות,סלט,ספרדי,איטלקי,צרפתי,פורטוגלי,ארגנטיני,צ'ילה,דרום אפריקה,אוסטרליה";
-  const finalSoftCategories = softCategories || defaultSoftCategories;
+
+  // ⚡ USE ONLY API KEY CONFIG: No default fallback, only use what the store provides
+  const finalSoftCategories = softCategories || "";
+
+  // 🔍 DEBUG: Log soft categories to verify they're loaded
+  if (finalSoftCategories) {
+    const softCatList = typeof finalSoftCategories === 'string'
+      ? finalSoftCategories.split(',').map(s => s.trim())
+      : finalSoftCategories;
+    console.log(`[${requestId}] 🏷️ Soft categories loaded (${Array.isArray(softCatList) ? softCatList.length : 0}):`,
+      Array.isArray(softCatList) ? softCatList.slice(0, 10).join(', ') + (softCatList.length > 10 ? '...' : '') : softCatList);
+  } else {
+    console.log(`[${requestId}] ⚠️ No soft categories loaded from API key`);
+  }
   
   // ============================================================
   // 🚀 PHASE 0: FAST SIMPLE SEARCH (Regex/Perfect Match)
@@ -14184,6 +14298,157 @@ app.post("/active-users-search", async (req, res) => {
 });
 
 /**
+ * GET /soft-categories/pending
+ * Get pending soft categories that are ready for approval (count >= 10)
+ */
+app.get("/soft-categories/pending", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    if (!apiKey) {
+      return res.status(401).json({ error: "Missing API key" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const coreDb = client.db("users");
+
+    const user = await coreDb.collection("users").findOne(
+      { apiKey },
+      {
+        projection: {
+          'credentials.potentialSoftCategories': 1,
+          'credentials.newSoftCategories': 1,
+          'credentials.softCategories': 1
+        }
+      }
+    );
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const potentialCats = user.credentials?.potentialSoftCategories || {};
+    const newSoftCats = user.credentials?.newSoftCategories || [];
+    const activeSoftCats = user.credentials?.softCategories || "";
+
+    // Format pending categories with stats
+    const pending = newSoftCats.map(term => ({
+      term,
+      count: potentialCats[term]?.count || 0,
+      firstSeen: potentialCats[term]?.firstSeen,
+      lastSeen: potentialCats[term]?.lastSeen,
+      exampleQueries: potentialCats[term]?.exampleQueries || []
+    }));
+
+    // Also show high-count categories that haven't been promoted yet
+    const almostReady = Object.entries(potentialCats)
+      .filter(([term, data]) => data.count >= 5 && data.count < 10 && !newSoftCats.includes(term))
+      .map(([term, data]) => ({
+        term,
+        count: data.count,
+        firstSeen: data.firstSeen,
+        lastSeen: data.lastSeen,
+        exampleQueries: data.exampleQueries || []
+      }))
+      .sort((a, b) => b.count - a.count);
+
+    res.status(200).json({
+      success: true,
+      pendingCategories: pending.sort((a, b) => b.count - a.count),
+      almostReady: almostReady,
+      currentSoftCategories: activeSoftCats
+    });
+
+  } catch (error) {
+    console.error("[SOFT CATEGORIES] Error fetching pending categories:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
+ * POST /soft-categories/sync
+ * Sync selected newSoftCategories to active softCategories list
+ * Body: { categories: ["term1", "term2"], action: "approve" | "reject" }
+ */
+app.post("/soft-categories/sync", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    if (!apiKey) {
+      return res.status(401).json({ error: "Missing API key" });
+    }
+
+    const { categories, action } = req.body;
+    if (!categories || !Array.isArray(categories) || categories.length === 0) {
+      return res.status(400).json({ error: "Invalid categories array" });
+    }
+
+    if (!['approve', 'reject'].includes(action)) {
+      return res.status(400).json({ error: "Action must be 'approve' or 'reject'" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const coreDb = client.db("users");
+
+    if (action === 'approve') {
+      // Get current softCategories
+      const user = await coreDb.collection("users").findOne(
+        { apiKey },
+        { projection: { 'credentials.softCategories': 1 } }
+      );
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      const currentSoftCats = user.credentials?.softCategories || "";
+      const currentCatsArray = currentSoftCats.split(',').map(s => s.trim()).filter(Boolean);
+
+      // Add new categories (deduplicate)
+      const updatedCatsArray = [...new Set([...currentCatsArray, ...categories])];
+      const updatedSoftCats = updatedCatsArray.join(',');
+
+      // Update softCategories and remove from newSoftCategories
+      await coreDb.collection("users").updateOne(
+        { apiKey },
+        {
+          $set: { 'credentials.softCategories': updatedSoftCats },
+          $pull: { 'credentials.newSoftCategories': { $in: categories } }
+        }
+      );
+
+      console.log(`[SOFT CATEGORIES] ✅ Approved ${categories.length} categories: ${categories.join(', ')}`);
+
+      res.status(200).json({
+        success: true,
+        action: 'approved',
+        categories,
+        updatedSoftCategories: updatedSoftCats
+      });
+
+    } else if (action === 'reject') {
+      // Just remove from newSoftCategories (keep in potentialSoftCategories for history)
+      await coreDb.collection("users").updateOne(
+        { apiKey },
+        {
+          $pull: { 'credentials.newSoftCategories': { $in: categories } }
+        }
+      );
+
+      console.log(`[SOFT CATEGORIES] ❌ Rejected ${categories.length} categories: ${categories.join(', ')}`);
+
+      res.status(200).json({
+        success: true,
+        action: 'rejected',
+        categories
+      });
+    }
+
+  } catch (error) {
+    console.error("[SOFT CATEGORIES] Error syncing categories:", error);
+    res.status(500).json({ error: "Server error" });
+  }
+});
+
+/**
  * DELETE /active-users/:visitor_id
  * Delete a user profile (GDPR compliance)
  */
@@ -14582,6 +14847,42 @@ async function learnPotentialSoftCategories(apiKey, unmatchedTerms = [], rejecte
     }));
 
     await coreDb.collection("users").bulkWrite(trimOps);
+
+    // ⚡ AUTO-PROMOTION: Check for popular categories (count >= 10) and promote to newSoftCategories
+    const PROMOTION_THRESHOLD = 10;
+
+    // Fetch updated user document to check counts
+    const user = await coreDb.collection("users").findOne(
+      { apiKey },
+      { projection: { 'credentials.potentialSoftCategories': 1, 'credentials.newSoftCategories': 1 } }
+    );
+
+    if (user?.credentials?.potentialSoftCategories) {
+      const potentialCats = user.credentials.potentialSoftCategories;
+      const existingNewCats = new Set(user.credentials.newSoftCategories || []);
+      const categoriesToPromote = [];
+
+      // Check which terms crossed the threshold
+      for (const term of allTerms) {
+        const catData = potentialCats[term];
+        if (catData && catData.count >= PROMOTION_THRESHOLD && !existingNewCats.has(term)) {
+          categoriesToPromote.push(term);
+        }
+      }
+
+      // Promote popular categories to newSoftCategories array
+      if (categoriesToPromote.length > 0) {
+        await coreDb.collection("users").updateOne(
+          { apiKey },
+          {
+            $addToSet: {
+              'credentials.newSoftCategories': { $each: categoriesToPromote }
+            }
+          }
+        );
+        console.log(`[CATEGORY LEARNING] 🎯 PROMOTED ${categoriesToPromote.length} popular categories to newSoftCategories: ${categoriesToPromote.join(', ')}`);
+      }
+    }
 
     console.log(`[CATEGORY LEARNING] 🧠 Learned ${allTerms.length} potential soft categories: ${allTerms.join(', ')} (from query: "${query}")`);
   } catch (error) {
