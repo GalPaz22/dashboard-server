@@ -8779,10 +8779,85 @@ app.post("/fast-search", async (req, res) => {
       productsWithBoost.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
 
       // ============================================================
+      // 🎯 SOFT CATEGORY EXPANSION: When few results but soft categories found,
+      // search for more products matching those soft categories
+      // e.g., "שרשרת עם תליון לב" → found 1 exact match, but should also show
+      // all products with softCategory "שרשרת עם תליון" or "תליון לב"
+      // ============================================================
+      let softCategoryExpansion = [];
+      const hasSoftCategories = filterCheck?.matchedSoftCategories?.length > 0;
+      const needsExpansion = !isPerfectFilterMatch && hasSoftCategories && productsWithBoost.length < FAST_LIMIT;
+
+      if (needsExpansion) {
+        try {
+          const expansionStart = Date.now();
+          const existingIds = new Set(productsWithBoost.map(p => p._id.toString()));
+          const softCats = filterCheck.matchedSoftCategories.map(cat => cat.toLowerCase());
+          const slotsAvailable = FAST_LIMIT - productsWithBoost.length;
+
+          // Build query: products matching ANY of the soft categories (and optionally hard categories)
+          const expansionAndConditions = [
+            { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] },
+            { softCategory: { $in: softCats } }
+          ];
+
+          // If hard categories were also found, require them too for higher relevance
+          if (filterCheck.matchedHardCategories?.length > 0) {
+            const hardCatConditions = filterCheck.matchedHardCategories.map(cat => ({
+              $or: [
+                { category: cat.toLowerCase() },
+                { type: cat.toLowerCase() }
+              ]
+            }));
+            expansionAndConditions.push(...hardCatConditions);
+          }
+
+          const expansionQuery = { $and: expansionAndConditions };
+          const expansionResults = await collection.find(expansionQuery)
+            .limit(slotsAvailable + existingIds.size) // Fetch extra to account for deduplication
+            .maxTimeMS(3000)
+            .toArray();
+
+          // Deduplicate: exclude products already in results
+          const newProducts = expansionResults.filter(p => !existingIds.has(p._id.toString()));
+
+          softCategoryExpansion = newProducts.slice(0, slotsAvailable).map(product => {
+            const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+            return {
+              _id: product._id.toString(),
+              id: product.id,
+              name: product.name,
+              description: product.description,
+              price: product.price,
+              image: product.image,
+              url: product.url,
+              type: product.type,
+              category: product.category,
+              softCategory: product.softCategory,
+              specialSales: product.specialSales,
+              onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+              ItemID: product.ItemID,
+              profileBoost: profileBoost,
+              highlight: false,
+              softCategoryMatch: true,
+              fastSearchMode: 'simple-validated'
+            };
+          });
+
+          const expansionTime = Date.now() - expansionStart;
+          console.log(`[${requestId}] 🔗 SOFT CATEGORY EXPANSION: Found ${softCategoryExpansion.length} additional products matching soft categories [${softCats.join(', ')}] in ${expansionTime}ms`);
+        } catch (err) {
+          console.error(`[${requestId}] ❌ Soft category expansion failed:`, err.message);
+        }
+      }
+
+      // ============================================================
       // 🎯 AI RECOMMENDATIONS: When 1-2 exact matches found, add similar products
+      // (only if soft category expansion didn't already fill the slots)
       // ============================================================
       let aiRecommendations = [];
-      if (!isPerfectFilterMatch && productsWithBoost.length <= 2 && productsWithBoost.length > 0) {
+      const totalSoFar = productsWithBoost.length + softCategoryExpansion.length;
+      if (!isPerfectFilterMatch && totalSoFar <= 2 && productsWithBoost.length > 0) {
         const exactMatches = productsWithBoost.filter(p => {
           const bonus = getExactMatchBonus(p.name, query, query);
           return bonus >= 50000;
@@ -8791,10 +8866,13 @@ app.post("/fast-search", async (req, res) => {
         if (exactMatches.length > 0 && exactMatches.length <= 2) {
           console.log(`[${requestId}] 🤖 Found ${exactMatches.length} exact match(es) - fetching AI recommendations...`);
           const recStart = Date.now();
-          const rawRecommendations = await findAiRecommendations(collection, exactMatches, 5);
+          const existingIds = [...productsWithBoost, ...softCategoryExpansion].map(p => p._id.toString());
+          const rawRecommendations = await findAiRecommendations(collection, exactMatches, FAST_LIMIT - totalSoFar);
           const recTime = Date.now() - recStart;
 
-          aiRecommendations = rawRecommendations.map(product => {
+          aiRecommendations = rawRecommendations
+            .filter(p => !existingIds.includes(p._id.toString()))
+            .map(product => {
             const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
             return {
               _id: product._id.toString(),
@@ -8820,13 +8898,13 @@ app.post("/fast-search", async (req, res) => {
         }
       }
 
-      const allProducts = [...productsWithBoost, ...aiRecommendations];
+      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations];
 
       const executionTime = Date.now() - searchStartTime;
       const personalizedCount = allProducts.filter(p => (p.profileBoost || 0) > 0).length;
 
-      const searchMode = isPerfectFilterMatch ? 'perfect-filter-match' : 'simple-validated';
-      console.log(`[${requestId}] ⚡ FAST SEARCH (${searchMode}) completed in ${executionTime}ms - returning ${allProducts.length} products (${aiRecommendations.length} AI recommendations)`);
+      const searchMode = isPerfectFilterMatch ? 'perfect-filter-match' : (softCategoryExpansion.length > 0 ? 'soft-category-expanded' : 'simple-validated');
+      console.log(`[${requestId}] ⚡ FAST SEARCH (${searchMode}) completed in ${executionTime}ms - returning ${allProducts.length} products (${softCategoryExpansion.length} soft-cat expansion, ${aiRecommendations.length} AI recommendations)`);
 
       // ⚡ OPTIMIZATION METRICS
       const validationSkipped = relevanceScore?.isHighConfidence || false;
@@ -8860,6 +8938,7 @@ app.post("/fast-search", async (req, res) => {
           isPerfectFilterMatch: isPerfectFilterMatch,
           personalizedResults: personalizedCount > 0,
           personalizedCount: personalizedCount,
+          softCategoryExpansionCount: softCategoryExpansion.length,
           aiRecommendationsCount: aiRecommendations.length
         }
       });
@@ -9187,6 +9266,10 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
 
   // Try to match soft categories (multi-word first)
   // Runs AFTER colors so that color words (אדום, לבן, etc.) are already claimed
+  // 🎯 FIX: Allow overlapping soft category matches — a word can belong to multiple soft categories
+  // e.g., "שרשרת עם תליון לב" should match BOTH "שרשרת עם תליון" AND "תליון לב"
+  // We use a SEPARATE set for soft category word tracking to allow overlap with other soft categories
+  const softMatchedIndices = new Set();
   for (const cat of sortedSoftCategories) {
     const catWords = cat.split(/\s+/);
 
@@ -9199,11 +9282,15 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
 
       if (allMatch) {
         const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
-        const alreadyMatched = sliceIndices.some(idx => matchedWordIndices.has(idx));
+        // Only check if already matched by hard categories or colors — NOT by other soft categories
+        const alreadyMatchedByNonSoft = sliceIndices.some(idx => matchedWordIndices.has(idx) && !softMatchedIndices.has(idx));
 
-        if (!alreadyMatched) {
+        if (!alreadyMatchedByNonSoft) {
           matchedSoftCategories.push(cat);
-          sliceIndices.forEach(idx => matchedWordIndices.add(idx));
+          sliceIndices.forEach(idx => {
+            matchedWordIndices.add(idx);
+            softMatchedIndices.add(idx);
+          });
           break;
         }
       }
