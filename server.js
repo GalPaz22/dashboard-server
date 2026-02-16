@@ -1437,14 +1437,22 @@ function isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText) 
 
 // Enhanced filter-only detection for the main search endpoint
 function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewText, isComplexQuery) {
-  // IMPORTANT: Complex queries should NEVER use filter-only path
-  // They require LLM reordering to understand semantic intent
-  if (isComplexQuery) {
-    return false;
-  }
-
   const hasHardFilters = hardFilters && Object.keys(hardFilters).length > 0;
   const hasSoftFilters = softFilters && ((softFilters.softCategory && softFilters.softCategory.length > 0) || (softFilters.color && softFilters.color.length > 0));
+
+  // ⚡ NEW EXCEPTION: Complex queries with BOTH hard and soft filters extracted by LLM
+  // can skip reranking if they're essentially filter-based queries
+  // Example: "יין איטלקי" → category="יין" + softCategory="איטליה" → skip LLM reranking
+  if (isComplexQuery) {
+    // If LLM extracted BOTH hard AND soft filters, it's likely a filter-based query
+    // Allow it to use the fast filter-only path
+    if (hasHardFilters && hasSoftFilters) {
+      console.log(`[FILTER-ONLY] ⚡ Complex query with complete filter extraction → using filter-only path (no rerank)`);
+      return true;
+    }
+    // Otherwise, complex queries still need LLM reordering
+    return false;
+  }
   
   // Check if this is primarily a filter-based query (high filter coverage)
   const isPrimarilyFilterBased = isQueryJustFilters(query, hardFilters, softFilters, cleanedHebrewText);
@@ -1563,10 +1571,11 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   }
 
   // Add soft category filters as conditions for filter-only queries
-  // For filter-only paths (like "ריוחה"), the user explicitly wants products matching those soft categories
+  // ⚡ CHANGE: Use $all to require ALL soft categories (AND logic)
+  // Example: "יין שרדונה ישראלי" → only products with BOTH שרדונה AND ישראלי
   if (softFilters && softFilters.softCategory && Array.isArray(softFilters.softCategory) && softFilters.softCategory.length > 0) {
     matchConditions.push({
-      softCategory: { $in: softFilters.softCategory }
+      softCategory: { $all: softFilters.softCategory }
     });
   }
 
@@ -8377,9 +8386,10 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       
       // 🎯 Soft categories are OPTIONAL (only add if no hard categories, or as additional filter)
       if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
-        // 🎯 MEMORY OPTIMIZATION: Use $in operator instead of regex for memory efficiency
+        // ⚡ CHANGE: Use $all operator to require ALL soft categories (AND logic)
+        // Example: "שרדונה ישראלי" → only products with BOTH שרדונה AND ישראלי
         const lowerSoftCats = filterCheck.matchedSoftCategories.map(cat => cat.toLowerCase());
-        const softConditions = { softCategory: { $in: lowerSoftCats } };
+        const softConditions = { softCategory: { $all: lowerSoftCats } };
 
         // Add soft category filter (works with or without hard categories)
         andConditions.push(softConditions);
@@ -8711,6 +8721,11 @@ app.post("/fast-search", async (req, res) => {
         shouldUseSimpleResults = true;
         validatedProducts = simpleResults; // No slicing!
         console.log(`[${requestId}] 🎯 PERFECT FILTER MATCH (BROAD): All words match categories → returning ALL ${validatedProducts.length} products`);
+      } else if (llmExtractedCategories.length > 0 && llmExtractedFilters) {
+        // ⚡ NEW: LLM-EXTRACTED FILTER MATCH → Treat as perfect match and skip validation
+        shouldUseSimpleResults = true;
+        validatedProducts = simpleResults;
+        console.log(`[${requestId}] ⚡ LLM FILTER MATCH: LLM extracted filters successfully → treating as perfect match → returning ALL ${validatedProducts.length} products WITHOUT validation/reranking`);
       } else {
         // 🎯 NOT PERFECT → Check confidence score first
         console.log(`[${requestId}] 🔍 NOT perfect filter match (${filterCheck.unmatchedWords.length} unmatched: ${filterCheck.unmatchedWords.join(', ')})`);
