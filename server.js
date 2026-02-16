@@ -1634,12 +1634,14 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     }
   });
 
-  // Simple sort for consistent ordering - use indexed field for speed
-  pipeline.push({ 
-    $sort: { 
-      price: 1,
-      id: 1  // Secondary sort for consistent pagination
-    } 
+  // ⚡ BOOST-FIRST SORT: Boosted products (1-3) appear first
+  // Then sort by price and id for consistent ordering
+  pipeline.push({
+    $sort: {
+      boost: -1,  // Higher boost first (3 > 2 > 1 > null)
+      price: 1,   // Then by price (ascending)
+      id: 1       // Then by id for consistent pagination
+    }
   });
 
   // Limit results to reduce processing latency
@@ -1660,7 +1662,8 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
       category: 1,
       softCategory: 1,
       colors: 1,
-      stockStatus: 1
+      stockStatus: 1,
+      boost: 1  // Include boost field for application-level sorting
     }
   });
 
@@ -2155,7 +2158,17 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     };
     pipeline.push(searchStage);
 
-    // 🎯 MEMORY OPTIMIZATION: Add $limit immediately after $search
+    // ⚡ BOOST PRIORITY: Sort by boost field BEFORE limiting
+    // This ensures boosted products (1-3) appear first, regardless of search score
+    // Products without boost (null/0) will come after, sorted by search score
+    pipeline.push({
+      $sort: {
+        boost: -1,  // Higher boost first (3 > 2 > 1 > null)
+        score: { $meta: "searchScore" }  // Then by search relevance
+      }
+    });
+
+    // 🎯 MEMORY OPTIMIZATION: Add $limit immediately after $sort
     // This ensures MongoDB doesn't process more documents than needed
     pipeline.push({ $limit: Math.min(limit * 2, 100) });
   } else {
@@ -2337,6 +2350,15 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
       },
     },
   ];
+
+  // ⚡ BOOST PRIORITY: Sort by boost field BEFORE other operations
+  // This ensures boosted products (1-3) appear first in vector search results
+  pipeline.push({
+    $sort: {
+      boost: -1,  // Higher boost first (3 > 2 > 1 > null)
+      score: { $meta: "vectorSearchScore" }  // Then by vector similarity score
+    }
+  });
 
   // Exclude already delivered IDs - kept as $match since $nin on _id is more efficient here
   if (excludeIds && excludeIds.length > 0) {
@@ -4426,6 +4448,82 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
   return 0;
 }
 
+/**
+ * ⚡ PRODUCT BOOST COMPARATOR
+ * Products with boost field (1-3) should appear at the top
+ * Usage: products.sort((a, b) => compareWithBoost(a, b, fallbackComparator))
+ *
+ * @param {Object} a - First product
+ * @param {Object} b - Second product
+ * @param {Function} fallbackComparator - Function to use when boost is equal: (a, b) => number
+ * @returns {number} - Sort comparison result
+ */
+function compareWithBoost(a, b, fallbackComparator) {
+  const aBoost = a.boost || 0;
+  const bBoost = b.boost || 0;
+
+  // Primary sort: boost value (3 > 2 > 1 > 0)
+  if (aBoost !== bBoost) {
+    return bBoost - aBoost; // Higher boost first
+  }
+
+  // Secondary sort: use fallback comparator
+  return fallbackComparator(a, b);
+}
+
+/**
+ * 🎯 LOG BOOSTED PRODUCTS
+ * Analyzes and logs information about boosted products in search results
+ * @param {Array} products - Array of products to analyze
+ * @param {string} requestId - Request ID for logging
+ * @param {string} context - Context description (e.g., "FAST-SEARCH", "FULL-SEARCH")
+ */
+function logBoostedProducts(products, requestId, context = "SEARCH") {
+  if (!products || products.length === 0) {
+    return;
+  }
+
+  // Find all boosted products
+  const boostedProducts = products
+    .map((product, index) => ({
+      position: index + 1,
+      name: product.name || 'Unknown',
+      id: product.id || product._id,
+      boost: product.boost || 0
+    }))
+    .filter(p => p.boost > 0)
+    .sort((a, b) => b.boost - a.boost); // Sort by boost value descending
+
+  if (boostedProducts.length === 0) {
+    console.log(`[${requestId}] 📦 ${context}: No boosted products in results (${products.length} total products)`);
+    return;
+  }
+
+  // Group by boost value for summary
+  const boostGroups = {
+    3: boostedProducts.filter(p => p.boost === 3).length,
+    2: boostedProducts.filter(p => p.boost === 2).length,
+    1: boostedProducts.filter(p => p.boost === 1).length
+  };
+
+  const summary = Object.entries(boostGroups)
+    .filter(([_, count]) => count > 0)
+    .map(([boost, count]) => `${count}×boost-${boost}`)
+    .join(', ');
+
+  console.log(`[${requestId}] 🚀 ${context}: ${boostedProducts.length} boosted products found (${summary}) out of ${products.length} total`);
+
+  // Log first 5 boosted products with details
+  const topBoosted = boostedProducts.slice(0, 5);
+  topBoosted.forEach(p => {
+    console.log(`[${requestId}]    🎯 #${p.position} - "${p.name}" (boost: ${p.boost})`);
+  });
+
+  if (boostedProducts.length > 5) {
+    console.log(`[${requestId}]    ... and ${boostedProducts.length - 5} more boosted products`);
+  }
+}
+
 // Simple string similarity calculation
 function calculateStringSimilarity(str1, str2) {
   const longer = str1.length > str2.length ? str1 : str2;
@@ -5247,11 +5345,18 @@ async function reorderImagesWithGPT(
      : [];
 
    productsWithImages.sort((a, b) => {
+     // PRIORITY 0: Boost field (3 > 2 > 1 > 0) - ALWAYS comes first
+     const aBoost = a.boost || 0;
+     const bBoost = b.boost || 0;
+     if (aBoost !== bBoost) {
+       return bBoost - aBoost;
+     }
+
      // Calculate how many QUERY-EXTRACTED soft categories each product matches
-     const aQueryMatches = queryExtractedSoftCats.filter(cat => 
+     const aQueryMatches = queryExtractedSoftCats.filter(cat =>
        (a.softCategory || []).includes(cat)
      ).length;
-     const bQueryMatches = queryExtractedSoftCats.filter(cat => 
+     const bQueryMatches = queryExtractedSoftCats.filter(cat =>
        (b.softCategory || []).includes(cat)
      ).length;
 
@@ -5884,13 +5989,13 @@ async function executeExplicitSoftCategorySearch(
     ...nonSoftCategoryResults
   ];
 
-  // Sort: PRIMARY by exact match bonus (text quality), SECONDARY by RRF score (soft category boosts)
-  // This ensures text matches ALWAYS rank above soft-category-only matches
-  combinedResults.sort((a, b) => {
+  // Sort: PRIMARY by boost (1-3), SECONDARY by exact match bonus, TERTIARY by RRF score
+  // ⚡ Products with boost field appear at the top!
+  combinedResults.sort((a, b) => compareWithBoost(a, b, (a, b) => {
     const exactDiff = (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0);
     if (exactDiff !== 0) return exactDiff;
     return b.rrf_score - a.rrf_score;
-  });
+  }));
   
   console.log(`Soft category matches: ${softCategoryResults.length} (boosted +10000 + multi-category), Non-soft category matches: ${nonSoftCategoryResults.length}`);
   
@@ -7203,9 +7308,9 @@ app.get("/search/load-more", async (req, res) => {
             };
           });
 
-          // Re-sort current batch by boosted score
+          // Re-sort current batch: boost FIRST (3 > 2 > 1 > 0), then by boosted score
           if (paginatedResults.some(p => (p.profileBoost || 0) > 0)) {
-            paginatedResults.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
+            paginatedResults.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.boostedScore || 0) - (x.boostedScore || 0)));
           }
         }
       } catch (profileError) {
@@ -7264,7 +7369,10 @@ app.get("/search/load-more", async (req, res) => {
     }
     
     console.log(`[${requestId}] Returning ${paginatedResults.length} products (${startIndex}-${endIndex} of ${cachedResults.length})`);
-    
+
+    // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the load-more results
+    logBoostedProducts(paginatedResults, requestId, "LOAD-MORE");
+
     // Return paginated results
     res.json({
       products: paginatedResults,
@@ -7650,6 +7758,9 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
               } catch (logError) {
                 console.error(`[${requestId}] Failed to log query:`, logError.message);
               }
+
+              // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in LLM filter selection results
+              logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
 
               return res.json({
                 products: response,
@@ -8872,8 +8983,8 @@ app.post("/fast-search", async (req, res) => {
         };
       });
 
-      // Sort by profileBoost (personalization)
-      productsWithBoost.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+      // Sort by boost FIRST (3 > 2 > 1 > 0), then by profileBoost (personalization) as tiebreaker
+      productsWithBoost.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
 
       // ============================================================
       // 🎯 SOFT CATEGORY EXPANSION: When few results but soft categories found,
@@ -8916,7 +9027,26 @@ app.post("/fast-search", async (req, res) => {
             .toArray();
 
           // Deduplicate: exclude products already in results
-          const newProducts = expansionResults.filter(p => !existingIds.has(p._id.toString()));
+          let newProducts = expansionResults.filter(p => !existingIds.has(p._id.toString()));
+
+          // 🎯 FILTER BY UNMATCHED WORDS: If query has unmatched words (e.g., "שרשרת" in "שרשרת תליון לב"),
+          // ensure expanded products also contain these words in their name
+          // This prevents showing "עגילי תליון לב" when user searches for "שרשרת תליון לב"
+          if (filterCheck.unmatchedWords && filterCheck.unmatchedWords.length > 0) {
+            const unmatchedWordsLower = filterCheck.unmatchedWords.map(w => w.toLowerCase());
+            console.log(`[${requestId}] 🔍 FAST-SEARCH: Filtering expansion by unmatched words: [${unmatchedWordsLower.join(', ')}]`);
+
+            const beforeFilterCount = newProducts.length;
+            newProducts = newProducts.filter(product => {
+              const productName = (product.name || '').toLowerCase();
+              // Product must contain at least one of the unmatched words
+              return unmatchedWordsLower.some(word => productName.includes(word));
+            });
+
+            if (beforeFilterCount !== newProducts.length) {
+              console.log(`[${requestId}] 🔍 FAST-SEARCH: Filtered expansion: ${beforeFilterCount} → ${newProducts.length} products (removed ${beforeFilterCount - newProducts.length} that don't match unmatched words)`);
+            }
+          }
 
           softCategoryExpansion = newProducts.slice(0, slotsAvailable).map(product => {
             const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
@@ -9023,6 +9153,9 @@ app.post("/fast-search", async (req, res) => {
           query
         ).catch(() => {}); // Fire-and-forget
       }
+
+      // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the results
+      logBoostedProducts(allProducts, requestId, "FAST-SEARCH");
 
       return res.json({
         products: allProducts,
@@ -9795,14 +9928,100 @@ app.post("/search", async (req, res) => {
 
         // 🎯 Skip sorting if emergency expansion already handled it
         if (!approvedProducts[0]?.isEmergencyResult) {
-          finalProducts.sort((a, b) => (b.profileBoost || 0) - (a.profileBoost || 0));
+          // Sort by boost FIRST (3 > 2 > 1 > 0), then by profileBoost as tiebreaker
+          finalProducts.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
+        }
+
+        // ============================================================
+        // 🎯 SOFT CATEGORY EXPANSION: When few results but soft categories found,
+        // search for more products matching those soft categories
+        // e.g., "שרשרת תליון לב" → found 1 exact match, but should also show
+        // all products with softCategory "תליון לב"
+        // ============================================================
+        let softCategoryExpansion = [];
+        const hasSoftCategories = filterCheck?.matchedSoftCategories?.length > 0;
+        const needsExpansion = !isPerfectFilterMatch && hasSoftCategories && finalProducts.length < searchLimit;
+
+        if (needsExpansion) {
+          try {
+            const expansionStart = Date.now();
+            const existingIds = new Set(finalProducts.map(p => p._id));
+            const softCats = filterCheck.matchedSoftCategories.map(cat => cat.toLowerCase());
+            const slotsAvailable = searchLimit - finalProducts.length;
+
+            console.log(`[${requestId}] 🔗 [SEARCH] SOFT CATEGORY EXPANSION: Found ${finalProducts.length} exact matches with soft categories [${softCats.join(', ')}] - expanding to fill ${slotsAvailable} slots`);
+
+            // Build query: products matching ANY of the soft categories (and optionally hard categories)
+            const expansionAndConditions = [
+              { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] },
+              { softCategory: { $in: softCats } }
+            ];
+
+            // If hard categories were also found, require them too for higher relevance
+            if (filterCheck.matchedHardCategories?.length > 0) {
+              const hardCatConditions = filterCheck.matchedHardCategories.map(cat => ({
+                $or: [
+                  { category: cat.toLowerCase() },
+                  { type: cat.toLowerCase() }
+                ]
+              }));
+              expansionAndConditions.push(...hardCatConditions);
+            }
+
+            const expansionQuery = { $and: expansionAndConditions };
+            const expansionResults = await collection.find(expansionQuery)
+              .limit(slotsAvailable + existingIds.size) // Fetch extra to account for deduplication
+              .maxTimeMS(3000)
+              .toArray();
+
+            // Deduplicate: exclude products already in results
+            let newProducts = expansionResults.filter(p => !existingIds.has(p._id.toString()));
+
+            // 🎯 FILTER BY UNMATCHED WORDS: If query has unmatched words (e.g., "שרשרת" in "שרשרת תליון לב"),
+            // ensure expanded products also contain these words in their name
+            // This prevents showing "עגילי תליון לב" when user searches for "שרשרת תליון לב"
+            if (filterCheck.unmatchedWords && filterCheck.unmatchedWords.length > 0) {
+              const unmatchedWordsLower = filterCheck.unmatchedWords.map(w => w.toLowerCase());
+              console.log(`[${requestId}] 🔍 [SEARCH] Filtering expansion by unmatched words: [${unmatchedWordsLower.join(', ')}]`);
+
+              const beforeFilterCount = newProducts.length;
+              newProducts = newProducts.filter(product => {
+                const productName = (product.name || '').toLowerCase();
+                // Product must contain at least one of the unmatched words
+                return unmatchedWordsLower.some(word => productName.includes(word));
+              });
+
+              if (beforeFilterCount !== newProducts.length) {
+                console.log(`[${requestId}] 🔍 [SEARCH] Filtered expansion: ${beforeFilterCount} → ${newProducts.length} products (removed ${beforeFilterCount - newProducts.length} that don't match unmatched words)`);
+              }
+            }
+
+            softCategoryExpansion = newProducts.slice(0, slotsAvailable).map(product => {
+              const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+              return {
+                ...product,
+                _id: product._id.toString(),
+                profileBoost,
+                highlight: false,
+                softCategoryMatch: true,
+                searchMode
+              };
+            });
+
+            const expansionTime = Date.now() - expansionStart;
+            console.log(`[${requestId}] 🔗 [SEARCH] SOFT CATEGORY EXPANSION: Found ${softCategoryExpansion.length} additional products matching soft categories [${softCats.join(', ')}] in ${expansionTime}ms`);
+          } catch (err) {
+            console.error(`[${requestId}] ❌ [SEARCH] Soft category expansion failed:`, err.message);
+          }
         }
 
         // ============================================================
         // 🎯 AI RECOMMENDATIONS: When 1-2 exact matches, add similar products
+        // (only if soft category expansion didn't already fill the slots)
         // ============================================================
         let aiRecommendations = [];
-        if (!isPerfectFilterMatch && finalProducts.length <= 2 && finalProducts.length > 0) {
+        const totalSoFar = finalProducts.length + softCategoryExpansion.length;
+        if (!isPerfectFilterMatch && totalSoFar <= 2 && finalProducts.length > 0) {
           const exactMatches = finalProducts.filter(p => {
             const bonus = getExactMatchBonus(p.name, query, query);
             return bonus >= 50000;
@@ -9811,25 +10030,35 @@ app.post("/search", async (req, res) => {
           if (exactMatches.length > 0 && exactMatches.length <= 2) {
             console.log(`[${requestId}] 🤖 [SEARCH] Found ${exactMatches.length} exact match(es) - fetching AI recommendations...`);
             const recStart = Date.now();
-            const rawRecommendations = await findAiRecommendations(collection, approvedProducts, 5);
+            const existingIds = [...finalProducts, ...softCategoryExpansion].map(p => p._id);
+            const rawRecommendations = await findAiRecommendations(collection, approvedProducts, searchLimit - totalSoFar);
             const recTime = Date.now() - recStart;
 
-            aiRecommendations = rawRecommendations.map(product => {
-              const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
-              return {
-                ...product,
-                _id: product._id.toString(),
-                profileBoost,
-                aiRecommend: true,
-                searchMode
-              };
-            });
+            aiRecommendations = rawRecommendations
+              .filter(p => !existingIds.includes(p._id.toString()))
+              .map(product => {
+                const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+                return {
+                  ...product,
+                  _id: product._id.toString(),
+                  profileBoost,
+                  aiRecommend: true,
+                  searchMode
+                };
+              });
 
             console.log(`[${requestId}] 🤖 [SEARCH] AI recommendations: ${aiRecommendations.length} products found in ${recTime}ms`);
           }
         }
 
-        const allProducts = [...finalProducts, ...aiRecommendations];
+        const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations];
+
+        // Update search mode if expansion occurred
+        const finalSearchMode = isPerfectFilterMatch
+          ? 'perfect-filter-match'
+          : (softCategoryExpansion.length > 0 ? 'soft-category-expanded' : searchMode);
+
+        console.log(`[${requestId}] 🚀 [SEARCH] Phase 0 COMPLETE (${finalSearchMode}) - returning ${allProducts.length} products (${finalProducts.length} exact + ${softCategoryExpansion.length} soft-cat + ${aiRecommendations.length} AI)`);
 
         // 🧠 SMART CATEGORY LEARNING: Learn from Phase 0 unmatched words
         if (filterCheck?.unmatchedWords?.length > 0) {
@@ -9841,9 +10070,20 @@ app.post("/search", async (req, res) => {
           ).catch(() => {}); // Fire-and-forget
         }
 
+        // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the Phase 0 results
+        logBoostedProducts(allProducts, requestId, "PHASE-0");
+
         return res.json(isModernMode ? {
           products: allProducts,
-          metadata: { query, requestId, executionTime: Date.now() - searchStartTime, searchMode, isPerfectFilterMatch, aiRecommendationsCount: aiRecommendations.length }
+          metadata: {
+            query,
+            requestId,
+            executionTime: Date.now() - searchStartTime,
+            searchMode: finalSearchMode,
+            isPerfectFilterMatch,
+            softCategoryExpansionCount: softCategoryExpansion.length,
+            aiRecommendationsCount: aiRecommendations.length
+          }
         } : allProducts);
       }
     }
@@ -11299,7 +11539,8 @@ app.post("/search", async (req, res) => {
     if (hasSoftFilters || isSimpleResult) {
       console.log(`[${requestId}] Sorting: ${hasSoftFilters ? 'soft-filter-first' : 'text-match-first'}`);
 
-      combinedResults.sort((a, b) => {
+      // ⚡ BOOST-FIRST SORTING: Products with boost (1-3) appear at the top
+      combinedResults.sort((a, b) => compareWithBoost(a, b, (a, b) => {
         const aTextBonus = a.exactMatchBonus || 0;
         const bTextBonus = b.exactMatchBonus || 0;
         const aMatches = a.softCategoryMatches || 0;
@@ -11440,12 +11681,13 @@ app.post("/search", async (req, res) => {
 
         // Fallback: sort by score
         return b.rrf_score - a.rrf_score;
-      });
+      })); // ⚡ Close compareWithBoost wrapper
 
     } else {
-      // No special sorting conditions, sort by type-exclusivity then RRF score
+      // No special sorting conditions, sort by boost then type-exclusivity then RRF score
       console.log(`[${requestId}] Sorting by RRF score only`);
-      combinedResults.sort((a, b) => {
+      // ⚡ BOOST-FIRST SORTING: Products with boost (1-3) appear at the top
+      combinedResults.sort((a, b) => compareWithBoost(a, b, (a, b) => {
         // TYPE-EXCLUSIVITY: Products matching ONLY the searched type rank above mixed-type products
         if (a.typeExclusiveMatch !== undefined && b.typeExclusiveMatch !== undefined) {
           if (a.typeExclusiveMatch !== b.typeExclusiveMatch) {
@@ -11453,7 +11695,7 @@ app.post("/search", async (req, res) => {
           }
         }
         return b.rrf_score - a.rrf_score;
-      });
+      }));
     }
 
     // CRITICAL FIX: Filter out fuzzy-only matches when true exact matches exist
@@ -12435,7 +12677,10 @@ app.post("/search", async (req, res) => {
         console.error(`[${requestId}] Error caching results for pagination:`, error.message);
       }
     }
-    
+
+    // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the final search results
+    logBoostedProducts(searchResponse.products, requestId, "FULL-SEARCH");
+
     // Return legacy format (array only) by default for backward compatibility
     // Return modern format (with pagination) only if explicitly requested
     if (isLegacyMode) {
