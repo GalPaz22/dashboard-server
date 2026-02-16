@@ -2158,13 +2158,19 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     };
     pipeline.push(searchStage);
 
-    // ⚡ BOOST PRIORITY: Sort by boost field BEFORE limiting
-    // This ensures boosted products (1-3) appear first, regardless of search score
-    // Products without boost (null/0) will come after, sorted by search score
+    // ⚡ BOOST PRIORITY: Add searchScore as regular field, then sort by boost + score
+    // MongoDB doesn't allow mixing regular fields with $meta in the same $sort stage
+    pipeline.push({
+      $addFields: {
+        searchScore: { $meta: "searchScore" }
+      }
+    });
+
+    // Sort by boost FIRST (3 > 2 > 1 > 0), then by search relevance
     pipeline.push({
       $sort: {
-        boost: -1,  // Higher boost first (3 > 2 > 1 > null)
-        score: { $meta: "searchScore" }  // Then by search relevance
+        boost: -1,        // Higher boost first (3 > 2 > 1 > null)
+        searchScore: -1   // Then by search relevance
       }
     });
 
@@ -2351,12 +2357,19 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     },
   ];
 
-  // ⚡ BOOST PRIORITY: Sort by boost field BEFORE other operations
-  // This ensures boosted products (1-3) appear first in vector search results
+  // ⚡ BOOST PRIORITY: Add vectorSearchScore as regular field, then sort by boost + score
+  // MongoDB doesn't allow mixing regular fields with $meta in the same $sort stage
+  pipeline.push({
+    $addFields: {
+      vectorScore: { $meta: "vectorSearchScore" }
+    }
+  });
+
+  // Sort by boost FIRST (3 > 2 > 1 > 0), then by vector similarity
   pipeline.push({
     $sort: {
-      boost: -1,  // Higher boost first (3 > 2 > 1 > null)
-      score: { $meta: "vectorSearchScore" }  // Then by vector similarity score
+      boost: -1,       // Higher boost first (3 > 2 > 1 > null)
+      vectorScore: -1  // Then by vector similarity
     }
   });
 
