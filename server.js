@@ -1612,12 +1612,21 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   }
 
   // Add soft category filters as conditions for filter-only queries
-  // ⚡ CHANGE: Use $all to require ALL soft categories (AND logic)
-  // Example: "יין שרדונה ישראלי" → only products with BOTH שרדונה AND ישראלי
+  // Logic depends on useOrLogic parameter:
+  // - AND logic ($all): Require ALL soft categories (e.g., "יין שרדונה ישראלי" → BOTH שרדונה AND ישראלי)
+  // - OR logic ($in): Match ANY soft category (e.g., expansion to get more results)
   if (softFilters && softFilters.softCategory && Array.isArray(softFilters.softCategory) && softFilters.softCategory.length > 0) {
-    matchConditions.push({
-      softCategory: { $all: softFilters.softCategory }
-    });
+    if (useOrLogic) {
+      // OR logic: match ANY of the soft categories
+      matchConditions.push({
+        softCategory: { $in: softFilters.softCategory }
+      });
+    } else {
+      // AND logic: require ALL soft categories
+      matchConditions.push({
+        softCategory: { $all: softFilters.softCategory }
+      });
+    }
   }
 
   // Add color filter for filter-only queries (same behavior as soft categories)
@@ -10605,7 +10614,53 @@ app.post("/search", async (req, res) => {
         llmReorderingSuccessful = false; // No LLM reordering for filter-only
         
         console.log(`[${requestId}] Filter-only path completed successfully`);
-        
+
+        // 🔗 SOFT CATEGORY EXPANSION: If filter-only returned too few results, expand with OR logic
+        if (combinedResults.length < searchLimit && hasSoftFilters && softFilters.softCategory && softFilters.softCategory.length > 0) {
+          try {
+            const expansionStart = Date.now();
+            const existingIds = new Set(combinedResults.map(p => p._id.toString()));
+            const softCats = Array.isArray(softFilters.softCategory)
+              ? softFilters.softCategory.map(c => c.toLowerCase())
+              : [softFilters.softCategory.toLowerCase()];
+            const slotsAvailable = searchLimit - combinedResults.length;
+
+            console.log(`[${requestId}] 🔗 FILTER-ONLY EXPANSION: Found ${combinedResults.length} exact matches (AND logic), expanding with OR logic to fill ${slotsAvailable} slots`);
+
+            // Build expansion query: match ANY soft category (OR logic) instead of ALL (AND logic)
+            const expansionQuery = buildOptimizedFilterOnlyPipeline(
+              hardFilters,
+              { softCategory: softCats }, // Will use $in (OR) instead of $all (AND)
+              searchLimit * 2,
+              true // useOrLogic = true for expansion
+            );
+
+            const expansionResults = await collection.aggregate(expansionQuery).toArray();
+
+            // Deduplicate and add to results
+            const newProducts = expansionResults
+              .filter(p => !existingIds.has(p._id.toString()))
+              .slice(0, slotsAvailable);
+
+            if (newProducts.length > 0) {
+              // Add expansion metadata
+              newProducts.forEach(p => {
+                p.softCategoryExpansion = true; // Mark as expanded result
+                p.exactMatchBonus = 0;
+                p.rrf_score = 50000; // Lower score than exact AND matches
+              });
+
+              combinedResults = [...combinedResults, ...newProducts];
+              const expansionTime = Date.now() - expansionStart;
+              console.log(`[${requestId}] 🔗 FILTER-ONLY EXPANSION: Added ${newProducts.length} products with OR logic (${softCats.join(' OR ')}) in ${expansionTime}ms - total now: ${combinedResults.length}`);
+            } else {
+              console.log(`[${requestId}] 🔗 FILTER-ONLY EXPANSION: No additional products found with OR logic`);
+            }
+          } catch (expansionError) {
+            console.error(`[${requestId}] ❌ Filter-only expansion failed:`, expansionError.message);
+          }
+        }
+
         } catch (error) {
         console.error(`[${requestId}] Filter-only search failed, falling back to standard search:`, error);
         // Continue with standard search logic
@@ -14835,6 +14890,7 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
         created_at: new Date(),
         preferences: {
           softCategories: {},
+          priceRangesByCategory: {},
           priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
         }
       },
@@ -14879,10 +14935,12 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
       }
     }
 
-    // Update price range preferences
+    // Update price range preferences (both global and category-specific)
     if (price > 0) {
-      // Get current profile to calculate new average
+      // Get current profile to calculate new averages
       const profile = await profilesCollection.findOne({ session_id: sessionId });
+
+      // Update global price range (legacy - for backward compatibility)
       const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
 
       const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
@@ -14891,17 +14949,43 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
       const newCount = (priceRange.count || 0) + 1;
       const newAvg = newSum / newCount;
 
+      const updateFields = {
+        'preferences.priceRange.min': newMin,
+        'preferences.priceRange.max': newMax,
+        'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
+        'preferences.priceRange.sum': newSum,
+        'preferences.priceRange.count': newCount
+      };
+
+      // Update category-specific price ranges
+      const productCategories = Array.isArray(product.category)
+        ? product.category
+        : (product.category ? [product.category] : []);
+
+      const priceRangesByCategory = profile?.preferences?.priceRangesByCategory || {};
+
+      for (const category of productCategories) {
+        if (category && category.trim()) {
+          const catRange = priceRangesByCategory[category] || { min: null, max: null, sum: 0, count: 0 };
+
+          const catNewMin = catRange.min === null ? price : Math.min(catRange.min, price);
+          const catNewMax = catRange.max === null ? price : Math.max(catRange.max, price);
+          const catNewSum = (catRange.sum || 0) + price;
+          const catNewCount = (catRange.count || 0) + 1;
+          const catNewAvg = catNewSum / catNewCount;
+
+          // Add category-specific fields to update
+          updateFields[`preferences.priceRangesByCategory.${category}.min`] = catNewMin;
+          updateFields[`preferences.priceRangesByCategory.${category}.max`] = catNewMax;
+          updateFields[`preferences.priceRangesByCategory.${category}.avg`] = Math.round(catNewAvg * 100) / 100;
+          updateFields[`preferences.priceRangesByCategory.${category}.sum`] = catNewSum;
+          updateFields[`preferences.priceRangesByCategory.${category}.count`] = catNewCount;
+        }
+      }
+
       await profilesCollection.updateOne(
         { session_id: sessionId },
-        {
-          $set: {
-            'preferences.priceRange.min': newMin,
-            'preferences.priceRange.max': newMax,
-            'preferences.priceRange.avg': Math.round(newAvg * 100) / 100,
-            'preferences.priceRange.sum': newSum,
-            'preferences.priceRange.count': newCount
-          }
-        }
+        { $set: updateFields }
       );
     }
 
@@ -15175,18 +15259,44 @@ function calculateProfileBoost(product, userProfile) {
     }
   }
 
-  // 2. Price range boost - products in preferred range get boost
-  if (prefs.priceRange && prefs.priceRange.count >= 3 && product.price) {
+  // 2. Category-specific price range boost
+  if (product.price) {
     const price = parseFloat(product.price);
-    const { min, max, avg } = prefs.priceRange;
+    let categoryPriceRange = null;
 
-    // Strong boost for products near user's average price preference
-    if (price >= min && price <= max) {
-      // Closer to average = higher boost
-      const distanceFromAvg = Math.abs(price - avg);
-      const range = max - min || 1;
-      const proximityScore = 1 - (distanceFromAvg / range);
-      boost += Math.round(proximityScore * 20000);
+    // Try to find category-specific price range
+    if (prefs.priceRangesByCategory && product.category) {
+      const productCategories = Array.isArray(product.category)
+        ? product.category
+        : [product.category];
+
+      // Find the first matching category with enough data
+      for (const cat of productCategories) {
+        const catRange = prefs.priceRangesByCategory[cat];
+        if (catRange && catRange.count >= 3) {
+          categoryPriceRange = catRange;
+          break;
+        }
+      }
+    }
+
+    // Fallback to legacy global price range if no category-specific range found
+    if (!categoryPriceRange && prefs.priceRange && prefs.priceRange.count >= 3) {
+      categoryPriceRange = prefs.priceRange;
+    }
+
+    // Apply price range boost
+    if (categoryPriceRange) {
+      const { min, max, avg } = categoryPriceRange;
+
+      // Strong boost for products near user's average price preference for this category
+      if (price >= min && price <= max) {
+        // Closer to average = higher boost
+        const distanceFromAvg = Math.abs(price - avg);
+        const range = max - min || 1;
+        const proximityScore = 1 - (distanceFromAvg / range);
+        boost += Math.round(proximityScore * 20000);
+      }
     }
   }
 
@@ -15235,6 +15345,13 @@ app.post("/profile/init", async (req, res) => {
       session_id,
       preferences: {
         softCategories: {},
+        priceRangesByCategory: {
+          // Category-specific price ranges will be added dynamically
+          // Example structure:
+          // "יין": { min: 30, max: 150, avg: 80, sum: 800, count: 10 },
+          // "וויסקי": { min: 100, max: 500, avg: 250, sum: 2500, count: 10 }
+        },
+        // Legacy field - kept for backward compatibility
         priceRange: {
           min: null,
           max: null,
