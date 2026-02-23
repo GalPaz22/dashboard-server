@@ -5823,28 +5823,32 @@ async function executeExplicitSoftCategorySearch(
       }
     }
     
-    // 🎯 CRITICAL: Filter text matches by query-extracted soft categories FIRST
-    // Even perfect textual matches must match the extracted soft categories
+    // 🎯 SOFT CATEGORIES ARE OPTIONAL: Don't filter out text matches, just boost those that match
+    // Products without matching soft categories should still appear, just with lower priority
+    // This ensures searches like "למברוסקו" return results even if soft category matching fails
     if (softFilters && softFilters.softCategory) {
       const queryExtractedSoftCats = softFilters.softCategory || [];
       const queryExtractedSoftCatsArray = Array.isArray(queryExtractedSoftCats) ? queryExtractedSoftCats.filter(Boolean) : (queryExtractedSoftCats ? [queryExtractedSoftCats] : []);
 
       if (queryExtractedSoftCatsArray.length > 0) {
-        const beforeSoftFilterCount = highQualityTextMatches.length;
+        // Mark which products match soft categories (for boosting), but don't filter out non-matches
+        highQualityTextMatches.forEach(product => {
+          if (product.softCategory && Array.isArray(product.softCategory) && product.softCategory.length > 0) {
+            const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+            const hasMatch = queryExtractedSoftCatsArray.some(qsc =>
+              productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
+            );
 
-        // Filter to only include products that have at least one matching soft category
-        highQualityTextMatches = highQualityTextMatches.filter(product => {
-          if (!product.softCategory || !Array.isArray(product.softCategory) || product.softCategory.length === 0) {
-            return false; // Product has no soft categories - exclude
+            if (hasMatch) {
+              // Boost products that match soft categories
+              product.softCategoryBoost = true;
+              product.exactMatchBonus = (product.exactMatchBonus || 0) + 5000;
+            }
           }
-          // Check if any of the product's soft categories match query-extracted ones
-          const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
-          return queryExtractedSoftCatsArray.some(qsc =>
-            productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
-          );
         });
 
-        console.log(`[SOFT SEARCH] Soft cat filter: ${beforeSoftFilterCount} → ${highQualityTextMatches.length}`);
+        const matchCount = highQualityTextMatches.filter(p => p.softCategoryBoost).length;
+        console.log(`[SOFT SEARCH] Soft cat boost: ${matchCount}/${highQualityTextMatches.length} products match soft categories (boosted, not filtered)`);
       }
     }
     
