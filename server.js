@@ -4651,27 +4651,8 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
     isComplex: isComplex
   };
   
-  // Check for existing identical query logs within a 30-minute window to prevent duplicates
-  const thirtyMinutesAgo = new Date(timestamp.getTime() - 30 * 60 * 1000);
-  const thirtyMinutesFromNow = new Date(timestamp.getTime() + 30 * 60 * 1000);
-  
-  const queryForExisting = {
-    query: query,
-    timestamp: {
-      $gte: thirtyMinutesAgo,
-      $lte: thirtyMinutesFromNow
-    }
-  };
-  
-  console.log(`[QUERY LOG] Checking for duplicate query logs within timestamp range: ${thirtyMinutesAgo.toISOString()} to ${thirtyMinutesFromNow.toISOString()} for query: ${query}`);
-  
-  const existingQueryLog = await queryCollection.findOne(queryForExisting);
-  if (existingQueryLog) {
-    console.log(`[QUERY LOG] Duplicate query log found (within 30-min window), preventing insertion. Existing ID: ${existingQueryLog._id}`);
-    return; // Don't insert duplicate
-  }
-  
-  console.log(`[QUERY LOG] Inserting new query log for: "${query}"`);
+  // Log every query without duplicate detection
+  console.log(`[QUERY LOG] Inserting query log for: "${query}"`);
   await queryCollection.insertOne(queryDocument);
 }
 
