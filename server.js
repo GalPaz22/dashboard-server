@@ -3928,6 +3928,36 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
               }
             }
 
+            // 4.5. Multi-word soft category matching with suffix stripping
+            // Handle cases like "בהיר" matching "צבעים בהירים"
+            if (name === 'softCategory') {
+              match = list.find(l => {
+                const lLower = l.toLowerCase().trim();
+                // Split multi-word categories and check each word
+                const words = lLower.split(/\s+/);
+
+                // Check if vLower matches any word exactly
+                if (words.includes(vLower)) return true;
+
+                // Check if vLower matches any word after suffix stripping
+                for (const word of words) {
+                  // Try stripping suffixes from the list word
+                  for (const suffix of hebrewSuffixes) {
+                    if (word.endsWith(suffix) && word.length > suffix.length + 2) {
+                      const stripped = word.slice(0, -suffix.length);
+                      if (stripped === vLower) return true;
+                      // Also try vowel-normalized match
+                      const strippedNorm = stripped.replace(/[יו]/g, '');
+                      const vNorm = vLower.replace(/[יו]/g, '');
+                      if (strippedNorm === vNorm && strippedNorm.length >= 3) return true;
+                    }
+                  }
+                }
+                return false;
+              });
+              if (match) return match;
+            }
+
             // 5. Cross-language color matching via colorSimilarityMap
             if (name === 'color' && colorSimilarityMap[vLower]) {
               const similarColors = colorSimilarityMap[vLower];
@@ -8643,13 +8673,14 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
               { stockStatus: { $exists: false } }
             ]
           },
-          // 🎯 MEMORY OPTIMIZATION: Only search indexed fields (name, category, type)
-          // REMOVED: softCategory and description regex to prevent OOM
+          // 🎯 MEMORY OPTIMIZATION: Search indexed fields (name, category, type) + description1
+          // Using exact match for description1 to prevent OOM
           ...fuzzyPatterns.map(pattern => ({
             $or: [
               { name: { $regex: pattern.fuzzy, $options: 'i' } },
               { category: { $regex: pattern.exact, $options: 'i' } },
-              { type: { $regex: pattern.exact, $options: 'i' } }
+              { type: { $regex: pattern.exact, $options: 'i' } },
+              { description1: { $regex: pattern.exact, $options: 'i' } }
             ]
           }))
         ]
@@ -8849,8 +8880,9 @@ app.post("/fast-search", async (req, res) => {
     const client = await getMongoClient();
     const db = client.db(req.store.dbName);
     const collection = db.collection(req.store.products);
+    const querycollection = db.collection("queries");
 
-    const { results: simpleResults, isPerfectFilterMatch, filterCheck, queryWords } = 
+    const { results: simpleResults, isPerfectFilterMatch, filterCheck, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
@@ -9178,6 +9210,22 @@ app.post("/fast-search", async (req, res) => {
 
       // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the results
       logBoostedProducts(allProducts, requestId, "FAST-SEARCH");
+
+      // 📊 LOG QUERY TO DATABASE
+      try {
+        const filters = {
+          category: llmExtractedFilters?.category || (filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined),
+          type: llmExtractedFilters?.type,
+          softCategory: llmExtractedFilters?.softCategory || (filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined),
+          color: llmExtractedFilters?.color,
+          price: llmExtractedFilters?.price,
+          minPrice: llmExtractedFilters?.minPrice,
+          maxPrice: llmExtractedFilters?.maxPrice
+        };
+        await logQuery(querycollection, query, filters, allProducts, false);
+      } catch (logError) {
+        console.error(`[${requestId}] Failed to log fast-search query:`, logError.message);
+      }
 
       return res.json({
         products: allProducts,
