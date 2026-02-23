@@ -10128,6 +10128,19 @@ app.post("/search", async (req, res) => {
         // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the Phase 0 results
         logBoostedProducts(allProducts, requestId, "PHASE-0");
 
+        // 📊 LOG QUERY TO DATABASE (Phase 0 path)
+        try {
+          const querycollection = db.collection("queries");
+          const filters = {
+            category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
+            softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
+            color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
+          };
+          await logQuery(querycollection, query, filters, allProducts, false);
+        } catch (logError) {
+          console.error(`[${requestId}] Failed to log Phase 0 query:`, logError.message);
+        }
+
         return res.json(isModernMode ? {
           products: allProducts,
           metadata: {
@@ -10196,10 +10209,15 @@ app.post("/search", async (req, res) => {
       }));
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
-      
-      // SKU searches are not logged (only complex queries are logged)
-      console.log(`[${requestId}] SKU search - skipping database logging`);
-      
+
+      // 📊 LOG SKU QUERY TO DATABASE
+      try {
+        const querycollection = db.collection("queries");
+        await logQuery(querycollection, query, {}, formattedSKUResults, false);
+      } catch (logError) {
+        console.error(`[${requestId}] Failed to log SKU query:`, logError.message);
+      }
+
       return res.json(formattedSKUResults);
       
     } catch (error) {
