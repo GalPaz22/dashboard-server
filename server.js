@@ -7627,28 +7627,27 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
           let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
-    // 🎯 CRITICAL: Filter text matches by extracted soft categories
-    // Even perfect textual matches must match the extracted soft categories
+    // 🎯 SOFT CATEGORIES ARE OPTIONAL: Boost matches, don't filter them out
     if (extractedFilters && extractedFilters.softCategory) {
       const extractedSoftCats = extractedFilters.softCategory || [];
       const extractedSoftCatsArray = Array.isArray(extractedSoftCats) ? extractedSoftCats.filter(Boolean) : (extractedSoftCats ? [extractedSoftCats] : []);
 
       if (extractedSoftCatsArray.length > 0) {
-        const beforeSoftFilterCount = highQualityTextMatches.length;
-
-        // Filter to only include products that have at least one matching soft category
-        highQualityTextMatches = highQualityTextMatches.filter(product => {
-          if (!product.softCategory || !Array.isArray(product.softCategory) || product.softCategory.length === 0) {
-            return false; // Product has no soft categories - exclude
+        highQualityTextMatches.forEach(product => {
+          if (product.softCategory && Array.isArray(product.softCategory) && product.softCategory.length > 0) {
+            const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+            const hasMatch = extractedSoftCatsArray.some(qsc =>
+              productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
+            );
+            if (hasMatch) {
+              product.softCategoryBoost = true;
+              product.exactMatchBonus = (product.exactMatchBonus || 0) + 5000;
+            }
           }
-          // Check if any of the product's soft categories match extracted ones
-          const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
-          return extractedSoftCatsArray.some(qsc =>
-            productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
-          );
         });
 
-        console.log(`[${requestId}] 🎯 Phase 1: SOFT CATEGORY FILTER ON TEXT MATCHES: ${beforeSoftFilterCount} → ${highQualityTextMatches.length} (filtered by extracted: ${JSON.stringify(extractedSoftCatsArray)})`);
+        const matchCount = highQualityTextMatches.filter(p => p.softCategoryBoost).length;
+        console.log(`[${requestId}] 🎯 Phase 1: SOFT CATEGORY BOOST ON TEXT MATCHES: ${matchCount}/${highQualityTextMatches.length} boosted (not filtered) by: ${JSON.stringify(extractedSoftCatsArray)}`);
       }
     }
 
@@ -10903,27 +10902,26 @@ app.post("/search", async (req, res) => {
           // Filter for high-quality text matches (lower threshold for better extraction)
           let highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
 
-          // 🎯 CRITICAL FIX: Filter text matches by query-extracted soft categories
-          // If the query extracted soft categories, only return text matches that ALSO match those categories
+          // 🎯 SOFT CATEGORIES ARE OPTIONAL: Boost matches, don't filter them out
           const queryExtractedSoftCats = softFilters.softCategory || [];
           const queryExtractedSoftCatsArray = Array.isArray(queryExtractedSoftCats) ? queryExtractedSoftCats.filter(Boolean) : (queryExtractedSoftCats ? [queryExtractedSoftCats] : []);
 
           if (queryExtractedSoftCatsArray.length > 0) {
-            const beforeFilterCount = highQualityTextMatches.length;
-
-            // Filter to only include products that have at least one matching soft category
-            highQualityTextMatches = highQualityTextMatches.filter(product => {
-              if (!product.softCategory || !Array.isArray(product.softCategory) || product.softCategory.length === 0) {
-                return false; // Product has no soft categories - exclude
+            highQualityTextMatches.forEach(product => {
+              if (product.softCategory && Array.isArray(product.softCategory) && product.softCategory.length > 0) {
+                const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+                const hasMatch = queryExtractedSoftCatsArray.some(qsc =>
+                  productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
+                );
+                if (hasMatch) {
+                  product.softCategoryBoost = true;
+                  product.exactMatchBonus = (product.exactMatchBonus || 0) + 5000;
+                }
               }
-              // Check if any of the product's soft categories match query-extracted ones
-              const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
-              return queryExtractedSoftCatsArray.some(qsc =>
-                productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
-              );
             });
 
-            console.log(`[${requestId}] 🎯 SOFT CATEGORY FILTER ON TEXT MATCHES: ${beforeFilterCount} → ${highQualityTextMatches.length} (filtered by query-extracted: ${JSON.stringify(queryExtractedSoftCatsArray)})`);
+            const matchCount = highQualityTextMatches.filter(p => p.softCategoryBoost).length;
+            console.log(`[${requestId}] 🎯 SOFT CATEGORY BOOST ON TEXT MATCHES: ${matchCount}/${highQualityTextMatches.length} boosted (not filtered) by query-extracted: ${JSON.stringify(queryExtractedSoftCatsArray)}`);
           }
 
           // 🛡️ HARD CATEGORY FILTER ON TEXT MATCHES: If query extracted a hard category (e.g., "יין לבן"),
