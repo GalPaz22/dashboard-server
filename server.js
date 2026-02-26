@@ -13138,6 +13138,12 @@ app.post("/search-to-cart", async (req, res) => {
         });
 
         if (product && product.name) {
+          // Enrich product_name if not already provided by the client
+          if (!enhancedDocument.product_name) {
+            enhancedDocument.product_name = product.name;
+            console.log(`[SEARCH-TO-CART] Enriched product_name="${product.name}" from DB lookup for product_id=${document.product_id}`);
+          }
+
           // search_results is an array of product names
           const searchResultNames = Array.isArray(document.search_results)
             ? document.search_results.filter(Boolean)
@@ -13190,6 +13196,27 @@ app.post("/search-to-cart", async (req, res) => {
       enhancedDocument.upsale = null;
       enhancedDocument.tier2Product = null;
       enhancedDocument.tier2Upsell = null;
+
+      // Still try to enrich product_name by ID if missing
+      if (document.event_type === 'add_to_cart' && document.product_id && !enhancedDocument.product_name) {
+        try {
+          const product = await db.collection('products').findOne({
+            $or: [
+              { ItemID: parseInt(document.product_id) },
+              { ItemID: document.product_id.toString() },
+              { id: parseInt(document.product_id) },
+              { id: document.product_id.toString() },
+              { _id: document.product_id }
+            ]
+          });
+          if (product && product.name) {
+            enhancedDocument.product_name = product.name;
+            console.log(`[SEARCH-TO-CART] Enriched product_name="${product.name}" from DB lookup for product_id=${document.product_id}`);
+          }
+        } catch (err) {
+          console.warn(`[SEARCH-TO-CART] product_name enrichment failed for product_id=${document.product_id}:`, err.message);
+        }
+      }
     }
     
     // Add conversion type based on event
