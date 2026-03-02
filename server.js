@@ -8995,60 +8995,87 @@ app.post("/fast-search", async (req, res) => {
       console.log(`[${requestId}]   Soft: ${filterCheck.matchedSoftCategories?.join(', ') || 'none'}`);
     }
 
+    // ⚡ OPTIMIZATION: Compute relevance score BEFORE any LLM calls (pure JS, ~0ms).
+    // High-confidence results skip all LLM network calls entirely.
+    let relevanceScore = null;
+    if (simpleResults.length > 0 && !isPerfectFilterMatch) {
+      relevanceScore = calculateRelevanceScore(simpleResults, query, filterCheck);
+    }
+
     // ============================================================
-    // STEP 3: LLM Category Extraction (when textual extraction fails)
+    // STEP 3: LLM Calls — only when needed (low confidence)
+    // ⚡ PARALLEL: extractFiltersBrief + validateSimpleSearchResults run simultaneously,
+    //    cutting worst-case sequential LLM latency roughly in half.
     // ============================================================
     let llmExtractedFilters = null;
     let llmExtractedCategories = [];
+    let preloadedValidation = null;
+    let activeResults = simpleResults; // mutable reference (avoids const reassignment)
 
-    if (!hasTextualFilters && !isPerfectFilterMatch && simpleResults.length > 0) {
-      console.log(`[${requestId}] 🤖 No textual filters found → trying LLM category extraction...`);
+    const needsLLM = !isPerfectFilterMatch && simpleResults.length > 0 && !relevanceScore?.isHighConfidence;
 
-      try {
-        const extractionStart = Date.now();
-        llmExtractedFilters = await extractFiltersBrief(
-          query,
-          req.store.categories || [],
-          req.store.types || [],
-          req.store.softCategories || '',
-          'wine shop',
-          req.store.colors || ''
-        );
-        const extractionTime = Date.now() - extractionStart;
+    if (needsLLM && !hasTextualFilters) {
+      // ⚡ Both calls are independent — fire them in parallel
+      console.log(`[${requestId}] 🤖 Running extractFilters + validate in parallel (score: ${relevanceScore?.score ?? 'N/A'})`);
+      const parallelStart = Date.now();
 
-        // Check if LLM found any useful categories
-        if (llmExtractedFilters && llmExtractedFilters.category) {
-          const categories = Array.isArray(llmExtractedFilters.category)
-            ? llmExtractedFilters.category
-            : [llmExtractedFilters.category];
-          llmExtractedCategories = categories.filter(Boolean);
+      const [filterResult, validationResult] = await Promise.all([
+        (async () => {
+          try {
+            return await extractFiltersBrief(
+              query,
+              req.store.categories || [],
+              req.store.types || [],
+              req.store.softCategories || '',
+              'wine shop',
+              req.store.colors || ''
+            );
+          } catch (err) {
+            console.error(`[${requestId}] ❌ LLM category extraction failed:`, err.message);
+            return null;
+          }
+        })(),
+        validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop')
+      ]);
 
-          if (llmExtractedCategories.length > 0) {
-            console.log(`[${requestId}] ✅ LLM extracted categories (${extractionTime}ms): ${llmExtractedCategories.join(', ')}`);
+      console.log(`[${requestId}] ⚡ Parallel LLM calls done in ${Date.now() - parallelStart}ms`);
+      preloadedValidation = validationResult;
 
-            // Filter simple results by LLM-extracted categories
-            const categoryFilteredResults = simpleResults.filter(product => {
-              const productCategory = product.category ? product.category.toLowerCase() : '';
-              return llmExtractedCategories.some(cat =>
-                productCategory.includes(cat.toLowerCase()) || cat.toLowerCase().includes(productCategory)
-              );
-            });
+      if (filterResult && filterResult.category) {
+        const categories = Array.isArray(filterResult.category)
+          ? filterResult.category
+          : [filterResult.category];
+        llmExtractedCategories = categories.filter(Boolean);
 
-            if (categoryFilteredResults.length > 0) {
-              console.log(`[${requestId}] 🎯 LLM category filter: ${simpleResults.length} → ${categoryFilteredResults.length} products`);
-              simpleResults = categoryFilteredResults; // Use filtered results
-            } else {
-              console.log(`[${requestId}] ⚠️ LLM categories filtered out all results - keeping original results`);
-            }
+        if (llmExtractedCategories.length > 0) {
+          llmExtractedFilters = filterResult;
+          console.log(`[${requestId}] ✅ LLM extracted categories: ${llmExtractedCategories.join(', ')}`);
+
+          const categoryFilteredResults = simpleResults.filter(product => {
+            const productCategory = product.category ? product.category.toLowerCase() : '';
+            return llmExtractedCategories.some(cat =>
+              productCategory.includes(cat.toLowerCase()) || cat.toLowerCase().includes(productCategory)
+            );
+          });
+
+          if (categoryFilteredResults.length > 0) {
+            console.log(`[${requestId}] 🎯 LLM category filter: ${simpleResults.length} → ${categoryFilteredResults.length} products`);
+            activeResults = categoryFilteredResults;
           } else {
-            console.log(`[${requestId}] ℹ️ LLM found no categories (${extractionTime}ms)`);
+            console.log(`[${requestId}] ⚠️ LLM categories filtered out all results - keeping original results`);
           }
         } else {
-          console.log(`[${requestId}] ℹ️ LLM extraction returned no filters (${extractionTime}ms)`);
+          console.log(`[${requestId}] ℹ️ LLM found no categories`);
         }
-      } catch (err) {
-        console.error(`[${requestId}] ❌ LLM category extraction failed:`, err.message);
+      } else {
+        console.log(`[${requestId}] ℹ️ LLM extraction returned no filters`);
       }
+    } else if (needsLLM && hasTextualFilters) {
+      // Has textual filters but low confidence — only validate (no category extraction needed)
+      console.log(`[${requestId}] 🤔 LOW CONFIDENCE (score: ${relevanceScore?.score}) with textual filters - running validation...`);
+      const validationStart = Date.now();
+      preloadedValidation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
+      console.log(`[${requestId}] ⏱️ Validation done in ${Date.now() - validationStart}ms`);
     }
 
     // ============================================================
@@ -9056,44 +9083,35 @@ app.post("/fast-search", async (req, res) => {
     // ============================================================
     let shouldUseSimpleResults = false;
     let validatedProducts = [];
-    let relevanceScore = null; // For optimization metrics
 
-    if (simpleResults.length > 0) {
+    if (activeResults.length > 0) {
       if (isPerfectFilterMatch) {
         // 🎯 PERFECT MATCH → Return ALL results (BROAD search)
         shouldUseSimpleResults = true;
-        validatedProducts = simpleResults; // No slicing!
+        validatedProducts = activeResults; // No slicing!
         console.log(`[${requestId}] 🎯 PERFECT FILTER MATCH (BROAD): All words match categories → returning ALL ${validatedProducts.length} products`);
       } else if (llmExtractedCategories.length > 0 && llmExtractedFilters) {
-        // ⚡ NEW: LLM-EXTRACTED FILTER MATCH → Treat as perfect match and skip validation
+        // ⚡ LLM-EXTRACTED FILTER MATCH → Treat as perfect match and skip validation
         shouldUseSimpleResults = true;
-        validatedProducts = simpleResults;
+        validatedProducts = activeResults;
         console.log(`[${requestId}] ⚡ LLM FILTER MATCH: LLM extracted filters successfully → treating as perfect match → returning ALL ${validatedProducts.length} products WITHOUT validation/reranking`);
       } else {
-        // 🎯 NOT PERFECT → Check confidence score first
+        // 🎯 NOT PERFECT → Use pre-computed relevance score
         console.log(`[${requestId}] 🔍 NOT perfect filter match (${filterCheck.unmatchedWords.length} unmatched: ${filterCheck.unmatchedWords.join(', ')})`);
 
-        // NEW: Calculate relevance confidence score
-        relevanceScore = calculateRelevanceScore(simpleResults, query, filterCheck);
-
-        if (relevanceScore.isHighConfidence) {
-          // NEW: Skip LLM validation for high-confidence results
+        if (relevanceScore?.isHighConfidence) {
+          // Skip LLM validation — pre-computed score was high enough
           shouldUseSimpleResults = true;
           validatedProducts = relevanceScore.topProducts.slice(0, FAST_LIMIT);
-          console.log(`[${requestId}] ⚡ HIGH CONFIDENCE (score: ${relevanceScore.score}) - skipping LLM validation - ${relevanceScore.reason}`);
-        } else {
-          // Run LLM validation only for ambiguous cases
-          console.log(`[${requestId}] 🤔 LOW CONFIDENCE (score: ${relevanceScore.score}) - running LLM validation...`);
-          const validationStart = Date.now();
-          const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
-          const validationTime = Date.now() - validationStart;
-
-          if (validation.isGoodMatch && validation.validProducts.length > 0) {
+          console.log(`[${requestId}] ⚡ HIGH CONFIDENCE (score: ${relevanceScore.score}) - skipped all LLM calls - ${relevanceScore.reason}`);
+        } else if (preloadedValidation) {
+          // Use pre-loaded validation (already computed in parallel with extractFiltersBrief)
+          if (preloadedValidation.isGoodMatch && preloadedValidation.validProducts.length > 0) {
             shouldUseSimpleResults = true;
-            validatedProducts = validation.validProducts.slice(0, FAST_LIMIT);
-            console.log(`[${requestId}] ✅ LLM APPROVED simple results (${validationTime}ms): ${validation.validProducts.length} products - ${validation.reason}`);
+            validatedProducts = preloadedValidation.validProducts.slice(0, FAST_LIMIT);
+            console.log(`[${requestId}] ✅ LLM APPROVED (parallel pre-loaded): ${preloadedValidation.validProducts.length} products - ${preloadedValidation.reason}`);
           } else {
-            console.log(`[${requestId}] ❌ LLM REJECTED simple results (${validationTime}ms): ${validation.reason} - falling back to full search`);
+            console.log(`[${requestId}] ❌ LLM REJECTED: ${preloadedValidation.reason} - falling back to full search`);
           }
         }
       }
@@ -9974,10 +9992,18 @@ app.post("/search", async (req, res) => {
         }
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
-        const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
-        if (validation.isGoodMatch && validation.validProducts.length > 0) {
-          approvedProducts = validation.validProducts.slice(0, searchLimit);
-          searchMode = 'simple-validated';
+        // ⚡ OPTIMIZATION: Skip LLM for high-confidence text matches (saves ~500-1000ms)
+        const quickScore = calculateRelevanceScore(simpleResults, query, filterCheck);
+        if (quickScore.isHighConfidence) {
+          approvedProducts = quickScore.topProducts.slice(0, searchLimit);
+          searchMode = 'simple-high-confidence';
+          console.log(`[${requestId}] ⚡ [SEARCH] HIGH CONFIDENCE (score: ${quickScore.score}) - skipping LLM validation`);
+        } else {
+          const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
+          if (validation.isGoodMatch && validation.validProducts.length > 0) {
+            approvedProducts = validation.validProducts.slice(0, searchLimit);
+            searchMode = 'simple-validated';
+          }
         }
       }
 
