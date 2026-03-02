@@ -8715,54 +8715,88 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
         requiresHardCategory: (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0)
       });
     } else {
-      // 🎯 REGULAR SEARCH: Use original fuzzy word matching
-      // 🎯 CRITICAL MEMORY FIX: Limit regex to indexed fields only, skip descriptions
-      const fuzzyPatterns = queryWords.map(word => ({
-        exact: word,
-        fuzzy: generateFuzzyRegex(word)
-      }));
-      
-      searchQuery = {
-        $and: [
-          // Stock status filter: instock OR no stockStatus field
-          {
-            $or: [
-              { stockStatus: "instock" },
-              { stockStatus: { $exists: false } }
-            ]
-          },
-          // 🎯 MEMORY OPTIMIZATION: Only search indexed fields (name, category, type)
-          // description1 is excluded — unindexed regex on large text causes full collection scans and timeouts
-          ...fuzzyPatterns.map(pattern => ({
-            $or: [
-              { name: { $regex: pattern.fuzzy, $options: 'i' } },
-              { category: { $regex: pattern.exact, $options: 'i' } },
-              { type: { $regex: pattern.exact, $options: 'i' } }
-            ]
-          }))
-        ]
-      };
-    }
-    
-    // Apply limit only if searchLimit > 0 (for non-perfect matches)
-    if (searchLimit > 0) {
-      // 🎯 MEMORY OPTIMIZATION: Add maxTimeMS to prevent runaway queries
-      results = await collection.find(searchQuery)
-        .limit(searchLimit)
-        .maxTimeMS(3000)  // Kill query after 3 seconds
-        .toArray();
-    } else {
-      // 🎯 CRITICAL MEMORY FIX: Drastically reduce limit for broad searches like "red wine"
-      // Even 100 products is enough for user experience
-      const MAX_CATEGORY_RESULTS = 50;  // Changed from 2000 to 50
-      results = await collection.find(searchQuery)
-        .limit(MAX_CATEGORY_RESULTS)
-        .maxTimeMS(3000)  // Reduced from 10s to 3s
-        .toArray();
+      // 🎯 REGULAR SEARCH: Atlas Search autocomplete — no regex, no multiplanner timeout
+      // Each query word must match in name (must), with optional boost from category/softCategory (should)
+      const atlasPipeline = [
+        {
+          $search: {
+            index: "default",
+            compound: {
+              // Every word must appear in the name (AND logic)
+              must: queryWords.map(word => ({
+                compound: {
+                  should: [
+                    {
+                      autocomplete: {
+                        query: word,
+                        path: "name",
+                        tokenOrder: "any",
+                        score: { boost: { value: 10 } }
+                      }
+                    },
+                    {
+                      text: {
+                        query: word,
+                        path: "name",
+                        fuzzy: { maxEdits: 1, prefixLength: 2 },
+                        score: { boost: { value: 8 } }
+                      }
+                    }
+                  ],
+                  minimumShouldMatch: 1
+                }
+              })),
+              // Optional: boost if words also match category or softCategory
+              should: [
+                ...queryWords.map(word => ({
+                  autocomplete: {
+                    query: word,
+                    path: "category",
+                    tokenOrder: "any",
+                    score: { boost: { value: 5 } }
+                  }
+                })),
+                ...queryWords.map(word => ({
+                  autocomplete: {
+                    query: word,
+                    path: "softCategory",
+                    tokenOrder: "any",
+                    score: { boost: { value: 3 } }
+                  }
+                }))
+              ],
+              // Stock status filter inside compound (avoids post-$search $match)
+              filter: [
+                {
+                  compound: {
+                    should: [
+                      { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
+                      { text: { query: "instock", path: "stockStatus" } }
+                    ],
+                    minimumShouldMatch: 1
+                  }
+                }
+              ]
+            }
+          }
+        },
+        { $limit: searchLimit > 0 ? searchLimit : 50 }
+      ];
 
-      if (results.length === MAX_CATEGORY_RESULTS) {
-        console.warn(`[SIMPLE SEARCH] Category match limited to ${MAX_CATEGORY_RESULTS} results for memory safety`);
-      }
+      results = await collection.aggregate(atlasPipeline).toArray();
+      console.log(`[SIMPLE-SEARCH] Atlas Search: ${results.length} results for "${query}"`);
+      return { results, isPerfectFilterMatch, filterCheck, queryWords };
+    }
+
+    // Perfect-match path: execute find() with the category-based searchQuery
+    const MAX_CATEGORY_RESULTS = 50;
+    results = await collection.find(searchQuery)
+      .limit(MAX_CATEGORY_RESULTS)
+      .maxTimeMS(5000)
+      .toArray();
+
+    if (results.length === MAX_CATEGORY_RESULTS) {
+      console.warn(`[SIMPLE SEARCH] Category match limited to ${MAX_CATEGORY_RESULTS} results for memory safety`);
     }
 
   }
