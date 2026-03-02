@@ -10527,7 +10527,7 @@ app.post("/search", async (req, res) => {
     // ============================================================
     const analysisStartTime = Date.now();
     
-    const [analysisResult, queryEmbedding] = await Promise.all([
+    const [analysisResult, queryEmbedding, translatedQueryCandidate] = await Promise.all([
       // 1. Single LLM call for all logic (Classification + Filters)
       withCache(generateCacheKey('analysis-v2', query, context), async () => {
         // Run classification and filter extraction in parallel
@@ -10540,7 +10540,11 @@ app.post("/search", async (req, res) => {
       // 2. Parallel Embedding generation
       withCache(generateCacheKey('embedding', query), async () => {
         return await getQueryEmbedding(query);
-      })
+      }),
+      // 3. ⚡ Parallel Translation — runs at the same time as analysis+embedding.
+      //    translateQuery() is already internally cached (7-day TTL) and short-circuits
+      //    immediately for non-Hebrew queries, so this adds no cost for simple/English queries.
+      translateQuery(query, context).catch(() => null)
     ]);
 
     const isSimpleResult = analysisResult.isSimple;
@@ -10577,12 +10581,9 @@ app.post("/search", async (req, res) => {
     }
 
     let combinedResults = [];
-    let translatedQuery = query;
-    
-    // Parallel translation if needed
-    if (isComplexQueryResult) {
-      translatedQuery = await withCache(generateCacheKey('translate', query), () => translateQuery(query, context));
-    }
+    // Use the pre-computed translation from Phase 1 parallel block (already done, no extra wait).
+    // For simple queries we keep the original query; for complex we use the translation if available.
+    const translatedQuery = (isComplexQueryResult && translatedQueryCandidate) ? translatedQueryCandidate : query;
 
     const cleanedText = removeWineFromQuery(translatedQuery, noWord);
 
@@ -10848,8 +10849,8 @@ app.post("/search", async (req, res) => {
             const expansionQuery = buildOptimizedFilterOnlyPipeline(
               hardFilters,
               { softCategory: softCats }, // Will use $in (OR) instead of $all (AND)
-              searchLimit * 2,
-              true // useOrLogic = true for expansion
+              true, // useOrLogic = true for expansion
+              searchLimit * 2
             );
 
             const expansionResults = await collection.aggregate(expansionQuery).toArray();
@@ -11678,8 +11679,9 @@ app.post("/search", async (req, res) => {
       }
 
       // LLM reordering only for complex queries (not just any query with soft filters)
-      // Skip LLM reordering if circuit breaker is open
-      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI();
+      // Skip LLM reordering if circuit breaker is open OR we're in fast-search fallback mode
+      // (isFastSearchMode = true means the request came from /fast-search, which already needs speed)
+      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI() && !isFastSearchMode;
     
       if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
