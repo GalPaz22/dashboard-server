@@ -8703,6 +8703,14 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
         });
       }
 
+      // Price range filter
+      if (filterCheck.extractedMinPrice !== null || filterCheck.extractedMaxPrice !== null) {
+        const rangeFilter = { range: { path: "price" } };
+        if (filterCheck.extractedMinPrice !== null) rangeFilter.range.gte = filterCheck.extractedMinPrice;
+        if (filterCheck.extractedMaxPrice !== null) rangeFilter.range.lte = filterCheck.extractedMaxPrice;
+        mustClauses.push(rangeFilter);
+      }
+
       const shouldClauses = [];
       // Colors: optional boost
       if (filterCheck.matchedColors && filterCheck.matchedColors.length > 0) {
@@ -9701,6 +9709,33 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     }
   }
 
+  // 🎯 PRICE WORD DETECTION: Mark price-related words as matched so they don't count as unmatched
+  // Handles: "עד 100", "מ 50", "בין 50 ל 100", "מינימום 50", "up to 200"
+  const priceKeywords = new Set(['עד', 'מ', 'מ-', 'עד-', 'בין', 'ל', 'ל-', 'מינימום', 'מקסימום', 'minimum', 'maximum', 'max', 'min', 'up', 'to', 'from']);
+  let extractedMinPrice = null;
+  let extractedMaxPrice = null;
+
+  for (let i = 0; i < queryWords.length; i++) {
+    if (matchedWordIndices.has(i)) continue;
+    const word = queryWords[i];
+
+    if (/^\d+$/.test(word)) {
+      const num = parseInt(word, 10);
+      const prevWord = i > 0 ? queryWords[i - 1] : null;
+      const prevPrevWord = i > 1 ? queryWords[i - 2] : null;
+      const isMaxKw = w => w && ['עד', 'עד-', 'maximum', 'max', 'to'].includes(w);
+      const isMinKw = w => w && ['מ', 'מ-', 'מינימום', 'minimum', 'min', 'from'].includes(w);
+
+      if (isMaxKw(prevWord) || isMaxKw(prevPrevWord)) extractedMaxPrice = num;
+      else if (isMinKw(prevWord) || isMinKw(prevPrevWord)) extractedMinPrice = num;
+      else if (num >= 10 && num <= 10000) extractedMaxPrice = num; // standalone number → maxPrice
+      matchedWordIndices.add(i);
+      continue;
+    }
+
+    if (priceKeywords.has(word)) matchedWordIndices.add(i);
+  }
+
   // Collect unmatched words
   const unmatchedWords = queryWords.filter((_, idx) => !matchedWordIndices.has(idx));
 
@@ -9712,7 +9747,9 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     unmatchedWords,
     matchedHardCategories: [...new Set(matchedHardCategories)],
     matchedSoftCategories: [...new Set(matchedSoftCategories)],
-    matchedColors: [...new Set(matchedColors)]
+    matchedColors: [...new Set(matchedColors)],
+    extractedMinPrice,
+    extractedMaxPrice
   };
 
   console.log(`[FILTER MATCH] Query: "${query}" → isPerfect: ${isPerfectMatch}, unmatched: [${unmatchedWords.join(', ')}], hard: [${result.matchedHardCategories.join(', ')}], soft: [${result.matchedSoftCategories.join(', ')}]`);
