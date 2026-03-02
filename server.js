@@ -8660,60 +8660,74 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
     
     let searchQuery;
     
-    // 🎯 PERFECT FILTER MATCH: Search by extracted categories, not original words
+    // 🎯 PERFECT FILTER MATCH: Atlas Search by extracted categories
     if (isPerfectFilterMatch) {
-      const andConditions = [
-        // Stock status filter: instock OR no stockStatus field
-        {
-          $or: [
-            { stockStatus: "instock" },
-            { stockStatus: { $exists: false } }
-          ]
-        }
-      ];
-      
-      // 🎯 CRITICAL: Hard categories are MANDATORY (AND condition)
-      if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
-        filterCheck.matchedHardCategories.forEach(cat => {
-          // 🎯 MEMORY OPTIMIZATION: Use exact match instead of regex for better performance
-          // MongoDB can use indexes for exact matches but not for regex
-          const lowerCat = cat.toLowerCase();
-          andConditions.push({
-            $or: [
-              { category: lowerCat },
-              { type: lowerCat }
-            ]
-          });
-        });
-      }
-      
-      // 🎯 Soft categories are OPTIONAL (only add if no hard categories, or as additional filter)
-      if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
-        // ⚡ CHANGE: Use $all operator to require ALL soft categories (AND logic)
-        // Example: "שרדונה ישראלי" → only products with BOTH שרדונה AND ישראלי
-        const lowerSoftCats = filterCheck.matchedSoftCategories.map(cat => cat.toLowerCase());
-        const softConditions = { softCategory: { $all: lowerSoftCats } };
-
-        // Add soft category filter (works with or without hard categories)
-        andConditions.push(softConditions);
-      }
-
-      // 🎯 Colors are OPTIONAL (boost, not deal-breaker) - same as soft categories
-      // Expand to similar colors for flexible matching (e.g., "לבן" also matches "קרם", "בז'")
-      if (filterCheck.matchedColors && filterCheck.matchedColors.length > 0) {
-        const expandedColors = getSimilarColors(filterCheck.matchedColors);
-        const lowerColors = expandedColors.map(c => c.toLowerCase());
-        andConditions.push({ colors: { $in: lowerColors } });
-      }
-      
-      searchQuery = { $and: andConditions };
-      
       console.log(`[SIMPLE-SEARCH] Perfect match - searching by categories:`, {
         hardCategories: filterCheck.matchedHardCategories,
         softCategories: filterCheck.matchedSoftCategories,
-        colors: filterCheck.matchedColors,
-        requiresHardCategory: (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0)
+        colors: filterCheck.matchedColors
       });
+
+      const mustClauses = [
+        // Stock status filter
+        {
+          compound: {
+            should: [
+              { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
+              { text: { query: "instock", path: "stockStatus" } }
+            ],
+            minimumShouldMatch: 1
+          }
+        }
+      ];
+
+      // Hard categories: each must match category OR type
+      if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
+        filterCheck.matchedHardCategories.forEach(cat => {
+          mustClauses.push({
+            compound: {
+              should: [
+                { text: { query: cat, path: "category" } },
+                { text: { query: cat, path: "type" } }
+              ],
+              minimumShouldMatch: 1
+            }
+          });
+        });
+      }
+
+      // Soft categories: ALL must match (AND logic)
+      if (filterCheck.matchedSoftCategories && filterCheck.matchedSoftCategories.length > 0) {
+        filterCheck.matchedSoftCategories.forEach(cat => {
+          mustClauses.push({ text: { query: cat, path: "softCategory" } });
+        });
+      }
+
+      const shouldClauses = [];
+      // Colors: optional boost
+      if (filterCheck.matchedColors && filterCheck.matchedColors.length > 0) {
+        const expandedColors = getSimilarColors(filterCheck.matchedColors);
+        expandedColors.forEach(color => {
+          shouldClauses.push({ text: { query: color, path: "colors", score: { boost: { value: 2 } } } });
+        });
+      }
+
+      const perfectMatchPipeline = [
+        {
+          $search: {
+            index: "default",
+            compound: {
+              must: mustClauses,
+              ...(shouldClauses.length > 0 ? { should: shouldClauses } : {})
+            }
+          }
+        },
+        { $limit: 50 }
+      ];
+
+      results = await collection.aggregate(perfectMatchPipeline).toArray();
+      console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
+      return { results, isPerfectFilterMatch, filterCheck, queryWords };
     } else {
       // 🎯 REGULAR SEARCH: Atlas Search autocomplete — no regex, no multiplanner timeout
       // Each query word must match in name (must), with optional boost from category/softCategory (should)
@@ -8787,26 +8801,9 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       console.log(`[SIMPLE-SEARCH] Atlas Search: ${results.length} results for "${query}"`);
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     }
-
-    // Perfect-match path: execute find() with the category-based searchQuery
-    const MAX_CATEGORY_RESULTS = 50;
-    results = await collection.find(searchQuery)
-      .limit(MAX_CATEGORY_RESULTS)
-      .maxTimeMS(5000)
-      .toArray();
-
-    if (results.length === MAX_CATEGORY_RESULTS) {
-      console.warn(`[SIMPLE SEARCH] Category match limited to ${MAX_CATEGORY_RESULTS} results for memory safety`);
-    }
-
   }
 
-  return {
-    results,
-    isPerfectFilterMatch,
-    filterCheck,
-    queryWords
-  };
+  return { results, isPerfectFilterMatch, filterCheck, queryWords };
 }
 
 /**
