@@ -8731,14 +8731,13 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
               { stockStatus: { $exists: false } }
             ]
           },
-          // 🎯 MEMORY OPTIMIZATION: Search indexed fields (name, category, type) + description1
-          // Using exact match for description1 to prevent OOM
+          // 🎯 MEMORY OPTIMIZATION: Only search indexed fields (name, category, type)
+          // description1 is excluded — unindexed regex on large text causes full collection scans and timeouts
           ...fuzzyPatterns.map(pattern => ({
             $or: [
               { name: { $regex: pattern.fuzzy, $options: 'i' } },
               { category: { $regex: pattern.exact, $options: 'i' } },
-              { type: { $regex: pattern.exact, $options: 'i' } },
-              { description1: { $regex: pattern.exact, $options: 'i' } }
+              { type: { $regex: pattern.exact, $options: 'i' } }
             ]
           }))
         ]
