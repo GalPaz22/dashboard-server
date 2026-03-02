@@ -5889,7 +5889,7 @@ async function executeExplicitSoftCategorySearch(
         // Mark which products match soft categories (for boosting), but don't filter out non-matches
         highQualityTextMatches.forEach(product => {
           if (product.softCategory && Array.isArray(product.softCategory) && product.softCategory.length > 0) {
-            const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+            const productSoftCats = product.softCategory.filter(sc => typeof sc === 'string').map(sc => sc.toLowerCase().trim());
             const hasMatch = queryExtractedSoftCatsArray.some(qsc =>
               productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
             );
@@ -7709,7 +7709,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       if (extractedSoftCatsArray.length > 0) {
         highQualityTextMatches.forEach(product => {
           if (product.softCategory && Array.isArray(product.softCategory) && product.softCategory.length > 0) {
-            const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+            const productSoftCats = product.softCategory.filter(sc => typeof sc === 'string').map(sc => sc.toLowerCase().trim());
             const hasMatch = extractedSoftCatsArray.some(qsc =>
               productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
             );
@@ -8918,7 +8918,7 @@ function scoreAndSliceRecommendations(candidates, matchedProducts, hardCats, sof
       const productSoftCats = Array.isArray(product.softCategory)
         ? product.softCategory
         : (product.softCategory ? [product.softCategory] : []);
-      const overlapCount = productSoftCats.filter(sc =>
+      const overlapCount = productSoftCats.filter(sc => typeof sc === 'string').filter(sc =>
         softCatArray.some(mc => includesWholeWord(sc.toLowerCase(), mc.toLowerCase()) || includesWholeWord(mc.toLowerCase(), sc.toLowerCase()))
       ).length;
       score += Math.min(overlapCount * 15, 50);
@@ -11013,7 +11013,7 @@ app.post("/search", async (req, res) => {
           if (queryExtractedSoftCatsArray.length > 0) {
             highQualityTextMatches.forEach(product => {
               if (product.softCategory && Array.isArray(product.softCategory) && product.softCategory.length > 0) {
-                const productSoftCats = product.softCategory.map(sc => sc.toLowerCase().trim());
+                const productSoftCats = product.softCategory.filter(sc => typeof sc === 'string').map(sc => sc.toLowerCase().trim());
                 const hasMatch = queryExtractedSoftCatsArray.some(qsc =>
                   productSoftCats.some(psc => includesWholeWord(psc, qsc.toLowerCase().trim()) || includesWholeWord(qsc.toLowerCase().trim(), psc))
                 );
