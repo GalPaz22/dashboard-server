@@ -386,6 +386,60 @@ const colorSimilarityMap = {
   'קרם': ['קרם', 'שמנת', 'לבן', 'בז\'', 'שנהב', 'cream']
 };
 
+// Hebrew ↔ English geography translation map for soft category validation
+// Handles cases where store has "Italy" but LLM extracts "איטליה" or vice versa
+const geographyTranslationMap = {
+  // Countries - Hebrew → English
+  'איטליה': ['italy', 'italian'],
+  'צרפת': ['france', 'french'],
+  'ספרד': ['spain', 'spanish'],
+  'ארגנטינה': ['argentina', 'argentinian'],
+  'ארגנטינה': ['argentina'],
+  'צ\'ילה': ['chile', 'chilean'],
+  'צ\'ילי': ['chile', 'chilean'],
+  'ארה"ב': ['usa', 'united states', 'america', 'american', 'us'],
+  'אמריקה': ['usa', 'united states', 'america', 'american', 'us'],
+  'אוסטרליה': ['australia', 'australian'],
+  'גרמניה': ['germany', 'german'],
+  'פורטוגל': ['portugal', 'portuguese'],
+  'יוון': ['greece', 'greek'],
+  'אוסטריה': ['austria', 'austrian'],
+  'דרום אפריקה': ['south africa', 'south african'],
+  'ניו זילנד': ['new zealand'],
+  'ישראל': ['israel', 'israeli'],
+  'לבנון': ['lebanon', 'lebanese'],
+  'יפן': ['japan', 'japanese'],
+  'סקוטלנד': ['scotland', 'scottish'],
+  'אירלנד': ['ireland', 'irish'],
+  // Countries - English → Hebrew
+  'italy': ['איטליה', 'italian', 'italy'],
+  'france': ['צרפת', 'french', 'france'],
+  'spain': ['ספרד', 'spanish', 'spain'],
+  'argentina': ['ארגנטינה', 'argentina'],
+  'chile': ['צ\'ילה', 'צ\'ילי', 'chile'],
+  'usa': ['ארה"ב', 'אמריקה', 'american', 'usa'],
+  'australia': ['אוסטרליה', 'australia'],
+  'germany': ['גרמניה', 'germany'],
+  'portugal': ['פורטוגל', 'portugal'],
+  'greece': ['יוון', 'greece'],
+  'austria': ['אוסטריה', 'austria'],
+  'israel': ['ישראל', 'israel'],
+  'japan': ['יפן', 'japan'],
+  'scotland': ['סקוטלנד', 'scotland'],
+  // Adjective forms → same list (LLM sometimes extracts adjective)
+  'italian': ['איטליה', 'italy', 'italian'],
+  'french': ['צרפת', 'france', 'french'],
+  'spanish': ['ספרד', 'spain', 'spanish'],
+  'israeli': ['ישראל', 'israel', 'israeli'],
+  'japanese': ['יפן', 'japan', 'japanese'],
+  'scottish': ['סקוטלנד', 'scotland', 'scottish'],
+  'איטלקי': ['איטליה', 'italy', 'italian'],
+  'צרפתי': ['צרפת', 'france', 'french'],
+  'ספרדי': ['ספרד', 'spain', 'spanish'],
+  'ישראלי': ['ישראל', 'israel', 'israeli'],
+  'יפני': ['יפן', 'japan', 'japanese'],
+};
+
 /**
  * Get similar colors for flexible color matching
  * @param {string|string[]} colors - Color or array of colors
@@ -3958,7 +4012,27 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
               if (match) return match;
             }
 
-            // 5. Cross-language color matching via colorSimilarityMap
+            // 5. Cross-language geography matching for soft categories
+            // Handles "איטליה" ↔ "Italy", "איטלקי" ↔ "Italian" ↔ "Italy"
+            if (name === 'softCategory') {
+              const geoVariants = geographyTranslationMap[vLower];
+              if (geoVariants) {
+                for (const variant of geoVariants) {
+                  match = list.find(l => l.toLowerCase().trim() === variant.toLowerCase());
+                  if (match) return match;
+                }
+              }
+              // Reverse lookup: check if any list item maps to our value via geography map
+              for (const listItem of list) {
+                const listLower = listItem.toLowerCase().trim();
+                const variants = geographyTranslationMap[listLower];
+                if (variants && variants.some(v => v.toLowerCase() === vLower)) {
+                  return listItem;
+                }
+              }
+            }
+
+            // 6. Cross-language color matching via colorSimilarityMap
             if (name === 'color' && colorSimilarityMap[vLower]) {
               const similarColors = colorSimilarityMap[vLower];
               for (const similar of similarColors) {
@@ -11667,11 +11741,32 @@ app.post("/search", async (req, res) => {
 
         // WHEN SOFT FILTERS EXIST: Balance text match quality with soft category/color relevance
         if (hasSoftFilters) {
-          // 🎨 COLOR PRIORITY: When color filter is active, color-matching products rank highest
+          // 🎯 ABSOLUTE PRIORITY 0: Full-phrase name match beats everything (including color category matches)
+          // e.g. searching "שטיח סגול" → product named "שטיח סגול" ranks above products with "סגול" in category
+          const aIsFullPhraseMatch = aTextBonus >= 120000;
+          const bIsFullPhraseMatch = bTextBonus >= 120000;
+          if (aIsFullPhraseMatch !== bIsFullPhraseMatch) {
+            return aIsFullPhraseMatch ? -1 : 1;
+          }
+
           const hasColorFilter = softFilters.color && softFilters.color.length > 0;
+          const aColorMatch = a.colorMatch || false;
+          const bColorMatch = b.colorMatch || false;
+
+          // 🎯 PRIORITY 1: Soft category match + color match (both) ranks highest
           if (hasColorFilter) {
-            const aColorMatch = a.colorMatch || false;
-            const bColorMatch = b.colorMatch || false;
+            const aBothMatch = aHasSoftMatch && aColorMatch;
+            const bBothMatch = bHasSoftMatch && bColorMatch;
+            if (aBothMatch !== bBothMatch) return aBothMatch ? -1 : 1;
+          }
+
+          // 🎯 PRIORITY 2: Soft category match (most specific filter, e.g. "פרנזים")
+          if (aHasSoftMatch !== bHasSoftMatch) {
+            return aHasSoftMatch ? -1 : 1;
+          }
+
+          // 🎨 PRIORITY 3: Color match (when color filter is active)
+          if (hasColorFilter) {
             if (aColorMatch !== bColorMatch) {
               return aColorMatch ? -1 : 1;
             }
@@ -11684,7 +11779,7 @@ app.post("/search", async (req, res) => {
             }
           }
 
-          // 🎯 PRIORITY 0: VERY STRONG text matches come first (but below color matches when color filter active)
+          // 🎯 PRIORITY 4: VERY STRONG text matches
           const aIsVeryStrongText = aTextBonus >= 20000;
           const bIsVeryStrongText = bTextBonus >= 20000;
           if (aIsVeryStrongText !== bIsVeryStrongText) {
@@ -11692,11 +11787,6 @@ app.post("/search", async (req, res) => {
           }
           if (aIsVeryStrongText && bIsVeryStrongText) {
             return bTextBonus - aTextBonus;
-          }
-
-          // PRIORITY 1: Soft category matches come next
-          if (aHasSoftMatch !== bHasSoftMatch) {
-            return aHasSoftMatch ? -1 : 1;
           }
 
           // PRIORITY 2: Multi-category products rank higher
