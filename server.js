@@ -4828,7 +4828,17 @@ Products: [Glenmorangie, Glenfiddich, Jack Daniels]
 Return:
 1. isGoodMatch: boolean - true if results are good enough, false if need complex search
 2. validProductIndices: array of indices of relevant products (return ALL that match)
-3. reason: brief explanation (max 15 words)`;
+3. reason: brief explanation (max 15 words)
+4. needsReranking: boolean - whether LLM reranking is needed even if isGoodMatch=false.
+   Set needsReranking=FALSE when:
+   - You found semantically correct products that are clearly the best available answer,
+     even if the wording differs from the query (e.g. query "קציצות כרישה" found "לביבות כרישה" — both are leek-based dishes, this IS the answer)
+   - The found product is obviously the right match just expressed differently
+   Set needsReranking=TRUE when:
+   - Results are a mix of relevant and irrelevant products that need ordering
+   - The query has specific brand/style/attribute requirements that need careful AI matching
+   - You are genuinely unsure which products are correct
+   Default to needsReranking=true unless clearly confident the found products are correct.`;
 
       const userPrompt = `Search query: "${query}"
 
@@ -4862,9 +4872,13 @@ Are these results GOOD ENOUGH to return, or should we run a complex semantic sea
               reason: {
                 type: Type.STRING,
                 description: "Brief explanation (max 15 words)"
+              },
+              needsReranking: {
+                type: Type.BOOLEAN,
+                description: "True if LLM reranking is needed; false if found products are already the correct answer"
               }
             },
-            required: ["isGoodMatch", "validProductIndices", "reason"]
+            required: ["isGoodMatch", "validProductIndices", "reason", "needsReranking"]
           }
         }
       });
@@ -4890,12 +4904,14 @@ Are these results GOOD ENOUGH to return, or should we run a complex semantic sea
         .filter(idx => idx >= 0 && idx < products.length)
         .map(idx => products[idx]);
 
-      console.log(`[SIMPLE VALIDATOR] Query "${query}" → ${result.isGoodMatch ? '✅ GOOD' : '❌ NEED COMPLEX'} (${validProducts.length}/${products.length} products): ${result.reason}`);
-      
+      const needsReranking = result.needsReranking ?? true;
+      console.log(`[SIMPLE VALIDATOR] Query "${query}" → ${result.isGoodMatch ? '✅ GOOD' : '❌ NEED COMPLEX'} | rerank=${needsReranking ? '✅' : '⏭️ SKIP'} (${validProducts.length}/${products.length} products): ${result.reason}`);
+
       return {
         isGoodMatch: result.isGoodMatch,
         validProducts: validProducts,
-        reason: result.reason
+        reason: result.reason,
+        needsReranking
       };
     } catch (error) {
       console.error("[SIMPLE VALIDATOR] Error validating simple search results:", error);
@@ -4903,6 +4919,172 @@ Are these results GOOD ENOUGH to return, or should we run a complex semantic sea
       return { isGoodMatch: false, validProducts: [], reason: `Error: ${error.message}` };
     }
   }, 7200); // Cache for 2 hours
+}
+
+/**
+ * 🚀 UNIFIED SEARCH DECISION
+ * Single LLM call that:
+ *   1. Extracts structured filters from the query (replaces extractFiltersBrief)
+ *   2. Evaluates the Atlas Search results and decides the search path:
+ *      - "return_results": Found products satisfy the query (exact OR textual mismatch like קציצות/לביבות)
+ *      - "full_search":    Need deep search — complex query, no good results, alternatives
+ *   3. Returns ranked validProductIndices when returning results
+ *
+ * This is meant to replace the sequential chain:
+ *   extractFiltersBrief → validateSimpleSearchResults → isSimpleProductNameQuery
+ * with a single parallel-friendly call.
+ */
+async function unifiedSearchDecision(atlasResults, query, categories, types, softCategories, colors, context = 'e-commerce') {
+  const productIds = atlasResults.slice(0, 12).map(p => p._id.toString()).join(',');
+  const cacheKey = generateCacheKey('unified-search-v1', query, productIds);
+
+  return withCache(cacheKey, async () => {
+    try {
+      if (aiCircuitBreaker.shouldBypassAI()) {
+        return { decision: 'full_search', filters: {}, validProducts: [], reason: 'Circuit breaker open' };
+      }
+
+      const productData = atlasResults.slice(0, 12).map((p, i) => ({
+        index: i,
+        name: p.name || 'No name',
+        category: Array.isArray(p.category) ? p.category.join(', ') : (p.category || ''),
+        softCategory: (p.softCategory || []).slice(0, 4).join(', ')
+      }));
+
+      const categoriesStr = Array.isArray(categories)
+        ? categories.join(', ')
+        : (typeof categories === 'string' ? categories : '');
+      const typesStr = Array.isArray(types)
+        ? types.join(', ')
+        : (typeof types === 'string' ? types : '');
+      const softCatList = typeof softCategories === 'string'
+        ? softCategories.split(',').map(s => s.trim()).slice(0, 25)
+        : (Array.isArray(softCategories) ? softCategories.slice(0, 25) : []);
+      const colorsStr = typeof colors === 'string' ? colors : (Array.isArray(colors) ? colors.join(', ') : '');
+
+      const systemInstruction = `You are an expert product search AI for a ${context} store.
+
+Given a user search query and the top results already retrieved from our database, you must:
+1. Extract structured search filters from the query
+2. Evaluate the results and decide the search path
+
+═══ FILTER EXTRACTION ═══
+Extract ONLY if clearly mentioned in the query:
+- category: Must exactly match one from: [${categoriesStr || 'any'}]
+- type: Must exactly match one from: [${typesStr || 'any'}]
+- softCategory: Match from: [${softCatList.join(', ') || 'any'}]. Extract geographic adjectives, food pairings, styles, grape varieties, occasions.
+- color: Extract if mentioned. Available: [${colorsStr || 'any'}]
+- minPrice / maxPrice: Extract numeric price bounds if explicitly mentioned
+
+═══ SEARCH PATH DECISION ═══
+Choose "return_results" or "full_search":
+
+Return "return_results" when found products clearly satisfy the query, even with different wording:
+• Textual synonym: "קציצות כרישה" → found "לביבות כרישה" (both are leek-based dishes) ✓
+• Textual synonym: "שייקר" → found "כוס שייקר" (same concept) ✓
+• Singular/plural: "עגבנייה" → found "עגבניות" ✓
+• The correct product IS in the results, just named slightly differently
+
+Return "full_search" when:
+• No relevant products found in the results
+• Query is complex with multiple product attributes (e.g., "יין אדום איטלקי פירותי")
+• User seeks alternatives or a non-existing product ("משהו דומה ל...", "כמו X אבל...")
+• Long descriptive queries (4+ meaningful attribute words, not just a product name + qualifier)
+• Results are a mix of relevant and irrelevant items needing semantic ranking
+
+validProductIndices: If "return_results", list indices (0-based) of relevant products in ranked order (best first). Include ALL relevant ones. If "full_search", return [].`;
+
+      const userPrompt = `Search query: "${query}"
+
+Products from database:
+${productData.length > 0
+    ? productData.map(p => `${p.index}. ${p.name} (${p.category}${p.softCategory ? ' | ' + p.softCategory : ''})`).join('\n')
+    : '(no results found)'}
+
+Extract filters from the query and decide the search path.`;
+
+      const response = await genAI.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: [{ text: userPrompt }],
+        config: {
+          systemInstruction,
+          temperature: 0.1,
+          thinkingConfig: { thinkingBudget: 0 },
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              decision: {
+                type: Type.STRING,
+                description: '"return_results" or "full_search"'
+              },
+              filters: {
+                type: Type.OBJECT,
+                properties: {
+                  category: { type: Type.STRING, description: 'Exact matched category or empty string' },
+                  type: { type: Type.STRING, description: 'Exact matched type or empty string' },
+                  softCategory: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched soft categories' },
+                  color: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched colors' },
+                  minPrice: { type: Type.NUMBER, description: 'Min price bound or 0' },
+                  maxPrice: { type: Type.NUMBER, description: 'Max price bound or 0' }
+                },
+                required: ['category', 'type', 'softCategory', 'color']
+              },
+              validProductIndices: {
+                type: Type.ARRAY,
+                items: { type: Type.NUMBER },
+                description: 'Indices of relevant products in ranked order (for return_results only)'
+              },
+              reason: {
+                type: Type.STRING,
+                description: 'Brief reason for decision (max 15 words)'
+              }
+            },
+            required: ['decision', 'filters', 'validProductIndices', 'reason']
+          }
+        }
+      });
+
+      let text = response.text ? response.text.trim() : null;
+      if (!text && response.candidates?.[0]?.content?.parts?.[0]) {
+        text = response.candidates[0].content.parts[0].text;
+      }
+      if (!text) throw new Error('No response from unified search LLM');
+      text = text.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
+
+      const result = JSON.parse(text);
+      aiCircuitBreaker.recordSuccess();
+
+      // Normalize extracted filters (drop empty strings / zero prices)
+      const rawF = result.filters || {};
+      const filters = {
+        ...(rawF.category ? { category: rawF.category } : {}),
+        ...(rawF.type ? { type: rawF.type } : {}),
+        ...(rawF.softCategory?.length ? { softCategory: rawF.softCategory } : {}),
+        ...(rawF.color?.length ? { color: rawF.color } : {}),
+        ...(rawF.minPrice > 0 ? { minPrice: rawF.minPrice } : {}),
+        ...(rawF.maxPrice > 0 ? { maxPrice: rawF.maxPrice } : {})
+      };
+
+      const decision = result.decision === 'return_results' ? 'return_results' : 'full_search';
+
+      // Map indices → products (for return_results path)
+      const validProducts = decision === 'return_results'
+        ? (result.validProductIndices || [])
+            .filter(idx => idx >= 0 && idx < atlasResults.length)
+            .map(idx => atlasResults[idx])
+        : [];
+
+      console.log(`[UNIFIED] "${query}" → ${decision === 'return_results' ? '⚡ RETURN' : '🔍 FULL'} | ${validProducts.length} products | filters: ${JSON.stringify(filters)} | ${result.reason}`);
+
+      return { decision, filters, validProducts, reason: result.reason };
+
+    } catch (error) {
+      console.error('[UNIFIED SEARCH] Error:', error.message);
+      aiCircuitBreaker.recordFailure();
+      return { decision: 'full_search', filters: {}, validProducts: [], reason: `Error: ${error.message}` };
+    }
+  }, 1800); // 30-min cache (keyed on query + product IDs so it's result-aware)
 }
 
 /**
@@ -8745,29 +8927,75 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
             index: "default",
             compound: {
               // Every word must appear in the name (AND logic)
-              must: queryWords.map(word => ({
-                compound: {
-                  should: [
+              // Also search for Hebrew-stemmed variants (e.g. פלפלים → פלפל)
+              must: queryWords.map(word => {
+                const stem = stemHebrew(word);
+                const shouldClauses = [
+                  {
+                    autocomplete: {
+                      query: word,
+                      path: "name",
+                      tokenOrder: "any",
+                      score: { boost: { value: 10 } }
+                    }
+                  },
+                  {
+                    text: {
+                      query: word,
+                      path: "name",
+                      fuzzy: { maxEdits: 1, prefixLength: 2 },
+                      score: { boost: { value: 8 } }
+                    }
+                  }
+                ];
+                // Add stemmed form as fallback (handles Hebrew plural→singular)
+                if (stem && stem !== word) {
+                  shouldClauses.push(
                     {
                       autocomplete: {
-                        query: word,
+                        query: stem,
                         path: "name",
                         tokenOrder: "any",
-                        score: { boost: { value: 10 } }
+                        score: { boost: { value: 9 } }
                       }
                     },
                     {
                       text: {
-                        query: word,
+                        query: stem,
                         path: "name",
                         fuzzy: { maxEdits: 1, prefixLength: 2 },
-                        score: { boost: { value: 8 } }
+                        score: { boost: { value: 7 } }
                       }
                     }
-                  ],
-                  minimumShouldMatch: 1
+                  );
                 }
-              })),
+                // Construct state (סמיכות): word ending in ת is often the construct form
+                // of a feminine noun ending in ה. e.g., ריבת→ריבה, עוגת→עוגה, גבינת→גבינה
+                if (word.endsWith('ת') && word.length > 2) {
+                  const constructBase = word.slice(0, -1) + 'ה';
+                  if (constructBase !== word && constructBase !== stem) {
+                    shouldClauses.push(
+                      {
+                        autocomplete: {
+                          query: constructBase,
+                          path: "name",
+                          tokenOrder: "any",
+                          score: { boost: { value: 9 } }
+                        }
+                      },
+                      {
+                        text: {
+                          query: constructBase,
+                          path: "name",
+                          fuzzy: { maxEdits: 1, prefixLength: 2 },
+                          score: { boost: { value: 7 } }
+                        }
+                      }
+                    );
+                  }
+                }
+                return { compound: { should: shouldClauses, minimumShouldMatch: 1 } };
+              }),
               // Optional: boost if words also match category or softCategory
               should: [
                 ...queryWords.map(word => ({
@@ -9003,9 +9231,9 @@ app.post("/fast-search", async (req, res) => {
     }
 
     // ============================================================
-    // STEP 3: LLM Calls — only when needed (low confidence)
-    // ⚡ PARALLEL: extractFiltersBrief + validateSimpleSearchResults run simultaneously,
-    //    cutting worst-case sequential LLM latency roughly in half.
+    // STEP 3: UNIFIED LLM DECISION — single call replacing:
+    //   extractFiltersBrief + validateSimpleSearchResults + classification
+    // Sees query + Atlas results; extracts filters AND decides path in one shot.
     // ============================================================
     let llmExtractedFilters = null;
     let llmExtractedCategories = [];
@@ -9014,71 +9242,50 @@ app.post("/fast-search", async (req, res) => {
 
     const needsLLM = !isPerfectFilterMatch && simpleResults.length > 0 && !relevanceScore?.isHighConfidence;
 
-    if (needsLLM && !hasTextualFilters) {
-      // ⚡ Both calls are independent — fire them in parallel
-      console.log(`[${requestId}] 🤖 Running extractFilters + validate in parallel (score: ${relevanceScore?.score ?? 'N/A'})`);
-      const parallelStart = Date.now();
+    if (needsLLM) {
+      const unifiedStart = Date.now();
+      console.log(`[${requestId}] 🤖 Running unified search decision (score: ${relevanceScore?.score ?? 'N/A'})`);
 
-      const [filterResult, validationResult] = await Promise.all([
-        (async () => {
-          try {
-            return await extractFiltersBrief(
-              query,
-              req.store.categories || [],
-              req.store.types || [],
-              req.store.softCategories || '',
-              'wine shop',
-              req.store.colors || ''
-            );
-          } catch (err) {
-            console.error(`[${requestId}] ❌ LLM category extraction failed:`, err.message);
-            return null;
-          }
-        })(),
-        validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop')
-      ]);
+      const unified = await unifiedSearchDecision(
+        simpleResults,
+        query,
+        req.store.categories || [],
+        req.store.types || [],
+        req.store.softCategories || '',
+        req.store.colors || '',
+        'wine shop'
+      );
 
-      console.log(`[${requestId}] ⚡ Parallel LLM calls done in ${Date.now() - parallelStart}ms`);
-      preloadedValidation = validationResult;
+      console.log(`[${requestId}] ⚡ Unified LLM done in ${Date.now() - unifiedStart}ms`);
 
-      if (filterResult && filterResult.category) {
-        const categories = Array.isArray(filterResult.category)
-          ? filterResult.category
-          : [filterResult.category];
-        llmExtractedCategories = categories.filter(Boolean);
+      // Map unified result → legacy variables so Phase 4 logic is unchanged
+      preloadedValidation = {
+        isGoodMatch: unified.decision === 'return_results',
+        validProducts: unified.validProducts,
+        reason: unified.reason,
+        needsReranking: unified.decision !== 'return_results'
+      };
 
-        if (llmExtractedCategories.length > 0) {
-          llmExtractedFilters = filterResult;
-          console.log(`[${requestId}] ✅ LLM extracted categories: ${llmExtractedCategories.join(', ')}`);
+      // Apply category filter from extracted filters
+      if (unified.filters.category) {
+        llmExtractedCategories = [unified.filters.category];
+        llmExtractedFilters = unified.filters;
 
-          const categoryFilteredResults = simpleResults.filter(product => {
-            const rawCat = product.category;
-            const productCategory = Array.isArray(rawCat)
-              ? rawCat.join(' ').toLowerCase()
-              : (rawCat ? String(rawCat).toLowerCase() : '');
-            return llmExtractedCategories.some(cat =>
-              productCategory.includes(cat.toLowerCase()) || cat.toLowerCase().includes(productCategory)
-            );
-          });
+        const categoryFilteredResults = simpleResults.filter(product => {
+          const rawCat = product.category;
+          const productCategory = Array.isArray(rawCat)
+            ? rawCat.join(' ').toLowerCase()
+            : (rawCat ? String(rawCat).toLowerCase() : '');
+          return llmExtractedCategories.some(cat =>
+            productCategory.includes(cat.toLowerCase()) || cat.toLowerCase().includes(productCategory)
+          );
+        });
 
-          if (categoryFilteredResults.length > 0) {
-            console.log(`[${requestId}] 🎯 LLM category filter: ${simpleResults.length} → ${categoryFilteredResults.length} products`);
-            activeResults = categoryFilteredResults;
-          } else {
-            console.log(`[${requestId}] ⚠️ LLM categories filtered out all results - keeping original results`);
-          }
-        } else {
-          console.log(`[${requestId}] ℹ️ LLM found no categories`);
+        if (categoryFilteredResults.length > 0) {
+          console.log(`[${requestId}] 🎯 Unified category filter: ${simpleResults.length} → ${categoryFilteredResults.length} products`);
+          activeResults = categoryFilteredResults;
         }
-      } else {
-        console.log(`[${requestId}] ℹ️ LLM extraction returned no filters`);
       }
-    } else if (needsLLM && hasTextualFilters) {
-      // Has textual filters but low confidence — only validate (no category extraction needed)
-      console.log(`[${requestId}] 🤔 LOW CONFIDENCE (score: ${relevanceScore?.score}) with textual filters - running validation...`);
-      const validationStart = Date.now();
-      preloadedValidation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
-      console.log(`[${requestId}] ⏱️ Validation done in ${Date.now() - validationStart}ms`);
     }
 
     // ============================================================
@@ -9968,6 +10175,13 @@ app.post("/search", async (req, res) => {
   // ============================================================
   // Hoist filterCheck so it's accessible throughout the search handler
   let filterCheck = null;
+  // Track validation's reranking recommendation across Phase 0 → Phase 1.
+  // null = validation not run; false = validation says "skip reranking"; true = reranking needed.
+  let validationNeedsReranking = null;
+  // Unified LLM decision from Phase 0 — reused in Phase 1 to skip redundant LLM calls
+  let unifiedDecision = null;       // { decision, filters, validProducts, reason }
+  let precomputedEmbedding = null;  // started in parallel with unified LLM
+  let precomputedTranslation = null;
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
@@ -10002,10 +10216,36 @@ app.post("/search", async (req, res) => {
           searchMode = 'simple-high-confidence';
           console.log(`[${requestId}] ⚡ [SEARCH] HIGH CONFIDENCE (score: ${quickScore.score}) - skipping LLM validation`);
         } else {
-          const validation = await validateSimpleSearchResults(simpleResults.slice(0, 10), query, 'wine shop');
-          if (validation.isGoodMatch && validation.validProducts.length > 0) {
-            approvedProducts = validation.validProducts.slice(0, searchLimit);
-            searchMode = 'simple-validated';
+          // ⚡ UNIFIED LLM: single call replacing validate + classify + extract-filters.
+          // Run embedding + translation in parallel so they're ready if full_search is decided.
+          const unifiedStart = Date.now();
+          const [unified, earlyEmbed, earlyTranslate] = await Promise.all([
+            unifiedSearchDecision(
+              simpleResults,
+              query,
+              categories,
+              types,
+              finalSoftCategories,
+              req.store?.colors || '',
+              'wine shop'
+            ),
+            withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)),
+            translateQuery(query, context).catch(() => null)
+          ]);
+          console.log(`[${requestId}] ⚡ Unified + embedding + translation done in ${Date.now() - unifiedStart}ms`);
+
+          // Stash pre-computed results for Phase 1 (avoids re-running if full_search)
+          unifiedDecision = unified;
+          precomputedEmbedding = earlyEmbed;
+          precomputedTranslation = earlyTranslate;
+
+          if (unified.decision === 'return_results' && unified.validProducts.length > 0) {
+            approvedProducts = unified.validProducts.slice(0, searchLimit);
+            searchMode = 'simple-unified';
+          } else {
+            // full_search path — carry forward for Phase 1
+            validationNeedsReranking = true;
+            console.log(`[${requestId}] 🔍 [SEARCH] Unified → full_search: ${unified.reason}`);
           }
         }
       }
@@ -10323,6 +10563,19 @@ app.post("/search", async (req, res) => {
           }
         } : allProducts);
       }
+    } else {
+      // Atlas Search found 0 results — still run unified LLM for filter extraction
+      // in parallel with embedding + translation. This replaces the 2 old Phase 1 LLM
+      // calls (isSimpleProductNameQuery + extractFiltersFromQueryEnhanced) with one shot.
+      console.log(`[${requestId}] 📭 No Atlas results — running unified LLM + embedding in parallel`);
+      const [unified, earlyEmbed, earlyTranslate] = await Promise.all([
+        unifiedSearchDecision([], query, categories, types, finalSoftCategories, req.store?.colors || '', 'wine shop'),
+        withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)),
+        translateQuery(query, context).catch(() => null)
+      ]);
+      unifiedDecision = unified;
+      precomputedEmbedding = earlyEmbed;
+      precomputedTranslation = earlyTranslate;
     }
     console.log(`[${requestId}] 🔍 [SEARCH] Simple search was not enough, falling back to full search logic`);
   } catch (err) {
@@ -10525,36 +10778,51 @@ app.post("/search", async (req, res) => {
 
     // ============================================================
     // 🚀 PHASE 1: FAST PARALLEL ANALYSIS
-    // We run LLM classification, filter extraction, and Embedding IN PARALLEL.
-    // This saves ~1.5 - 2 seconds of latency.
+    // If Phase 0 already ran unifiedSearchDecision (and it decided full_search),
+    // skip the 2 classification/filter LLM calls — use pre-computed values instead.
+    // Only fall back to the full parallel block when there were no Atlas results.
     // ============================================================
     const analysisStartTime = Date.now();
-    
-    const [analysisResult, queryEmbedding, translatedQueryCandidate] = await Promise.all([
-      // 1. Single LLM call for all logic (Classification + Filters)
-      withCache(generateCacheKey('analysis-v2', query, context), async () => {
-        // Run classification and filter extraction in parallel
-        const [isSimple, filters] = await Promise.all([
-          isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName, hasHighTextMatch, preliminaryTextSearchResults),
-          isDigitsOnlyQuery(query) ? {} : extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context, null, req.store?.colors || '')
-        ]);
-        return { isSimple, filters };
-      }),
-      // 2. Parallel Embedding generation
-      withCache(generateCacheKey('embedding', query), async () => {
-        return await getQueryEmbedding(query);
-      }),
-      // 3. ⚡ Parallel Translation — runs at the same time as analysis+embedding.
-      //    translateQuery() is already internally cached (7-day TTL) and short-circuits
-      //    immediately for non-Hebrew queries, so this adds no cost for simple/English queries.
-      translateQuery(query, context).catch(() => null)
-    ]);
+
+    let analysisResult, queryEmbedding, translatedQueryCandidate;
+
+    if (unifiedDecision) {
+      // ⚡ FAST PATH: unified LLM already extracted filters + decided path in Phase 0.
+      // Embedding and translation were already started in parallel with it.
+      queryEmbedding = precomputedEmbedding;
+      translatedQueryCandidate = precomputedTranslation;
+      analysisResult = {
+        // full_search decision → treat as complex so we run vector search + reranking
+        isSimple: false,
+        filters: unifiedDecision.filters
+      };
+      console.log(`[${requestId}] ⚡ Phase 1 skipped LLM calls — using unified decision (filters: ${JSON.stringify(unifiedDecision.filters)})`);
+    } else {
+      // STANDARD PATH: no Atlas results in Phase 0 → run full parallel analysis
+      [analysisResult, queryEmbedding, translatedQueryCandidate] = await Promise.all([
+        // 1. Single LLM call for all logic (Classification + Filters)
+        withCache(generateCacheKey('analysis-v2', query, context), async () => {
+          // Run classification and filter extraction in parallel
+          const [isSimple, filters] = await Promise.all([
+            isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName, hasHighTextMatch, preliminaryTextSearchResults),
+            isDigitsOnlyQuery(query) ? {} : extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context, null, req.store?.colors || '')
+          ]);
+          return { isSimple, filters };
+        }),
+        // 2. Parallel Embedding generation
+        withCache(generateCacheKey('embedding', query), async () => {
+          return await getQueryEmbedding(query);
+        }),
+        // 3. ⚡ Parallel Translation
+        translateQuery(query, context).catch(() => null)
+      ]);
+    }
 
     const isSimpleResult = analysisResult.isSimple;
     const enhancedFilters = analysisResult.filters;
     const isComplexQueryResult = !isSimpleResult;
 
-    console.log(`[${requestId}] 🚀 Parallel analysis completed in ${Date.now() - analysisStartTime}ms (isComplex=${isComplexQueryResult})`);
+    console.log(`[${requestId}] 🚀 Phase 1 analysis done in ${Date.now() - analysisStartTime}ms (isComplex=${isComplexQueryResult}, unified=${!!unifiedDecision})`);
 
     // 🧠 SMART CATEGORY LEARNING: Fire-and-forget learning from AI filter extraction
     // Combine unmatched words from Phase 0 with AI-rejected soft categories
@@ -11684,7 +11952,8 @@ app.post("/search", async (req, res) => {
       // LLM reordering only for complex queries (not just any query with soft filters)
       // Skip LLM reordering if circuit breaker is open OR we're in fast-search fallback mode
       // (isFastSearchMode = true means the request came from /fast-search, which already needs speed)
-      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI() && !isFastSearchMode;
+      // Also skip reranking if Phase 0 validation already confirmed the results are correct
+      const shouldUseLLMReranking = isComplexQueryResult && !shouldUseFilterOnly && !aiCircuitBreaker.shouldBypassAI() && !isFastSearchMode && validationNeedsReranking !== false;
     
       if (shouldUseLLMReranking) {
         console.log(`[${requestId}] Applying LLM reordering`);
