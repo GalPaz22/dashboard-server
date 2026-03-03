@@ -9052,7 +9052,10 @@ app.post("/fast-search", async (req, res) => {
           console.log(`[${requestId}] ✅ LLM extracted categories: ${llmExtractedCategories.join(', ')}`);
 
           const categoryFilteredResults = simpleResults.filter(product => {
-            const productCategory = product.category ? product.category.toLowerCase() : '';
+            const rawCat = product.category;
+            const productCategory = Array.isArray(rawCat)
+              ? rawCat.join(' ').toLowerCase()
+              : (rawCat ? String(rawCat).toLowerCase() : '');
             return llmExtractedCategories.some(cat =>
               productCategory.includes(cat.toLowerCase()) || cat.toLowerCase().includes(productCategory)
             );
