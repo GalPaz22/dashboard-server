@@ -8863,14 +8863,18 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
         }
       ];
 
-      // Hard categories: each must match category OR type
+      // Hard categories: each must EXACTLY match category OR type.
+      // Use `phrase` operator (not `text`) so "יין אדום" doesn't match "יין לבן".
+      // The `text` operator tokenises and uses OR semantics — "יין אדום" would match
+      // any document containing "יין" OR "אדום", including white-wine products.
+      // `phrase` requires all tokens in order, so only exact phrases pass.
       if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0) {
         filterCheck.matchedHardCategories.forEach(cat => {
           mustClauses.push({
             compound: {
               should: [
-                { text: { query: cat, path: "category" } },
-                { text: { query: cat, path: "type" } }
+                { phrase: { query: cat, path: "category" } },
+                { phrase: { query: cat, path: "type" } }
               ],
               minimumShouldMatch: 1
             }
@@ -8917,6 +8921,30 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
 
       results = await collection.aggregate(perfectMatchPipeline).toArray();
       console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
+
+      // 🛡️ Hard category safety net: even with `phrase`, Atlas Search can occasionally
+      // surface products whose category only partially overlaps (e.g. multi-value arrays).
+      // JS post-filter guarantees hard categories are honoured as deal-breakers.
+      if (results.length > 0 && filterCheck.matchedHardCategories?.length > 0) {
+        const before = results.length;
+        results = results.filter(product => {
+          const cats = Array.isArray(product.category)
+            ? product.category : (product.category ? [product.category] : []);
+          const types = Array.isArray(product.type)
+            ? product.type : (product.type ? [product.type] : []);
+          const all = [...cats, ...types].map(c => c.toLowerCase().trim());
+          return filterCheck.matchedHardCategories.some(hc => {
+            const h = hc.toLowerCase().trim();
+            // Allow exact match OR the product category contains the hard category as substring
+            // e.g. "יין אדום קברנה" passes for hard "יין אדום", but "יין לבן" does NOT
+            return all.some(c => c === h || c.includes(h));
+          });
+        });
+        if (before !== results.length) {
+          console.log(`[SIMPLE-SEARCH] 🛡️ Hard cat JS filter: ${before} → ${results.length} (dropped non-matching)`);
+        }
+      }
+
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     } else {
       // 🎯 REGULAR SEARCH: Atlas Search autocomplete — no regex, no multiplanner timeout
