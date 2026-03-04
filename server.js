@@ -5455,7 +5455,7 @@ async function reorderResultsWithGPT(
   explain = false, // ⚡ OPTIMIZATION: Disabled by default for faster reranking
   context,
   softFilters = null,
-  maxResults = 15, // ⚡ OPTIMIZATION: Reduced from 25 to 15 for ~40% speed improvement
+  maxResults = 20, // Max products sent to LLM for reranking
   useFastLLM = true, // 🎯 DEFAULT TO TRUE: Always use the fast model for reranking
   userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
   isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
@@ -8031,7 +8031,11 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
         try {
           // Get products matching the extracted filters
-          const softFiltersObj = extractedFilters.softCategory ? { softCategory: extractedFilters.softCategory } : null;
+          // 🎯 Include color in soft filters for strict filtering (if present)
+          const softFiltersObj = {
+            softCategory: extractedFilters.softCategory ? (Array.isArray(extractedFilters.softCategory) ? extractedFilters.softCategory : [extractedFilters.softCategory]) : null,
+            color: extractedFilters.color ? (Array.isArray(extractedFilters.color) ? extractedFilters.color : [extractedFilters.color]) : null
+          };
           const filterPipeline = buildOptimizedFilterOnlyPipeline(extractedFilters, softFiltersObj, false, 50); // Get up to 50 candidates
           const filteredProducts = await collection.aggregate(filterPipeline).toArray();
 
@@ -8129,7 +8133,8 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           return res.status(500).json({ error: "Error generating query embedding for vector fallback" });
         }
 
-        const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, extractedFilters, searchLimit, false);
+        // Pass extractedFilters as softFilters (6th arg) to enable color/softCategory boosting
+        const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, extractedFilters, searchLimit, false, [], extractedFilters);
         const vectorResults = await collection.aggregate(vectorPipeline).toArray();
 
         const response = vectorResults.slice(0, searchLimit).map((product, index) => ({
@@ -8486,7 +8491,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
         cleanedText,
         query,
         categoryFilteredHardFilters,
-        softCategoriesArray,
+        softFilters, // 🎯 FIX: Pass softFilters object (with softCategory/color), NOT array of strings
         queryEmbedding,
         10, // OPTIMIZATION: Fixed at 10 results for faster tier 2 queries (down from searchLimit * 2)
         searchLimit,
@@ -10209,7 +10214,8 @@ app.post("/search", async (req, res) => {
   console.log(`[${requestId}] Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
 
   // ⚡ USE ONLY API KEY CONFIG: No default fallback, only use what the store provides
-  const finalSoftCategories = softCategories || "";
+  const rawSoftCategories = softCategories || [];
+  const finalSoftCategories = Array.isArray(rawSoftCategories) ? rawSoftCategories : (typeof rawSoftCategories === 'string' ? rawSoftCategories.split(',').map(s => s.trim()).filter(Boolean) : []);
 
   // 🔍 DEBUG: Log soft categories to verify they're loaded
   if (finalSoftCategories) {
@@ -10946,28 +10952,11 @@ app.post("/search", async (req, res) => {
            console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH enableSimpleCategoryExtraction: Keeping all filters (category="${originalCategory}", softCategory="${enhancedFilters.softCategory}")`);
            // Do NOT clear filters - user explicitly wants category extraction on simple queries
         } else {
-            // Check if the query explicitly contains a known hard category word
-            // e.g., "ליקר שוקולד" → "ליקר" is a known hard category → KEEP IT as a deal breaker
-            // But "קמפרי" → LLM might guess "ג׳ין" → NOT in query text → CLEAR IT
-            const queryWordsLower = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
-            const storeCategories = (categories || []).filter(c => typeof c === 'string').map(c => c.toLowerCase().trim());
-            const queryContainsHardCategory = originalCategory && storeCategories.some(storeCat =>
-              queryWordsLower.some(qw => qw === storeCat || storeCat === qw ||
-                (qw.length >= 3 && includesWholeWord(storeCat, qw)) || (storeCat.length >= 3 && includesWholeWord(qw, storeCat)))
-            );
-
-            if (queryContainsHardCategory) {
-              // Hard category word is EXPLICITLY in the query → keep it as a deal breaker
-              // "ליקר שוקולד" → "ליקר" is in query AND is a known category → NEVER return "יין שוקולד"
-              console.log(`[${requestId}] 🛡️ SIMPLE QUERY: Category "${originalCategory}" KEPT as deal breaker - query explicitly contains a hard category word`);
-              // Do NOT clear category
-            } else {
-              // Clear category for simple text-based searches - rely on text matching
-              // This prevents AI mis-classification (e.g., "קמפרי" → "ג׳ין")
-              if (originalCategory) {
-                console.log(`[${requestId}] ✂️ SIMPLE QUERY: Category "${originalCategory}" extracted but CLEARED - query doesn't contain a known hard category word`);
-                enhancedFilters.category = undefined;
-              }
+            // Hard category extracted by AI is a DEAL BREAKER. Keep it.
+            // We removed the logic that clears category if not in query words ("Campari" -> "Gin")
+            // because users want strict filtering ("Red Chair" -> only Chairs) even for simple queries.
+            if (originalCategory) {
+               console.log(`[${requestId}] 🛡️ SIMPLE QUERY: Category "${originalCategory}" KEPT as deal breaker (enforcing strict category filtering)`);
             }
 
             // Always clear price filters for simple queries (prices need explicit intent)
@@ -12120,8 +12109,8 @@ app.post("/search", async (req, res) => {
             console.log(`[${requestId}] ℹ️ No hard filters extracted - sending all ${combinedResults.length} products to LLM`);
           }
 
-          // Send up to 25 products for LLM ranking - flash-lite handles this fast with truncated descriptions
-          const llmLimit = 25;
+          // Send up to 20 products for LLM ranking
+          const llmLimit = 20;
           console.log(`[${requestId}] Sending ${resultsForRerank.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
 
           reorderedData = await reorderFn(resultsForRerank, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile);
@@ -12862,42 +12851,48 @@ app.post("/search", async (req, res) => {
     // 🔄 ZERO-RESULT FALLBACK: If all search strategies returned 0 results,
     // retry with no filters (plain text search) so the user sees something relevant
     if (finalResults.length === 0 && query && query.trim().length > 0) {
-      console.log(`[${requestId}] ⚠️ 0 results after all search strategies — falling back to no-filter text search`);
-      try {
-        const noFilterPipeline = buildStandardSearchPipeline(
-          query,
-          query,
-          {}, // No hard filters
-          searchLimit * 2,
-          false,
-          false,
-          [],
-          {} // No soft filters
-        );
-        const noFilterResults = await collection.aggregate(noFilterPipeline).toArray();
-        if (noFilterResults.length > 0) {
-          finalResults = noFilterResults.map(product => ({
-            _id: product._id.toString(),
-            id: product.id,
-            name: product.name,
-            description: product.description,
-            price: product.price,
-            image: product.image,
-            url: product.url,
-            type: product.type,
-            category: product.category,
-            softCategory: product.softCategory,
-            specialSales: product.specialSales,
-            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-            ItemID: product.ItemID,
-            highlight: false
-          }));
-          console.log(`[${requestId}] ✅ No-filter fallback found ${finalResults.length} results`);
-        } else {
-          console.log(`[${requestId}] ℹ️ No-filter fallback also returned 0 results`);
+      // 🛡️ STRICT MODE: If hard category filters were applied, respect the 0 results.
+      // Don't fall back to unfiltered search, as it violates "hard category is deal breaking".
+      if (hardFilters && hardFilters.category && hardFilters.category.length > 0) {
+        console.log(`[${requestId}] 🛡️ STRICT: 0 results found for hard category "${hardFilters.category}". Returning 0 results (skipping fallback).`);
+      } else {
+        console.log(`[${requestId}] ⚠️ 0 results after all search strategies — falling back to no-filter text search`);
+        try {
+          const noFilterPipeline = buildStandardSearchPipeline(
+            query,
+            query,
+            {}, // No hard filters
+            searchLimit * 2,
+            false,
+            false,
+            [],
+            {} // No soft filters
+          );
+          const noFilterResults = await collection.aggregate(noFilterPipeline).toArray();
+          if (noFilterResults.length > 0) {
+            finalResults = noFilterResults.map(product => ({
+              _id: product._id.toString(),
+              id: product.id,
+              name: product.name,
+              description: product.description,
+              price: product.price,
+              image: product.image,
+              url: product.url,
+              type: product.type,
+              category: product.category,
+              softCategory: product.softCategory,
+              specialSales: product.specialSales,
+              onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+              ItemID: product.ItemID,
+              highlight: false
+            }));
+            console.log(`[${requestId}] ✅ No-filter fallback found ${finalResults.length} results`);
+          } else {
+            console.log(`[${requestId}] ℹ️ No-filter fallback also returned 0 results`);
+          }
+        } catch (fallbackErr) {
+          console.warn(`[${requestId}] ⚠️ No-filter fallback failed:`, fallbackErr.message);
         }
-      } catch (fallbackErr) {
-        console.warn(`[${requestId}] ⚠️ No-filter fallback failed:`, fallbackErr.message);
       }
     }
 
