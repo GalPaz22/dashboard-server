@@ -5003,7 +5003,7 @@ ${productData.length > 0
 
 Extract filters from the query and decide the search path.`;
 
-      const response = await genAI.models.generateContent({
+      const unifiedLlmPromise = genAI.models.generateContent({
         model: 'gemini-2.5-flash',
         contents: [{ text: userPrompt }],
         config: {
@@ -5044,6 +5044,10 @@ Extract filters from the query and decide the search path.`;
           }
         }
       });
+      const unifiedTimeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Unified search LLM timeout after 8s')), 8000)
+      );
+      const response = await Promise.race([unifiedLlmPromise, unifiedTimeoutPromise]);
 
       let text = response.text ? response.text.trim() : null;
       if (!text && response.candidates?.[0]?.content?.parts?.[0]) {
@@ -5548,11 +5552,11 @@ ${JSON.stringify(productData, null, 2)}`;
     // Use fast model if requested (for /fast-search)
     // 🎯 We already declared modelName above to be gemini-2.5-flash-lite for speed
 
-    const response = await genAI.models.generateContent({
+    const llmPromise = genAI.models.generateContent({
       model: modelName,
       contents: userContent,
-      config: { 
-        systemInstruction, 
+      config: {
+        systemInstruction,
         thinkingConfig: {
           thinkingBudget: 0,
         },
@@ -5561,6 +5565,10 @@ ${JSON.stringify(productData, null, 2)}`;
         responseSchema: responseSchema,
       },
     });
+    const rerankerTimeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Reranker LLM timeout after 8s')), 8000)
+    );
+    const response = await Promise.race([llmPromise, rerankerTimeoutPromise]);
 
     let text = response.text ? response.text.trim() : null;
     
@@ -7716,8 +7724,8 @@ app.get("/autocomplete", async (req, res) => {
     const pipeline2 = buildAutocompletePipeline(query, "default2", "query", false); // queries don't have softCategory
 
     // 🚀 NEW: Integrated Filter Match & Fuzzy Regex for Autocomplete
-    const { results: regexResults, isPerfectFilterMatch, filterCheck } = 
-      await performSimpleSearch(db, collection1, query, req.store, 5);
+    const { results: regexResults, isPerfectFilterMatch, filterCheck } =
+      await performSimpleSearch(db, collection1, query, req.store, 5, true);
 
     // 1. Create Filter Match Suggestion (Highest Priority)
     const filterSuggestions = [];
@@ -8817,12 +8825,12 @@ function calculateRelevanceScore(products, query, filterCheck) {
  * 🎯 CORE SIMPLE SEARCH LOGIC
  * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
  */
-async function performSimpleSearch(db, collection, query, store, limit = 10) {
+async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
 
   // 🎯 MEMORY PROTECTION: Limit query complexity to prevent OOM
   if (queryWords.length > 8) {
-    console.warn(`[SIMPLE-SEARCH] Query too complex (${queryWords.length} words), limiting to 8 words for memory safety`);
+    if (!silent) console.warn(`[SIMPLE-SEARCH] Query too complex (${queryWords.length} words), limiting to 8 words for memory safety`);
     queryWords.splice(8);
   }
   
@@ -8844,7 +8852,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
     
     // 🎯 PERFECT FILTER MATCH: Atlas Search by extracted categories
     if (isPerfectFilterMatch) {
-      console.log(`[SIMPLE-SEARCH] Perfect match - searching by categories:`, {
+      if (!silent) console.log(`[SIMPLE-SEARCH] Perfect match - searching by categories:`, {
         hardCategories: filterCheck.matchedHardCategories,
         softCategories: filterCheck.matchedSoftCategories,
         colors: filterCheck.matchedColors
@@ -8920,7 +8928,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       ];
 
       results = await collection.aggregate(perfectMatchPipeline).toArray();
-      console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
+      if (!silent) console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
 
       // 🛡️ Hard category safety net: even with `phrase`, Atlas Search can occasionally
       // surface products whose category only partially overlaps (e.g. multi-value arrays).
@@ -8941,7 +8949,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
           });
         });
         if (before !== results.length) {
-          console.log(`[SIMPLE-SEARCH] 🛡️ Hard cat JS filter: ${before} → ${results.length} (dropped non-matching)`);
+          if (!silent) console.log(`[SIMPLE-SEARCH] 🛡️ Hard cat JS filter: ${before} → ${results.length} (dropped non-matching)`);
         }
       }
 
@@ -9062,7 +9070,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10) {
       ];
 
       results = await collection.aggregate(atlasPipeline).toArray();
-      console.log(`[SIMPLE-SEARCH] Atlas Search: ${results.length} results for "${query}"`);
+      if (!silent) console.log(`[SIMPLE-SEARCH] Atlas Search: ${results.length} results for "${query}"`);
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     }
   }
