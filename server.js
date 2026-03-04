@@ -6022,36 +6022,7 @@ async function executeExplicitSoftCategorySearch(
     });
 
     highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
-    
-    // 🎯 NEW: LLM VALIDATION FOR WEAK TEXT MATCHES
-    // If no high-quality matches (>= 1000), but we have some weak text results, validate with LLM
-    if (highQualityTextMatches.length === 0 && textResultsWithBonuses.length > 0) {
-      console.log(`[SOFT SEARCH] Validating ${textResultsWithBonuses.length} weak matches with LLM...`);
-      
-      const weakMatches = textResultsWithBonuses
-        .sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0))
-        .slice(0, 10);
-      
-      const validationStartTime = Date.now();
-      const validation = await validateWeakTextMatchesWithLLM(weakMatches, query, 'wine shop');
-      const validationTime = Date.now() - validationStartTime;
-      
-      if (validation.hasValidMatch && validation.validProducts.length > 0) {
-        console.log(`[SOFT SEARCH] LLM validated ${validation.validProducts.length} matches in ${validationTime}ms`);
-        
-        // Use LLM-validated products as high-quality matches
-        highQualityTextMatches = validation.validProducts;
-        
-        // Boost their exactMatchBonus so they're treated as good matches
-        highQualityTextMatches.forEach(p => {
-          p.exactMatchBonus = Math.max(p.exactMatchBonus || 0, 15000); // Strong match
-          p.llmValidated = true; // Flag for tracking
-        });
-      } else {
-        console.log(`[SOFT SEARCH] LLM validation failed (${validationTime}ms), proceeding to vector search`);
-      }
-    }
-    
+
     // 🎯 SOFT CATEGORIES ARE OPTIONAL: Don't filter out text matches, just boost those that match
     // Products without matching soft categories should still appear, just with lower priority
     // This ensures searches like "למברוסקו" return results even if soft category matching fails
@@ -7914,41 +7885,8 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
 
     console.log(`[${requestId}] Phase 1: Found ${highQualityTextMatches.length} high-quality text matches (threshold: 1000)`);
 
-    // 🎯 NEW: LLM VALIDATION FOR WEAK TEXT MATCHES
-    // If no high-quality matches but we have some text results, validate with LLM before expensive vector search
-    if (highQualityTextMatches.length === 0 && textResultsWithBonuses.length > 0) {
-      console.log(`[${requestId}] 🎯 Phase 1: No high-quality matches, but found ${textResultsWithBonuses.length} weak text matches`);
-      console.log(`[${requestId}] 🎯 Validating top 10 weak matches with LLM before vector fallback...`);
-      
-      const weakMatches = textResultsWithBonuses
-        .sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0))
-        .slice(0, 10);
-      
-      const validationStartTime = Date.now();
-      const validation = await validateWeakTextMatchesWithLLM(weakMatches, query, context);
-      const validationTime = Date.now() - validationStartTime;
-      
-      if (validation.hasValidMatch && validation.validProducts.length > 0) {
-        console.log(`[${requestId}] ✅ LLM VALIDATION SUCCESS (${validationTime}ms): Found ${validation.validProducts.length} valid matches`);
-        console.log(`[${requestId}] 🎯 Reason: ${validation.reason}`);
-        console.log(`[${requestId}] 🎯 Rescued products: ${validation.validProducts.map(p => p.name).join(', ')}`);
-        
-        // Use LLM-validated products as high-quality matches
-        highQualityTextMatches = validation.validProducts;
-        
-        // Boost their exactMatchBonus so they're treated as good matches
-        highQualityTextMatches.forEach(p => {
-          p.exactMatchBonus = Math.max(p.exactMatchBonus || 0, 15000); // Strong match
-          p.llmValidated = true; // Flag for tracking
-        });
-      } else {
-        console.log(`[${requestId}] ❌ LLM VALIDATION FAILED (${validationTime}ms): ${validation.reason}`);
-        console.log(`[${requestId}] 🎯 Proceeding to vector search fallback...`);
-      }
-    }
-
     if (highQualityTextMatches.length === 0) {
-      console.log(`[${requestId}] Phase 1: No text matches found (even after LLM validation)`);
+      console.log(`[${requestId}] Phase 1: No text matches found, proceeding to vector search`);
 
       // 🎯 NEW PIPELINE: Try LLM filter extraction if simple extraction failed or got nothing
       let hasFilters = (extractedFilters.category || extractedFilters.softCategory || extractedFilters.type || extractedFilters.color);
