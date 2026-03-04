@@ -1800,75 +1800,51 @@ async function executeOptimizedFilterOnlySearch(
 \* =========================================================== */
 
 const buildAutocompletePipeline = (query, indexName, path, includePersonalizationFields = false) => {
-  const pipeline = [];
-  
-  pipeline.push({
-    $search: {
-      index: indexName,
+  // Stock status filter lives INSIDE $search so Atlas can apply it before returning docs.
+  // This avoids a post-search $match full-scan and lets the $limit early-termination work.
+  const filterClauses = [
+    {
       compound: {
         should: [
-          {
-            text: {
-        query: query,
-        path: path,
-              score: { 
-                boost: { value: 100.0 }
-              }
-            }
-          },
-          {
-            text: {
-              query: query,
-              path: path,
-              score: { 
-                boost: { value: 5.0 }
-              }
-            }
-          },
-          {
-            text: {
-              query: query,
-              path: path,
-              score: {
-                boost: { value: 1.5 }
-              }
-            }
-          }
+          { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
+          { text: { query: "instock", path: "stockStatus" } }
         ],
         minimumShouldMatch: 1
       }
-    },
-  });
-  
-  pipeline.push({
-    $match: {
-      $or: [{ stockStatus: { $exists: false } }, { stockStatus: "instock" }],
-    },
-  });
-  
-  // Project fields - include softCategory for personalization when requested
+    }
+  ];
+
   const projectFields = {
-        _id: 0,
-        suggestion: `$${path}`,
-        score: { $meta: "searchScore" },
-        url: 1,
-        image: 1,
-        price: 1,
-        id: 1,
+    _id: 0,
+    suggestion: `$${path}`,
+    score: { $meta: "searchScore" },
+    url: 1,
+    image: 1,
+    price: 1,
+    id: 1,
   };
 
-  // Include softCategory and colors for personalization (only for products collection)
   if (includePersonalizationFields) {
     projectFields.softCategory = 1;
     projectFields.colors = 1;
   }
 
-  pipeline.push(
+  return [
+    {
+      $search: {
+        index: indexName,
+        compound: {
+          should: [
+            { text: { query, path, score: { boost: { value: 100.0 } } } }
+          ],
+          filter: filterClauses,
+          minimumShouldMatch: 1
+        }
+      }
+    },
     { $limit: 5 },
     { $project: projectFields }
-  );
-  
-  return pipeline;
+  ];
 };
 
 // Standard search pipeline without soft filter boosting - OPTIMIZED
@@ -2677,7 +2653,7 @@ COMPLEX queries are:
 Analyze the query and return your classification.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-3-flash-preview",
+        model: "gemini-2.5-flash",
         contents: [{ text: query }],
         config: {
           systemInstruction,
@@ -3878,14 +3854,14 @@ Query: "ספה לבנה מעור" -> {"category": "ספה", "softCategory": ["ע
 Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]}
 Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} (בורדו is a shade of red → map to "אדום")`;
 
-      const response = await genAI.models.generateContent({
+      const extractFiltersBriefPromise = genAI.models.generateContent({
         model: "gemini-2.5-flash",
         contents: [{ text: query }],
         config: {
           systemInstruction,
           temperature: 0.1,
           thinkingConfig: {
-            thinkingBudget: 512, // Allow some reasoning for filter mapping
+            thinkingBudget: 0, // No thinking - this is a fast extraction call
           },
           responseMimeType: "application/json",
           responseSchema: {
@@ -3908,12 +3884,16 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
           }
         }
       });
+      const extractFiltersBriefTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('extractFiltersBrief LLM timeout after 8s')), 8000)
+      );
+      const response = await Promise.race([extractFiltersBriefPromise, extractFiltersBriefTimeout]);
 
       let content = response.text ? response.text.trim() : null;
       if (!content && response.candidates && response.candidates[0]) {
         content = response.candidates[0].content.parts[0].text;
       }
-      
+
       if (!content) return {};
       content = content.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
       const filters = JSON.parse(content);
@@ -5164,7 +5144,7 @@ ${productData.map((p, i) => `${i}. ${p.name} (${p.category || 'no category'})`).
 
 Which products (if any) are semantically valid matches for this query?`;
 
-      const response = await genAI.models.generateContent({
+      const validateWeakLlmPromise = genAI.models.generateContent({
         model: "gemini-2.5-flash", // Fast model for quick validation
         contents: [{ text: userPrompt }],
         config: {
@@ -5195,6 +5175,10 @@ Which products (if any) are semantically valid matches for this query?`;
           }
         }
       });
+      const validateWeakTimeout = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('validateWeakTextMatches LLM timeout after 8s')), 8000)
+      );
+      const response = await Promise.race([validateWeakLlmPromise, validateWeakTimeout]);
 
       let text = response.text ? response.text.trim() : null;
 
@@ -7703,6 +7687,12 @@ app.get("/search/load-more", async (req, res) => {
 app.get("/autocomplete", async (req, res) => {
   const { query, session_id } = req.query;
   const { dbName, products: collectionName } = req.store;
+
+  // Require at least 2 characters before running any DB/Atlas work
+  if (!query || query.trim().length < 2) {
+    return res.json([]);
+  }
+
   try {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
@@ -7723,9 +7713,18 @@ app.get("/autocomplete", async (req, res) => {
     const pipeline1 = buildAutocompletePipeline(query, "default", "name", includePersonalizationFields);
     const pipeline2 = buildAutocompletePipeline(query, "default2", "query", false); // queries don't have softCategory
 
-    // 🚀 NEW: Integrated Filter Match & Fuzzy Regex for Autocomplete
-    const { results: regexResults, isPerfectFilterMatch, filterCheck } =
-      await performSimpleSearch(db, collection1, query, req.store, 5, true);
+    // 🚀 Run all three searches in parallel (they're fully independent)
+    const [
+      { results: regexResults, isPerfectFilterMatch, filterCheck },
+      suggestions1,
+      suggestions2Raw
+    ] = await Promise.all([
+      performSimpleSearch(db, collection1, query, req.store, 5, true),
+      collection1.aggregate(pipeline1).toArray(),
+      // Isolate pipeline2: if "default2" index missing on this store, return [] instead of crashing
+      collection2.aggregate(pipeline2).toArray().catch(() => [])
+    ]);
+    const suggestions2 = suggestions2Raw;
 
     // 1. Create Filter Match Suggestion (Highest Priority)
     const filterSuggestions = [];
@@ -7739,11 +7738,6 @@ app.get("/autocomplete", async (req, res) => {
         type: "category-search"
       });
     }
-
-    const [suggestions1, suggestions2] = await Promise.all([
-      collection1.aggregate(pipeline1).toArray(),
-      collection2.aggregate(pipeline2).toArray()
-    ]);
 
     // Label regex suggestions
     const labeledRegexSuggestions = regexResults.map(item => ({
