@@ -11240,7 +11240,34 @@ app.post("/search", async (req, res) => {
           complexQueryBoostMap, // 🎯 Use 100x boost for query-extracted categories
           false // 🎯 CRITICAL FIX: ALWAYS check text matches first, even for complex queries
         );
-          
+
+        // 🔄 ZERO-RESULT FALLBACK: soft category filter returned nothing → fall back to
+        // unfiltered fuzzy + vector search so the user always gets some results.
+        // LLM reranking (already scheduled below) will then filter for relevance.
+        if (combinedResults.length === 0) {
+          console.log(`[${requestId}] ⚠️ Soft-category search returned 0 results — falling back to unfiltered fuzzy+vector search`);
+          const [fuzzyFallback, vectorFallback] = await Promise.all([
+            collection.aggregate(buildStandardSearchPipeline(
+              cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, syncMode === 'image'
+            )).toArray(),
+            queryEmbedding ? collection.aggregate(buildStandardVectorSearchPipeline(
+              queryEmbedding, hardFilters, vectorLimit, useOrLogic
+            )).toArray() : Promise.resolve([])
+          ]);
+          const fallbackRanks = new Map();
+          fuzzyFallback.forEach((doc, i) => fallbackRanks.set(doc._id.toString(), { fuzzyRank: i, vectorRank: Infinity, doc }));
+          vectorFallback.forEach((doc, i) => {
+            const id = doc._id.toString();
+            const existing = fallbackRanks.get(id);
+            if (existing) { existing.vectorRank = i; } else { fallbackRanks.set(id, { fuzzyRank: Infinity, vectorRank: i, doc }); }
+          });
+          combinedResults = Array.from(fallbackRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
+            const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
+            return { ...doc, rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0), softFilterMatch: false, softCategoryMatches: 0, exactMatchBonus, fuzzyRank, vectorRank };
+          }).sort((a, b) => b.rrf_score - a.rrf_score).slice(0, searchLimit * 3);
+          console.log(`[${requestId}] 🔄 Fallback search returned ${combinedResults.length} results — LLM will rerank for relevance`);
+        }
+
       } else {
         // Standard search (no soft filters) - always include both fuzzy and vector search
         
