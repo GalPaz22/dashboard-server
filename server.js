@@ -1545,6 +1545,13 @@ function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewT
       console.log(`[FILTER-ONLY] ⚡ Complex query with complete filter extraction → using filter-only path (no rerank)`);
       return true;
     }
+    // Non-Hebrew query (e.g. "red wine") where LLM extracted a Hebrew category:
+    // the original query is fully English so there's nothing left to text-search for.
+    // Skip the expensive LLM reranking and use the fast filter-only path.
+    if (hasHardFilters && !hasSoftFilters && !isHebrewQuery(cleanedHebrewText || '')) {
+      console.log(`[FILTER-ONLY] ⚡ Non-Hebrew complex query with extracted category → fast filter path (no rerank)`);
+      return true;
+    }
     // Otherwise, complex queries still need LLM reordering
     return false;
   }
@@ -1587,15 +1594,89 @@ function shouldUseFilterOnlyPath(query, hardFilters, softFilters, cleanedHebrewT
   }
   
   // Category/Type only with minimal additional text
-  const hasCategoryTypeOnly = (hardFilters.category || hardFilters.type) && 
+  const hasCategoryTypeOnly = (hardFilters.category || hardFilters.type) &&
                               (!cleanedHebrewText || cleanedHebrewText.trim().length < 3);
-  
+
   if (hasCategoryTypeOnly) {
     console.log(`[FILTER-ONLY] Using fast pipeline (category/type-only)`);
     return true;
   }
-  
+
   return false;
+}
+
+// ⚡ FAST FILTER DETECTION: Try to build a synthetic filter decision from a translated query
+// without calling the LLM. Returns a decision object if ALL query words map to known
+// categories / types / colors; otherwise returns null (fall back to LLM).
+function tryBuildSyntheticFilterDecision(translatedQuery, categories, types, colorsString) {
+  if (!translatedQuery || !translatedQuery.trim()) return null;
+
+  const queryLower = translatedQuery.toLowerCase().trim();
+  const words = queryLower.split(/\s+/).filter(w => w.length > 1);
+  if (words.length === 0) return null;
+
+  const availableColors = Array.isArray(colorsString)
+    ? colorsString.map(c => String(c).trim().toLowerCase()).filter(c => c)
+    : (colorsString
+        ? String(colorsString).split(',').map(c => c.trim().toLowerCase()).filter(c => c)
+        : []);
+  const catList = (categories || []).filter(c => typeof c === 'string').map(c => c.toLowerCase().trim());
+  const typeList = (types || []).filter(t => typeof t === 'string').map(t => t.toLowerCase().trim());
+
+  const matchedCats = [];
+  const matchedTypes = [];
+  const matchedColors = [];
+
+  for (const word of words) {
+    let matched = false;
+
+    for (const cat of catList) {
+      if (word === cat || (word.length >= 3 && (cat.startsWith(word) || word.startsWith(cat)))) {
+        const originalCat = (categories || []).find(c => c.toLowerCase().trim() === cat);
+        if (originalCat && !matchedCats.includes(originalCat)) matchedCats.push(originalCat);
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      for (const type of typeList) {
+        if (word === type || (word.length >= 3 && (type.startsWith(word) || word.startsWith(type)))) {
+          const originalType = (types || []).find(t => t.toLowerCase().trim() === type);
+          if (originalType && !matchedTypes.includes(originalType)) matchedTypes.push(originalType);
+          matched = true;
+          break;
+        }
+      }
+    }
+
+    if (!matched) {
+      for (const color of availableColors) {
+        if (word === color || (word.length >= 3 && (color.startsWith(word) || word.startsWith(color)))) {
+          if (!matchedColors.includes(color)) matchedColors.push(color);
+          matched = true;
+          break;
+        }
+      }
+    }
+
+    if (!matched) {
+      // This word didn't match any known filter — can't synthesize
+      return null;
+    }
+  }
+
+  // All words matched AND at least one category or type must be identified
+  if (matchedCats.length === 0 && matchedTypes.length === 0) return null;
+
+  return {
+    filters: {
+      category: matchedCats.length > 0 ? matchedCats[0] : undefined,
+      type: matchedTypes.length > 0 ? matchedTypes[0] : undefined,
+      color: matchedColors.length > 0 ? matchedColors[0] : undefined
+    },
+    isSyntheticDecision: true
+  };
 }
 
 // Ultra-fast filter-only pipeline - optimized for speed and completeness
@@ -3228,17 +3309,21 @@ function removeHardFilterWords(queryText, hardFilters, categories = [], types = 
 
 async function getQueryEmbedding(cleanedText) {
   const cacheKey = generateCacheKey('embedding', cleanedText);
-  
+
   return withCache(cacheKey, async () => {
   try {
-    const response = await openai.embeddings.create({
+    const embeddingPromise = openai.embeddings.create({
       model: "text-embedding-3-large",
       input: cleanedText,
     });
+    const embeddingTimeout = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error('Embedding timeout after 8s')), 8000)
+    );
+    const response = await Promise.race([embeddingPromise, embeddingTimeout]);
     return response.data[0]?.embedding || null;
   } catch (error) {
-    console.error("Error fetching query embedding:", error);
-    throw error;
+    console.error("Error fetching query embedding:", error.message);
+    return null; // Return null instead of throwing - vector search will be skipped gracefully
   }
   }, 604800);
 }
@@ -10532,18 +10617,27 @@ app.post("/search", async (req, res) => {
         } : allProducts);
       }
     } else {
-      // Atlas Search found 0 results — still run unified LLM for filter extraction
-      // in parallel with embedding + translation. This replaces the 2 old Phase 1 LLM
-      // calls (isSimpleProductNameQuery + extractFiltersFromQueryEnhanced) with one shot.
-      console.log(`[${requestId}] 📭 No Atlas results — running unified LLM + embedding in parallel`);
-      const [unified, earlyEmbed, earlyTranslate] = await Promise.all([
-        unifiedSearchDecision([], query, categories, types, finalSoftCategories, req.store?.colors || '', 'wine shop'),
+      // Atlas Search found 0 results — run filter extraction + embedding + translation in parallel.
+      // Uses extractFiltersBrief (simpler prompt, faster) instead of the heavier unifiedSearchDecision
+      // since there are no products to evaluate — only filter extraction is needed.
+      console.log(`[${requestId}] 📭 No Atlas results — running filter extraction + embedding in parallel`);
+
+      const colorsForExtraction = Array.isArray(req.store?.colors)
+        ? req.store.colors.join(', ')
+        : (req.store?.colors || '');
+
+      const [extractedFilters, earlyEmbed, earlyTranslate] = await Promise.all([
+        extractFiltersBrief(query, categories, types, finalSoftCategories, 'wine shop', colorsForExtraction).catch(() => ({})),
         withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)),
         translateQuery(query, context).catch(() => null)
       ]);
-      unifiedDecision = unified;
+
+      // Wrap as unifiedDecision (Phase 1 expects this shape)
+      unifiedDecision = { filters: extractedFilters || {}, decision: 'full_search' };
       precomputedEmbedding = earlyEmbed;
       precomputedTranslation = earlyTranslate;
+
+      console.log(`[${requestId}] ⚡ Filter extraction done: ${JSON.stringify(extractedFilters)}`);
     }
     console.log(`[${requestId}] 🔍 [SEARCH] Simple search was not enough, falling back to full search logic`);
   } catch (err) {
