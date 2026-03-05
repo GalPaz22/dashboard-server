@@ -1,8 +1,8 @@
 {
   "mappings": {
-    "dynamic": true,
+    "dynamic": false,
     "fields": {
-      "description": [
+      "name": [
         {
           "maxGrams": 20,
           "minGrams": 2,
@@ -14,7 +14,7 @@
           "type": "string"
         }
       ],
-      "name": [
+      "description": [
         {
           "maxGrams": 20,
           "minGrams": 2,
@@ -49,7 +49,22 @@
           "analyzer": "lucene.standard",
           "type": "string"
         }
-      ]
+      ],
+      "type": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "colors": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "stockStatus": {
+        "type": "string",
+        "analyzer": "lucene.keyword"
+      },
+      "price": {
+        "type": "number"
+      }
     }
   }
 }

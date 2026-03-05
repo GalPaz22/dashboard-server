@@ -5458,12 +5458,15 @@ async function reorderResultsWithGPT(
   maxResults = 20, // Max products sent to LLM for reranking
   useFastLLM = true, // 🎯 DEFAULT TO TRUE: Always use the fast model for reranking
   userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
-  isEmergencyMode = false // 🎯 NEW: Bypass 4-item limit for emergency expansion
+  isEmergencyMode = false, // 🎯 NEW: Bypass 4-item limit for emergency expansion
+  isFilterHeavy = false // ⚡ LIGHTWEIGHT: Both hard+soft filters extracted → minimal LLM nudge only
 ) {
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
     );
-    const limitedResults = filtered.slice(0, maxResults);
+    // ⚡ Filter-heavy queries already have correct products — only send top items for a quick sort nudge
+    const effectiveMax = isFilterHeavy ? Math.min(maxResults, 10) : maxResults;
+    const limitedResults = filtered.slice(0, effectiveMax);
   const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
   const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
     
@@ -5473,17 +5476,27 @@ async function reorderResultsWithGPT(
       const modelName = "gemini-2.5-flash";
       
 
-      console.log(`[RERANK] 🚀 Using ${modelName} to rerank ${limitedResults.length} products`);
+      console.log(`[RERANK] ${isFilterHeavy ? '⚡ LIGHTWEIGHT' : '🚀'} Using ${modelName} to rerank ${limitedResults.length} products${isFilterHeavy ? ' (filter-heavy mode)' : ''}`);
       
-    const productData = limitedResults.map((p) => ({
-      _id: p._id.toString(),
-      name: p.name || "No name",
-        description: (p.description1 || "No description").substring(0, 80),
-      price: p.price || "No price",
-        softFilterMatch: p.softFilterMatch || false,
-      softCategories: p.softCategory || [],
-      colors: p.colors || [] // 🎨 Add colors so LLM can see them
-    }));
+    // ⚡ Filter-heavy mode: strip description/price — category+type already matched, LLM just nudges order
+    const productData = limitedResults.map((p) => isFilterHeavy
+      ? {
+          _id: p._id.toString(),
+          name: p.name || "No name",
+          softFilterMatch: p.softFilterMatch || false,
+          softCategories: p.softCategory || [],
+          colors: p.colors || [],
+        }
+      : {
+          _id: p._id.toString(),
+          name: p.name || "No name",
+          description: (p.description1 || "No description").substring(0, 80),
+          price: p.price || "No price",
+          softFilterMatch: p.softFilterMatch || false,
+          softCategories: p.softCategory || [],
+          colors: p.colors || [],
+        }
+    );
 
     const sanitizedQuery = sanitizeQueryForLLM(query);
     
@@ -5528,9 +5541,16 @@ Products with these similar colors should be ranked highly as they match the use
     }
 
     const explainMaxItems = isEmergencyMode ? 15 : 8;
-    const noExplainMaxItems = isEmergencyMode ? 15 : 10;
+    const noExplainMaxItems = isEmergencyMode ? 15 : (isFilterHeavy ? 8 : 10);
 
-    const systemInstruction = explain 
+    // ⚡ LIGHTWEIGHT SYSTEM PROMPT: used when hard+soft filters already narrowed the set
+    // The LLM only needs to nudge the ordering by the remaining nuance, not do full relevance analysis
+    const lightweightSystemInstruction = `Sort these pre-filtered products by how well they match the query nuance. Return only the most relevant, ordered best-first.${softCategoryContext}${colorContext}${personalizationContext}
+Return JSON array with objects containing: '_id' (string)${explain ? `, 'explanation' (brief relevance note, max 10 words, same language as query)` : ''}. Return empty array if none match.`;
+
+    const systemInstruction = isFilterHeavy
+      ? lightweightSystemInstruction
+      : explain
       ? `You are an advanced AI model for e-commerce product ranking. Your ONLY task is to analyze product relevance and return a JSON array.
 
 CRITICAL CONSTRAINTS:
@@ -5577,7 +5597,9 @@ Return JSON array with objects containing only:
 
 The search query intent to analyze is provided separately in the user content.`;
 
-    const userContent = `Search Query Intent: "${sanitizedQuery}"
+    const userContent = isFilterHeavy
+      ? `Query: "${sanitizedQuery}"\nProducts:\n${JSON.stringify(productData, null, 2)}`
+      : `Search Query Intent: "${sanitizedQuery}"
 
 Products to rank:
 ${JSON.stringify(productData, null, 2)}`;
@@ -5634,8 +5656,9 @@ ${JSON.stringify(productData, null, 2)}`;
         responseSchema: responseSchema,
       },
     });
+    const rerankerTimeout = isFilterHeavy ? 5000 : 8000;
     const rerankerTimeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Reranker LLM timeout after 8s')), 8000)
+      setTimeout(() => reject(new Error(`Reranker LLM timeout after ${rerankerTimeout / 1000}s`)), rerankerTimeout)
     );
     const response = await Promise.race([llmPromise, rerankerTimeoutPromise]);
 
@@ -11256,11 +11279,13 @@ app.post("/search", async (req, res) => {
           false // 🎯 CRITICAL FIX: ALWAYS check text matches first, even for complex queries
         );
 
-        // 🔄 ZERO-RESULT FALLBACK: soft category filter returned nothing → fall back to
-        // unfiltered fuzzy + vector search so the user always gets some results.
-        // LLM reranking (already scheduled below) will then filter for relevance.
-        if (combinedResults.length === 0) {
-          console.log(`[${requestId}] ⚠️ Soft-category search returned 0 results — falling back to unfiltered fuzzy+vector search`);
+        // 🔄 FEW/ZERO-RESULT SUPPLEMENT: soft category matched too few products →
+        // keep them at the top (they're the best matches) and pad with vector+fuzzy results
+        // so the user sees a full page. LLM reranking decides final order.
+        const SOFT_MIN_RESULTS = 10;
+        if (combinedResults.length < SOFT_MIN_RESULTS) {
+          const hasExisting = combinedResults.length > 0;
+          console.log(`[${requestId}] ⚠️ Soft-category search returned only ${combinedResults.length} results (< ${SOFT_MIN_RESULTS}) — supplementing with fuzzy+vector search`);
           const [fuzzyFallback, vectorFallback] = await Promise.all([
             collection.aggregate(buildStandardSearchPipeline(
               cleanedTextForSearch, query, hardFilters, searchLimit, useOrLogic, syncMode === 'image'
@@ -11269,18 +11294,23 @@ app.post("/search", async (req, res) => {
               queryEmbedding, hardFilters, vectorLimit, useOrLogic
             )).toArray() : Promise.resolve([])
           ]);
-          const fallbackRanks = new Map();
-          fuzzyFallback.forEach((doc, i) => fallbackRanks.set(doc._id.toString(), { fuzzyRank: i, vectorRank: Infinity, doc }));
+          // Existing soft-category results take priority — track their IDs to avoid duplicates
+          const existingIds = new Set(combinedResults.map(r => r._id.toString()));
+          const supplementRanks = new Map();
+          fuzzyFallback.forEach((doc, i) => { if (!existingIds.has(doc._id.toString())) supplementRanks.set(doc._id.toString(), { fuzzyRank: i, vectorRank: Infinity, doc }); });
           vectorFallback.forEach((doc, i) => {
             const id = doc._id.toString();
-            const existing = fallbackRanks.get(id);
-            if (existing) { existing.vectorRank = i; } else { fallbackRanks.set(id, { fuzzyRank: Infinity, vectorRank: i, doc }); }
+            if (existingIds.has(id)) return;
+            const existing = supplementRanks.get(id);
+            if (existing) { existing.vectorRank = i; } else { supplementRanks.set(id, { fuzzyRank: Infinity, vectorRank: i, doc }); }
           });
-          combinedResults = Array.from(fallbackRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
+          const supplementResults = Array.from(supplementRanks.values()).map(({ fuzzyRank, vectorRank, doc }) => {
             const exactMatchBonus = getExactMatchBonus(doc?.name, query, cleanedText);
             return { ...doc, rrf_score: calculateEnhancedRRFScore(fuzzyRank, vectorRank, 0, 0, exactMatchBonus, 0), softFilterMatch: false, softCategoryMatches: 0, exactMatchBonus, fuzzyRank, vectorRank };
           }).sort((a, b) => b.rrf_score - a.rrf_score).slice(0, searchLimit * 3);
-          console.log(`[${requestId}] 🔄 Fallback search returned ${combinedResults.length} results — LLM will rerank for relevance`);
+          // Soft-category matches first (highest priority), then supplemental
+          combinedResults = [...combinedResults, ...supplementResults];
+          console.log(`[${requestId}] 🔄 Supplemented: ${hasExisting ? combinedResults.length - supplementResults.length : 0} soft-match + ${supplementResults.length} vector/fuzzy = ${combinedResults.length} total — LLM will rerank`);
         }
 
       } else {
@@ -12109,11 +12139,18 @@ app.post("/search", async (req, res) => {
             console.log(`[${requestId}] ℹ️ No hard filters extracted - sending all ${combinedResults.length} products to LLM`);
           }
 
-          // Send up to 20 products for LLM ranking
-          const llmLimit = 20;
-          console.log(`[${requestId}] Sending ${resultsForRerank.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
+          // ⚡ Filter-heavy detection: hard filters + soft filters both extracted → lightweight nudge mode
+          const rerankHasSoftFilters = softFilters && (
+            (Array.isArray(softFilters.softCategory) && softFilters.softCategory.filter(Boolean).length > 0) ||
+            (Array.isArray(softFilters.color) && softFilters.color.filter(Boolean).length > 0)
+          );
+          const isFilterHeavyRerank = hasHardFilters && rerankHasSoftFilters;
 
-          reorderedData = await reorderFn(resultsForRerank, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile);
+          // Send up to 20 products normally; only 10 in filter-heavy mode (filters already did the work)
+          const llmLimit = isFilterHeavyRerank ? 10 : 20;
+          console.log(`[${requestId}] ${isFilterHeavyRerank ? '⚡ Filter-heavy:' : ''} Sending ${resultsForRerank.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
+
+          reorderedData = await reorderFn(resultsForRerank, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile, false, isFilterHeavyRerank);
           
           // Record success
           aiCircuitBreaker.recordSuccess();
