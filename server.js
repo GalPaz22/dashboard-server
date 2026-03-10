@@ -12145,6 +12145,35 @@ app.post("/search", async (req, res) => {
         }
       }
 
+      // 🛡️ SOFT-FILTER SAFETY NET: If both filter-only and simple paths returned 0 results
+      // but we have soft filters + embeddings, the soft category may not exist as a tagged field.
+      // Fall back to vector search with soft category as a BOOST (not a hard filter) so the user
+      // always gets relevant results ordered by soft-category match when they exist.
+      if (combinedResults.length === 0 && hasSoftFilters && queryEmbedding) {
+        console.log(`[${requestId}] ⚠️ 0 results with soft filters — falling back to vector+soft-boost search (soft category is NOT enforced as hard filter)`);
+        try {
+          combinedResults = await executeExplicitSoftCategorySearch(
+            collection,
+            cleanedTextForSearch,
+            query,
+            hardFilters,
+            softFilters,
+            queryEmbedding,
+            searchLimit,
+            vectorLimit,
+            useOrLogic,
+            syncMode === 'image',
+            cleanedText,
+            [],
+            null, // no boost scores override
+            false  // skipTextualSearch = false
+          );
+          console.log(`[${requestId}] ✅ Soft-filter safety net: ${combinedResults.length} results`);
+        } catch (sfErr) {
+          console.error(`[${requestId}] ⚠️ Soft-filter safety net failed:`, sfErr.message);
+        }
+      }
+
       // 👤 PERSONALIZATION: Load user profile once for both pre-LLM reranking and LLM context
       let llmUserProfile = null;
       if (session_id && isComplexQueryResult) {
@@ -12979,9 +13008,11 @@ app.post("/search", async (req, res) => {
     // retry with no filters (plain text search) so the user sees something relevant
     if (finalResults.length === 0 && query && query.trim().length > 0) {
       // 🛡️ STRICT MODE: If hard category filters were applied, respect the 0 results.
-      // Don't fall back to unfiltered search, as it violates "hard category is deal breaking".
+      // Exception: if the query also had soft filters (e.g. "קברנה פרנק" → softCategory),
+      // the safety net above should have already found results via vector search.
+      // If we're still at 0 here it means even vector search found nothing — return 0 strictly.
       if (hardFilters && hardFilters.category && hardFilters.category.length > 0) {
-        console.log(`[${requestId}] 🛡️ STRICT: 0 results found for hard category "${hardFilters.category}". Returning 0 results (skipping fallback).`);
+        console.log(`[${requestId}] 🛡️ STRICT: 0 results found for hard category "${hardFilters.category}"${hasSoftFilters ? ' (soft-filter safety net also found nothing)' : ''}. Returning 0 results (skipping fallback).`);
       } else {
         console.log(`[${requestId}] ⚠️ 0 results after all search strategies — falling back to no-filter text search`);
         try {
