@@ -1364,7 +1364,7 @@ async function getStoreConfigByApiKey(apiKey) {
     console.log(`[CONFIG] ${userDoc.dbName}: ${softCategories.length} boosted soft categories`);
   } else if (userDoc.credentials?.softCategories) {
     softCategories = userDoc.credentials.softCategories;
-    console.log(`[CONFIG] ${userDoc.dbName}: original soft categories`);
+    // using original soft categories
   } else {
     console.log(`[CONFIG] ${userDoc.dbName}: no soft categories`);
   }
@@ -5466,6 +5466,31 @@ async function reorderResultsWithGPT(
     );
     // ⚡ Filter-heavy queries already have correct products — only send top items for a quick sort nudge
     const effectiveMax = isFilterHeavy ? Math.min(maxResults, 10) : maxResults;
+
+    // 🎯 PRE-LLM CANDIDATE RESCUE: before slicing to effectiveMax, bubble products whose
+    // name contains actual query words to the top. This prevents relevant products from being
+    // cut off at rank 21+ due to bad vector scores (e.g. "מטלית" losing to food items for "מטלית מטבח").
+    // Only applies when not in filter-heavy mode (filter-heavy sets are already correct).
+    if (!isFilterHeavy && filtered.length > effectiveMax) {
+      // Use both original query AND translated query words — catches "מנצ'יני" → "mancini" in product names
+      const allQueryWords = [
+        ...query.split(/\s+/),
+        ...(translatedQuery && translatedQuery !== query ? translatedQuery.split(/\s+/) : [])
+      ].filter(w => w.length > 1).map(w => w.toLowerCase());
+      const uniqueQueryWords = [...new Set(allQueryWords)];
+      if (uniqueQueryWords.length > 0) {
+        const nameMatchCount = (product) => {
+          const name = (product.name || '').toLowerCase();
+          return uniqueQueryWords.filter(w => name.includes(w)).length;
+        };
+        filtered.sort((a, b) => {
+          const diff = nameMatchCount(b) - nameMatchCount(a);
+          if (diff !== 0) return diff;
+          return (b.rrf_score || 0) - (a.rrf_score || 0);
+        });
+      }
+    }
+
     const limitedResults = filtered.slice(0, effectiveMax);
   const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
   const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
@@ -6156,7 +6181,7 @@ async function executeExplicitSoftCategorySearch(
         });
 
         const matchCount = highQualityTextMatches.filter(p => p.softCategoryBoost).length;
-        console.log(`[SOFT SEARCH] Soft cat boost: ${matchCount}/${highQualityTextMatches.length} products match soft categories (boosted, not filtered)`);
+        // Soft cat boost applied (logged below)
       }
     }
     
@@ -6168,12 +6193,12 @@ async function executeExplicitSoftCategorySearch(
     if (strongExactMatches.length > 0) {
       const beforeCount = highQualityTextMatches.length;
       highQualityTextMatches = strongExactMatches;
-      console.log(`[SOFT SEARCH] Exact match filter: ${strongExactMatches.length} strong, removed ${beforeCount - strongExactMatches.length} weak`);
+          // Strong exact matches only — weak filtered out
     }
     
     highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
-    console.log(`[SOFT SEARCH] ${highQualityTextMatches.length} text matches (${highQualityTextMatches.filter(p => p.llmValidated).length} LLM-validated)`);
+    // [text match count logged in summary below]
   } catch (error) {
     console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
     }
@@ -6193,7 +6218,7 @@ async function executeExplicitSoftCategorySearch(
   const softCategoryLimit = searchLimit;
   const nonSoftCategoryLimit = searchLimit;
   
-  console.log(`Pure hard category search: ${isPureHardCategorySearch}, Limits: soft=${softCategoryLimit}, non-soft=${nonSoftCategoryLimit}, vector=${vectorLimit}`);
+  // isPureHardCategorySearch: ${isPureHardCategorySearch}
   
   if (skipTextualSearch) {
     // Skipping textual fuzzy search (complex query - vectors only)
@@ -6279,6 +6304,8 @@ async function executeExplicitSoftCategorySearch(
     }
   });
 
+  // Vector results available in softCategoryVectorResults / nonSoftCategoryVectorResults
+
   const softCategoryResults = Array.from(softCategoryDocumentRanks.values())
     .map(data => {
       const exactMatchBonus = getExactMatchBonus(data.doc.name, query, cleanedTextForExactMatch);
@@ -6361,18 +6388,10 @@ async function executeExplicitSoftCategorySearch(
     return b.rrf_score - a.rrf_score;
   }));
   
-  console.log(`Soft category matches: ${softCategoryResults.length} (boosted +10000 + multi-category), Non-soft category matches: ${nonSoftCategoryResults.length}`);
+  // Soft: ${softCategoryResults.length}, Non-soft: ${nonSoftCategoryResults.length}
   
-  // Log multi-category distribution
-  const multiCategoryCount = softCategoryResults.filter(r => r.softCategoryMatches > 1).length;
-  console.log(`Multi-category products: ${multiCategoryCount} (will rank higher than single-category)`);
   
-  if (isImageModeWithSoftCategories) {
-    console.log(`Image mode: Text search boosts reduced to 10% (visual + soft categories prioritized)`);
-  }
-  
-  // Phase 3: Complete soft category sweep - get ALL products with soft category
-  console.log("Phase 3: Performing complete soft category sweep");
+  // Phase 3: Complete soft category sweep
   const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory : [softFilters.softCategory];
   
   // Build query for complete soft category sweep with hard filters applied
@@ -6385,7 +6404,7 @@ async function executeExplicitSoftCategorySearch(
     // Get similar colors for flexible matching
     const expandedColors = getSimilarColors(softFilters.color);
     sweepQuery.colors = { $in: expandedColors };
-    console.log(`[SOFT SEARCH] Color sweep: ${softFilters.color.join(', ')} → expanded ${expandedColors.length} shades`);
+    // Color sweep applied
   }
   
   // Apply hard filters to the sweep
@@ -6421,7 +6440,6 @@ async function executeExplicitSoftCategorySearch(
   ];
   
   const allSoftCategoryProducts = await collection.find(sweepQuery).limit(8).toArray();
-  console.log(`Phase 3: Found ${allSoftCategoryProducts.length} total products with soft category (capped at 8)`);
   
   // Merge Phase 3 results with existing results, avoiding duplicates
   const existingProductIds = new Set([
@@ -6448,7 +6466,7 @@ async function executeExplicitSoftCategorySearch(
       };
     });
   
-  console.log(`Phase 3: Added ${sweepOnlyProducts.length} additional products from sweep`);
+  // Phase 3 added ${sweepOnlyProducts.length} sweep products
   
   // Add high-quality text matches that may not have been included in soft category search
   const existingIds = new Set([
@@ -6477,7 +6495,7 @@ async function executeExplicitSoftCategorySearch(
     ...sweepOnlyProducts
   ];
   
-  console.log(`Total combined results: ${finalCombinedResults.length} (${textMatchesToAdd.length} text matches + ${softCategoryResults.length} soft category search + ${nonSoftCategoryResults.length} non-soft category search + ${sweepOnlyProducts.length} sweep)`);
+  // Total: ${finalCombinedResults.length} (text:${textMatchesToAdd.length} soft:${softCategoryResults.length} non-soft:${nonSoftCategoryResults.length} sweep:${sweepOnlyProducts.length})
 
   // FINAL VALIDATION: Ensure ALL results match hard category filters
   // This is critical for queries like "red wine from portugal" where "red wine" is hard category
@@ -6513,7 +6531,7 @@ async function executeExplicitSoftCategorySearch(
     });
     const afterCount = hardFilteredResults.length;
     if (beforeCount !== afterCount) {
-      console.log(`[HARD FILTER VALIDATION] Filtered out ${beforeCount - afterCount} products that didn't match hard filters (category: ${JSON.stringify(hardFilters.category)}, type: ${JSON.stringify(hardFilters.type)})`);
+      // Hard filter validation removed ${beforeCount - afterCount} non-matching products
     }
   }
   
@@ -6522,9 +6540,7 @@ async function executeExplicitSoftCategorySearch(
     ? hardFilteredResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
     : hardFilteredResults;
   
-  if (deliveredIds && deliveredIds.length > 0) {
-    console.log(`Filtered out ${hardFilteredResults.length - filteredResults.length} already-delivered products`);
-  }
+  // Already-delivered products filtered out
 
   // CRITICAL: Final sort - soft category matches ALWAYS come first
   // When user searches for "Italian white wine", Italian wines must appear first - always
@@ -10234,7 +10250,7 @@ app.post("/search", async (req, res) => {
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
   const vectorLimit = searchLimit * 3; // INCREASED: 3x for stronger semantic search
   
-  console.log(`[${requestId}] Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
+  // Limits: fuzzy=${searchLimit}, vector=${vectorLimit}
 
   // ⚡ USE ONLY API KEY CONFIG: No default fallback, only use what the store provides
   const rawSoftCategories = softCategories || [];
@@ -10260,10 +10276,14 @@ app.post("/search", async (req, res) => {
   // Track validation's reranking recommendation across Phase 0 → Phase 1.
   // null = validation not run; false = validation says "skip reranking"; true = reranking needed.
   let validationNeedsReranking = null;
+  // Set to true when soft-category search returned too few results and was supplemented with vector/fuzzy.
+  // Disables filter-heavy lightweight rerank — the mixed set needs full LLM analysis.
+  let wasSoftSupplemented = false;
   // Unified LLM decision from Phase 0 — reused in Phase 1 to skip redundant LLM calls
   let unifiedDecision = null;       // { decision, filters, validProducts, reason }
   let precomputedEmbedding = null;  // started in parallel with unified LLM
   let precomputedTranslation = null;
+  let extractedFilters = null;      // populated in "no Atlas results" branch; used by Quick English search
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
@@ -10655,11 +10675,12 @@ app.post("/search", async (req, res) => {
         ? req.store.colors.join(', ')
         : (req.store?.colors || '');
 
-      const [extractedFilters, earlyEmbed, earlyTranslate] = await Promise.all([
+      const [earlyExtractedFilters, earlyEmbed, earlyTranslate] = await Promise.all([
         extractFiltersBrief(query, categories, types, finalSoftCategories, 'wine shop', colorsForExtraction).catch(() => ({})),
         withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)),
         translateQuery(query, context).catch(() => null)
       ]);
+      extractedFilters = earlyExtractedFilters;
 
       // Wrap as unifiedDecision (Phase 1 expects this shape)
       unifiedDecision = { filters: extractedFilters || {}, decision: 'full_search' };
@@ -10668,11 +10689,87 @@ app.post("/search", async (req, res) => {
 
       console.log(`[${requestId}] ⚡ Filter extraction done: ${JSON.stringify(extractedFilters)}`);
     }
-    console.log(`[${requestId}] 🔍 [SEARCH] Simple search was not enough, falling back to full search logic`);
+    // Falling back to full search
   } catch (err) {
     console.error(`[${requestId}] ⚠️ Simple search phase error:`, err.message);
   }
-  
+
+  // ⚡ QUICK ENGLISH SEARCH FALLBACK
+  // Before launching the full complex search (LLM + vector + Atlas), try a fast direct-field
+  // regex match using the translated query. Catches brand/product names like "מנצ'יני" → "mancini"
+  // where the Hebrew Atlas index can't match the English product names.
+  // Only runs when: translation exists, differs from original query, and no early return happened.
+  if (precomputedTranslation && precomputedTranslation !== query && precomputedTranslation.trim()) {
+    try {
+      const engWords = precomputedTranslation.trim().split(/\s+/).filter(w => w.length > 1);
+      if (engWords.length > 0) {
+        // AND logic: every word must appear somewhere in name or description
+        // Uses Atlas Search compound.must so queries hit the index (not a full collection scan)
+        const mustClauses = engWords.map(word => ({
+          text: { query: word, path: ["name", "description1"] }
+        }));
+        const engFilterClauses = [
+          {
+            compound: {
+              should: [
+                { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
+                { text: { query: "instock", path: "stockStatus" } }
+              ],
+              minimumShouldMatch: 1
+            }
+          }
+        ];
+        // Apply extracted filters (category + color) so we don't return wrong-category results
+        if (extractedFilters?.category) {
+          const cats = Array.isArray(extractedFilters.category) ? extractedFilters.category : [extractedFilters.category];
+          if (cats.length > 0) engFilterClauses.push({ compound: { should: cats.map(c => ({ text: { query: c, path: "category" } })), minimumShouldMatch: 1 } });
+        }
+        if (extractedFilters?.color?.length) {
+          const colors = (Array.isArray(extractedFilters.color) ? extractedFilters.color : [extractedFilters.color])
+            .filter(c => c && !c.includes(' - ')); // strip style descriptors like "חלק - רק צבע אחד"
+          if (colors.length > 0) engFilterClauses.push({ compound: { should: colors.map(c => ({ text: { query: c, path: "colors" } })), minimumShouldMatch: 1 } });
+        }
+        const engSearchPipeline = [
+          { $search: { index: "default", compound: { must: mustClauses, filter: engFilterClauses } } },
+          { $limit: 25 }
+        ];
+        const _engClient = await getMongoClient();
+        const _engCollection = _engClient.db(dbName).collection(collectionName);
+        const quickEngResults = await _engCollection.aggregate(engSearchPipeline).toArray();
+        if (quickEngResults.length > 0) {
+          console.log(`[${requestId}] ⚡ QUICK ENGLISH SEARCH: found ${quickEngResults.length} products for "${precomputedTranslation}" — returning without full search`);
+          const formatted = quickEngResults.map((p, i) => ({
+            _id: p._id.toString(),
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            price: p.price,
+            image: p.image,
+            url: p.url,
+            highlight: false,
+            type: p.type,
+            category: p.category,
+            softCategory: p.softCategory,
+            specialSales: p.specialSales,
+            onSale: !!(p.specialSales?.length),
+            ItemID: p.ItemID,
+            explanation: null,
+            softFilterMatch: false,
+            rrf_score: 1000 - i,
+            searchMode: 'english-fallback'
+          }));
+          return res.json(isModernMode ? {
+            products: formatted,
+            metadata: { query, requestId, searchMode: 'english-fallback', executionTime: Date.now() - searchStartTime }
+          } : formatted);
+        }
+        console.log(`[${requestId}] ⚡ QUICK ENGLISH SEARCH: 0 results for "${precomputedTranslation}" — proceeding to full search`);
+      }
+    } catch (engErr) {
+      console.error(`[${requestId}] ⚡ Quick English search error (non-fatal):`, engErr.message);
+    }
+  }
+
   if (!query || !dbName || !collectionName) {
     return res.status(400).json({
       error: "Either apiKey **or** (dbName & collectionName) must be provided",
@@ -10887,7 +10984,7 @@ app.post("/search", async (req, res) => {
         isSimple: false,
         filters: unifiedDecision.filters
       };
-      console.log(`[${requestId}] ⚡ Phase 1 skipped LLM calls — using unified decision (filters: ${JSON.stringify(unifiedDecision.filters)})`);
+      // (unified decision reused — no extra LLM call)
     } else {
       // STANDARD PATH: no Atlas results in Phase 0 → run full parallel analysis
       [analysisResult, queryEmbedding, translatedQueryCandidate] = await Promise.all([
@@ -10913,7 +11010,7 @@ app.post("/search", async (req, res) => {
     const enhancedFilters = analysisResult.filters;
     const isComplexQueryResult = !isSimpleResult;
 
-    console.log(`[${requestId}] 🚀 Phase 1 analysis done in ${Date.now() - analysisStartTime}ms (isComplex=${isComplexQueryResult}, unified=${!!unifiedDecision})`);
+    // phase 1 done
 
     // 🧠 SMART CATEGORY LEARNING: Fire-and-forget learning from AI filter extraction
     // Combine unmatched words from Phase 0 with AI-rejected soft categories
@@ -10931,7 +11028,7 @@ app.post("/search", async (req, res) => {
     // ============================================================
     // 🛤️ ROUTING BASED ON CLASSIFICATION
     // ============================================================
-    console.log(`[${requestId}] 🔍 Query classification: "${query}" → ${isComplexQueryResult ? '🔴 COMPLEX' : '🟢 SIMPLE'}`);
+    // classification logged after filters are built below
 
     // Handle progressive loading phases (Phase 1 & 2)
     if (phase === 'text-matches-only' && isSimpleResult) {
@@ -10968,30 +11065,16 @@ app.post("/search", async (req, res) => {
         const hasSoft = enhancedFilters.softCategory || enhancedFilters.color || (enhancedFilters.price || enhancedFilters.minPrice || enhancedFilters.maxPrice);
         
         if (hasHard && hasSoft) {
-           console.log(`[${requestId}] 🛡️  SIMPLE QUERY WITH MIXED FILTERS: Keeping category "${originalCategory}" because other filters also exist (e.g. soft/price)`);
            // Do NOT clear category
         } else if (req.store.enableSimpleCategoryExtraction) {
-           // If enableSimpleCategoryExtraction is ON, keep all extracted filters for simple queries
-           console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH enableSimpleCategoryExtraction: Keeping all filters (category="${originalCategory}", softCategory="${enhancedFilters.softCategory}")`);
            // Do NOT clear filters - user explicitly wants category extraction on simple queries
         } else {
-            // Hard category extracted by AI is a DEAL BREAKER. Keep it.
-            // We removed the logic that clears category if not in query words ("Campari" -> "Gin")
-            // because users want strict filtering ("Red Chair" -> only Chairs) even for simple queries.
-            if (originalCategory) {
-               console.log(`[${requestId}] 🛡️ SIMPLE QUERY: Category "${originalCategory}" KEPT as deal breaker (enforcing strict category filtering)`);
-            }
 
             // Always clear price filters for simple queries (prices need explicit intent)
             enhancedFilters.price = undefined;
             enhancedFilters.minPrice = undefined;
             enhancedFilters.maxPrice = undefined;
         }
-      }
-    } else {
-      // Complex queries: Keep category filters (they're part of the intent)
-      if (originalCategory) {
-        console.log(`[${requestId}] ✅ COMPLEX QUERY: Category "${originalCategory}" will be KEPT for filtering`);
       }
     }
     
@@ -11067,7 +11150,7 @@ app.post("/search", async (req, res) => {
     if (session_id && (hardFilters.category || softFilters.softCategory)) {
       trackQueryCategories(db, session_id, hardFilters.category, softFilters.softCategory)
         .then(() => {
-          console.log(`[${requestId}] 👤 QUERY TRACKING: Saved search categories to profile (hard: ${hardFilters.category || 'none'}, soft: ${softFilters.softCategory || 'none'})`);
+          // profile updated;
         })
         .catch(err => {
           console.error(`[${requestId}] 👤 Error tracking query categories:`, err.message);
@@ -11103,7 +11186,7 @@ app.post("/search", async (req, res) => {
     if (softFilters.color?.length) filterParts.push(`color:${JSON.stringify(softFilters.color)}`);
     if (hardFilters.price) filterParts.push(`price:${hardFilters.price}`);
     if (hardFilters.minPrice || hardFilters.maxPrice) filterParts.push(`range:${hardFilters.minPrice || '?'}-${hardFilters.maxPrice || '?'}`);
-    console.log(`[${requestId}] Filters: ${filterParts.length > 0 ? filterParts.join(', ') : 'none'}${originalCategory && !hardFilters.category ? ` (cleared cat:"${originalCategory}" for simple query)` : ''}`);
+    console.log(`[${requestId}] 🔍 "${query}"${translatedQuery !== query ? ` → "${translatedQuery}"` : ''} | ${isComplexQueryResult ? 'COMPLEX' : 'SIMPLE'} | ${filterParts.length > 0 ? filterParts.join(', ') : 'no filters'}`);
 
     const hasExtractedHardFilters = hardFilters.category || hardFilters.type || hardFilters.price || hardFilters.minPrice || hardFilters.maxPrice;
     const hasExtractedSoftFilters = (softFilters.softCategory && softFilters.softCategory.length > 0) || (softFilters.color && softFilters.color.length > 0);
@@ -11167,7 +11250,7 @@ app.post("/search", async (req, res) => {
         );
         
         const filterExecutionTime = Date.now() - filterStartTime;
-        console.log(`[${requestId}] Filter-only results: ${combinedResults.length} products in ${filterExecutionTime}ms (limited to ${searchLimit * 3} for optimal latency)`);
+        console.log(`[${requestId}] ✅ Filter-only: ${combinedResults.length} products in ${filterExecutionTime}ms`);
         
         // Set reorderedData to maintain consistent response structure
         reorderedData = combinedResults.slice(0, 100).map((result) => ({ 
@@ -11176,7 +11259,7 @@ app.post("/search", async (req, res) => {
         }));
         llmReorderingSuccessful = false; // No LLM reordering for filter-only
         
-        console.log(`[${requestId}] Filter-only path completed successfully`);
+        // Filter-only path done
 
         // 🔗 SOFT CATEGORY EXPANSION: If filter-only returned too few results, expand with OR logic
         if (combinedResults.length < searchLimit && hasSoftFilters && softFilters.softCategory && softFilters.softCategory.length > 0) {
@@ -11188,7 +11271,7 @@ app.post("/search", async (req, res) => {
               : [softFilters.softCategory.toLowerCase()];
             const slotsAvailable = searchLimit - combinedResults.length;
 
-            console.log(`[${requestId}] 🔗 FILTER-ONLY EXPANSION: Found ${combinedResults.length} exact matches (AND logic), expanding with OR logic to fill ${slotsAvailable} slots`);
+            // Filter-only expansion: ${slotsAvailable} slots to fill
 
             // Build expansion query: match ANY soft category (OR logic) instead of ALL (AND logic)
             const expansionQuery = buildOptimizedFilterOnlyPipeline(
@@ -11215,9 +11298,7 @@ app.post("/search", async (req, res) => {
 
               combinedResults = [...combinedResults, ...newProducts];
               const expansionTime = Date.now() - expansionStart;
-              console.log(`[${requestId}] 🔗 FILTER-ONLY EXPANSION: Added ${newProducts.length} products with OR logic (${softCats.join(' OR ')}) in ${expansionTime}ms - total now: ${combinedResults.length}`);
-            } else {
-              console.log(`[${requestId}] 🔗 FILTER-ONLY EXPANSION: No additional products found with OR logic`);
+              // Filter-only expanded +${newProducts.length}
             }
           } catch (expansionError) {
             console.error(`[${requestId}] ❌ Filter-only expansion failed:`, expansionError.message);
@@ -11242,12 +11323,12 @@ app.post("/search", async (req, res) => {
         if (softFilters.color) {
           softFiltersDescription.push(`color: ${JSON.stringify(softFilters.color)}`);
         }
-        console.log(`[${requestId}] Executing explicit soft category search with filters: ${softFiltersDescription.join(', ')}`);
+        // Executing soft category search: ${softFiltersDescription.join(', ')}
         
         // Check if we're in image mode with soft categories
         const isImageModeWithSoftCategories = syncMode === 'image';
         if (isImageModeWithSoftCategories) {
-          console.log(`[${requestId}] Image mode detected - reducing text search boosts by 90%`);
+          // Image mode: text boosts reduced
         }
         
         // 🎯 CREATE BOOST MAP for complex queries: query-extracted categories get 100x boost
@@ -11260,7 +11341,7 @@ app.post("/search", async (req, res) => {
           complexQueryBoostMap[cat] = 100; // 🎯 QUERY-EXTRACTED: 100x boost for initial results
         });
         
-        console.log(`[${requestId}] 🎯 COMPLEX QUERY BOOST MAP (initial search):`, complexQueryBoostMap);
+        // Boost map: ${JSON.stringify(complexQueryBoostMap)}
         
         combinedResults = await executeExplicitSoftCategorySearch(
           collection,
@@ -11310,6 +11391,8 @@ app.post("/search", async (req, res) => {
           }).sort((a, b) => b.rrf_score - a.rrf_score).slice(0, searchLimit * 3);
           // Soft-category matches first (highest priority), then supplemental
           combinedResults = [...combinedResults, ...supplementResults];
+          // Signal to rerank call-site that this set is mixed (not all pre-filtered) → full LLM rerank
+          wasSoftSupplemented = true;
           console.log(`[${requestId}] 🔄 Supplemented: ${hasExisting ? combinedResults.length - supplementResults.length : 0} soft-match + ${supplementResults.length} vector/fuzzy = ${combinedResults.length} total — LLM will rerank`);
         }
 
@@ -11328,8 +11411,7 @@ app.post("/search", async (req, res) => {
         // Using user-specified or default limits (defined at the top of the endpoint)
         // searchLimit and vectorLimit are already defined above
         
-        console.log(`[${requestId}] Pure hard category search: ${isPureHardCategorySearch}, Limits: fuzzy=${searchLimit}, vector=${vectorLimit}`);
-        console.log(`[${requestId}] Performing combined fuzzy + vector search (ANN)`);
+        // Combined fuzzy+vector search (pure hard cat: ${isPureHardCategorySearch})
         
         const searchPromises = [
           collection.aggregate(buildStandardSearchPipeline(
@@ -11341,6 +11423,8 @@ app.post("/search", async (req, res) => {
         ];
         
         const [fuzzyResults, vectorResults] = await Promise.all(searchPromises);
+
+      // Vector results available in vectorResults (${vectorResults?.length || 0})
 
       const documentRanks = new Map();
       fuzzyResults.forEach((doc, index) => {
@@ -11369,21 +11453,77 @@ app.post("/search", async (req, res) => {
         .sort((a, b) => b.rrf_score - a.rrf_score)
         .slice(0, searchLimit * 3); // Limit early to reduce processing latency while keeping quality
         
-      // Log tier 1 text match results for standard search (including near-exact matches)
-      const tier1Results = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 8000);
-      if (tier1Results.length > 0) {
-        console.log(`[${requestId}] Tier 1: ${tier1Results.length} text matches`);
-      }
+      // tier1 text matches logged via Tier 1 log above
     }
   }
+
+    // 🌐 TRANSLATED QUERY NAME/DESC PHASE (complex queries only)
+    // Direct regex match on name + description with the translated terms.
+    // Atlas full-text search covers these fields too, but through stemming/fuzzy — this catches
+    // literal term matches that Atlas misses or under-ranks (e.g. "cornflakes" in a description
+    // when searching "דגני בוקר" → translated "breakfast cereal").
+    if (isComplexQueryResult && translatedQuery && translatedQuery !== query && translatedQuery.trim()) {
+      const translatedWords = translatedQuery.trim().split(/\s+/).filter(w => w.length > 2);
+      if (translatedWords.length > 0) {
+        // Uses Atlas Search compound.should so queries hit the index (not a full collection scan)
+        const translatedAtlasFilterClauses = [
+          {
+            compound: {
+              should: [
+                { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
+                { text: { query: "instock", path: "stockStatus" } }
+              ],
+              minimumShouldMatch: 1
+            }
+          }
+        ];
+        if (hardFilters.category) {
+          const cats = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
+          if (cats.length > 0) translatedAtlasFilterClauses.push({ compound: { should: cats.map(c => ({ text: { query: c, path: "category" } })), minimumShouldMatch: 1 } });
+        }
+        const translatedAtlasPipeline = [
+          {
+            $search: {
+              index: "default",
+              compound: {
+                should: translatedWords.map(word => ({ text: { query: word, path: ["name", "description1"] } })),
+                minimumShouldMatch: 1,
+                filter: translatedAtlasFilterClauses
+              }
+            }
+          },
+          { $limit: 15 }
+        ];
+        const existingIds = new Set(combinedResults.map(r => r._id.toString()));
+        try {
+          const translatedNameMatches = await collection.aggregate(translatedAtlasPipeline).toArray();
+          const newMatches = translatedNameMatches
+            .filter(doc => !existingIds.has(doc._id.toString()))
+            .map(doc => ({
+              ...doc,
+              rrf_score: 800, // decent priority — above pure-vector noise
+              softFilterMatch: false,
+              softCategoryMatches: 0,
+              exactMatchBonus: 0,
+              fuzzyRank: Infinity,
+              vectorRank: Infinity,
+              translatedNameMatch: true
+            }));
+          if (newMatches.length > 0) {
+            combinedResults = [...combinedResults, ...newMatches];
+            if (newMatches.length > 0) console.log(`[${requestId}] 🌐 Translated name/desc: +${newMatches.length} matches`);
+          }
+        } catch (err) {
+          console.error(`[${requestId}] 🌐 TRANSLATED NAME/DESC phase error (non-fatal):`, err.message);
+        }
+      }
+    }
 
     // TWO-STEP SEARCH FOR SIMPLE QUERIES
     // Step 1: Pure text search to find strong matches
     // Step 2: Extract categories and do category-filtered search
     // CRITICAL: This must be OUTSIDE the complex query block above (line 5583)
-    console.log(`[${requestId}] 🔍 TWO-STEP CHECK: isSimpleResult=${isSimpleResult}, shouldUseFilterOnly=${shouldUseFilterOnly}, combined=${isSimpleResult && !shouldUseFilterOnly}`);
     if (isSimpleResult && !shouldUseFilterOnly) {
-      console.log(`[${requestId}] 🚀 Starting two-step search for simple query`);
 
         try {
           // OPTIMIZATION: Reuse preliminary search results instead of querying again
@@ -11393,7 +11533,6 @@ app.post("/search", async (req, res) => {
           if (preliminaryTextSearchResults && preliminaryTextSearchResults.length > 0) {
             // Reuse preliminary results (already fetched with limit 100)
             textSearchResults = preliminaryTextSearchResults;
-            console.log(`[${requestId}] Step 1: Reusing ${textSearchResults.length} preliminary results`);
           } else {
             // Fallback: Perform fresh search if preliminary results unavailable
             console.log(`[${requestId}] Step 1: Fresh text search`);
@@ -11526,15 +11665,13 @@ app.post("/search", async (req, res) => {
           }
 
           if (highQualityTextMatches.length > 0) {
-            console.log(`[${requestId}] Found ${highQualityTextMatches.length} high-quality text matches (after category filters)`);
-            
             console.log(`[${requestId}] Tier 1: ${highQualityTextMatches.length} matches, top: "${highQualityTextMatches[0]?.name}" (bonus:${highQualityTextMatches[0]?.exactMatchBonus})`);
 
             // OPTIMIZATION: Early exit if we have enough excellent matches
             // Skip Step 2 category search to reduce database load by additional 50%
             const excellentMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= 5000);
             if (excellentMatches.length >= Math.min(searchLimit, 10)) {
-              console.log(`[${requestId}] ⚡ EARLY EXIT: ${excellentMatches.length} excellent matches found (bonus >= 5000) - SKIPPING Step 2 category search`);
+              console.log(`[${requestId}] ⚡ Early exit: ${excellentMatches.length} excellent matches — skipping Tier 2`);
 
               // Mark all as high text matches
               excellentMatches.forEach(match => {
@@ -11552,7 +11689,7 @@ app.post("/search", async (req, res) => {
                 softCategoryFiltered: queryExtractedSoftCatsArray.length > 0 // Mark that soft category filter was applied
               };
 
-              console.log(`[${requestId}] Returning ${combinedResults.length} excellent text matches without category search${queryExtractedSoftCatsArray.length > 0 ? ` (filtered by soft categories: ${JSON.stringify(queryExtractedSoftCatsArray)})` : ''}`);
+              // Returning ${combinedResults.length} excellent matches
             } else {
               // CRITICAL: For very strong exact matches, extract categories from TOP 2 results ONLY
               // This prevents fuzzy noise (e.g., "סלמי" when searching "סלרי") from polluting category extraction
@@ -11637,7 +11774,7 @@ app.post("/search", async (req, res) => {
             const hardCategoriesArray = Array.from(extractedHardCategories);
             const softCategoriesArray = Array.from(extractedSoftCategories);
 
-            console.log(`[${requestId}] 🏷️ Extracted categories: ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft`);
+            // Extracted: ${hardCategoriesArray.length} hard, ${softCategoriesArray.length} soft categories
             
             // Fetch embeddings for seed products if needed
             let topProductEmbeddings = [];
@@ -11646,25 +11783,17 @@ app.post("/search", async (req, res) => {
                 const seedIds = seedProducts.map(p => p._id);
                 const fullSeedDocs = await collection.find({ _id: { $in: seedIds } }).project({ _id: 1, embedding: 1, name: 1 }).toArray();
                 topProductEmbeddings = fullSeedDocs.filter(doc => doc.embedding && Array.isArray(doc.embedding));
-                if (topProductEmbeddings.length > 0) {
-                  console.log(`[${requestId}] 🧬 Found ${topProductEmbeddings.length} seed embeddings for similarity search`);
-                }
+                // ${topProductEmbeddings.length} seed embeddings found
               } catch (embedError) {
                 console.warn(`[${requestId}] ⚠️ Failed to fetch seed embeddings:`, embedError.message);
               }
             }
 
-            if (hardCategoriesArray.length > 0) {
-              console.log(`[${requestId}] Hard categories: ${JSON.stringify(hardCategoriesArray)}`);
-            }
-            if (softCategoriesArray.length > 0) {
-              console.log(`[${requestId}] Soft categories: ${JSON.stringify(softCategoriesArray)}`);
-            }
+            // hard: ${JSON.stringify(hardCategoriesArray)}, soft: ${JSON.stringify(softCategoriesArray)}
 
             // 🚀 FAST SEARCH MODE: Skip Tier 2 and return only textual results (Tier 1)
             if (isFastSearchMode && highQualityTextMatches.length > 0) {
-              console.log(`[${requestId}] ⚡ FAST SEARCH MODE: Skipping Tier 2, returning only textual results (Tier 1)`);
-              console.log(`[${requestId}]    Text matches found: ${highQualityTextMatches.length}`);
+              console.log(`[${requestId}] ⚡ Fast mode: returning ${highQualityTextMatches.length} Tier 1 results only`);
 
               // Mark all as high text matches and return
               highQualityTextMatches.forEach(match => {
@@ -12125,14 +12254,12 @@ app.post("/search", async (req, res) => {
               const filterDesc = [];
               if (preRerankHardCatsArray.length > 0) filterDesc.push(`category: [${preRerankHardCatsArray.join(', ')}]`);
               if (preRerankTypesArray.length > 0) filterDesc.push(`type: [${preRerankTypesArray.join(', ')}]`);
-              console.log(`[${requestId}] 🛡️ [PRE-RERANK HARD FILTER] Filtered ${preRerankFiltered} products not matching extracted filters (${filterDesc.join(', ')}) before LLM (${beforePreRerank} → ${resultsForRerank.length})`);
-            } else {
-              console.log(`[${requestId}] 🛡️ [PRE-RERANK HARD FILTER] All ${beforePreRerank} products match extracted filters - proceeding to LLM`);
+              console.log(`[${requestId}] 🛡️ Pre-rerank: filtered ${preRerankFiltered} → ${resultsForRerank.length} remain`);
             }
 
             // If filtering removed everything, fall back to all results
             if (resultsForRerank.length === 0) {
-              console.log(`[${requestId}] ⚠️ Pre-rerank filter removed all results - falling back to unfiltered`);
+              console.log(`[${requestId}] ⚠️ Pre-rerank filter removed all results — falling back to unfiltered`);
               resultsForRerank = combinedResults;
             }
           } else {
@@ -12144,11 +12271,14 @@ app.post("/search", async (req, res) => {
             (Array.isArray(softFilters.softCategory) && softFilters.softCategory.filter(Boolean).length > 0) ||
             (Array.isArray(softFilters.color) && softFilters.color.filter(Boolean).length > 0)
           );
-          const isFilterHeavyRerank = hasHardFilters && rerankHasSoftFilters;
+          // Disable filter-heavy mode if we supplemented soft results — the set is mixed and needs full LLM analysis
+          const isFilterHeavyRerank = hasHardFilters && rerankHasSoftFilters && !wasSoftSupplemented;
 
-          // Send up to 20 products normally; only 10 in filter-heavy mode (filters already did the work)
-          const llmLimit = isFilterHeavyRerank ? 10 : 20;
-          console.log(`[${requestId}] ${isFilterHeavyRerank ? '⚡ Filter-heavy:' : ''} Sending ${resultsForRerank.length} products to LLM for re-ranking (limiting to ${llmLimit} results${shouldUseFastLLM ? ' - FAST MODE' : ''}).`);
+          // When nothing matched soft categories, the pre-sort is unreliable → give LLM more candidates
+          const noSoftMatches = combinedResults.every(r => (r.softCategoryMatches || 0) === 0);
+          // Max 25 always. Filter-heavy: 10 (filters did the work). Blind pre-sort: 25. Normal: 20.
+          const llmLimit = isFilterHeavyRerank ? 10 : (noSoftMatches ? 25 : 20);
+          console.log(`[${requestId}] 🤖 LLM rerank: ${resultsForRerank.length} → ${llmLimit}${isFilterHeavyRerank ? ' ⚡filter-heavy' : ''}${shouldUseFastLLM ? ' fast' : ''}`);
 
           reorderedData = await reorderFn(resultsForRerank, translatedQuery, query, [], explain, context, softFilters, llmLimit, shouldUseFastLLM, llmUserProfile, false, isFilterHeavyRerank);
           
@@ -12156,7 +12286,7 @@ app.post("/search", async (req, res) => {
           aiCircuitBreaker.recordSuccess();
           
           llmReorderingSuccessful = true;
-          console.log(`[${requestId}] LLM reordering successful. Reordered ${reorderedData.length} products`);
+          console.log(`[${requestId}] ✅ LLM → ${reorderedData.length} results`);
           
         } catch (error) {
           console.error("Error reordering results with Gemini:", error);
@@ -12412,52 +12542,18 @@ app.post("/search", async (req, res) => {
           }
         }
       } else {
-        console.log(`[${requestId}] ✅ TWO-STEP SEARCH: Skipping exact match filter to preserve Tier 2 semantic matches`);
+        // Skipping exact match filter (Tier 2 path)
       }
     }
 
-    // Log results breakdown
-    // 🎯 WEIGHTED SCORE PRIORITY: Products with high weighted scores (e.g., query-extracted categories)
-    // should rank higher than products with multiple low-weight categories
-    const highWeightedProducts = combinedResults.filter(r => (r.softCategoryWeightedScore || 0) >= 100);
-    const multiCategoryProducts = combinedResults.filter(r => (r.softCategoryMatches || 0) >= 2 && (r.softCategoryWeightedScore || 0) < 100);
-    const singleCategoryProducts = combinedResults.filter(r => r.softFilterMatch && (r.softCategoryMatches || 0) === 1 && (r.softCategoryWeightedScore || 0) < 100);
-    const textMatchProducts = combinedResults.filter(r => (r.exactMatchBonus || 0) >= 20000); // Use same threshold
-
-    if (isSimpleResult) {
-      console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - HIGHEST PRIORITY for simple queries`);
-    } else {
-      console.log(`[${requestId}] Text keyword matches: ${textMatchProducts.length} - not prioritized for complex queries`);
-    }
-    console.log(`[${requestId}] 🎯 High-weighted products (score >= 100): ${highWeightedProducts.length} - QUERY-EXTRACTED CATEGORIES`);
-    console.log(`[${requestId}] Multi-category products (2+ matches, score < 100): ${multiCategoryProducts.length} - Lower priority`);
-    console.log(`[${requestId}] Single-category products (score < 100): ${singleCategoryProducts.length}`);
-
-    const topResults = combinedResults.slice(0, 5);
-    console.log(`[${requestId}] Top 5 results after sorting:`,
-      topResults.map(p => ({
-        name: p.name,
-        textMatchBonus: p.exactMatchBonus || 0,
-        softCategoryMatches: p.softCategoryMatches || 0,
-        softCategoryWeightedScore: p.softCategoryWeightedScore || 0, // 🎯 Show weighted score
-        rrf_score: p.rrf_score,
-        isMultiCategory: (p.softCategoryMatches || 0) >= 2,
-        isHighWeighted: (p.softCategoryWeightedScore || 0) >= 100, // 🎯 Query-extracted category indicator
-        hasTextMatch: (p.exactMatchBonus || 0) >= 20000
-      }))
-    );
 
     // Prepare final results - different logic for complex vs simple queries
     let finalResults;
 
     if (llmReorderingSuccessful) {
-      // Complex query with LLM reordering - need database lookup
-      console.log(`[${requestId}] ✅ Taking COMPLEX QUERY path: LLM-reordered results with database lookup`);
       const reorderedIds = reorderedData.map(item => item._id);
       const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
-      console.log(`[${requestId}] reorderedIds length: ${reorderedIds.length}, sample:`, reorderedIds.slice(0, 3));
       let orderedProducts = await getProductsByIds(reorderedIds, dbName, collectionName);
-      console.log(`[${requestId}] orderedProducts length: ${orderedProducts.length}`);
 
       // 🛡️ HARD CATEGORY ENFORCEMENT ON LLM RERANK RESULTS:
       // If query extracted a hard category (e.g., "יין לבן"), filter LLM-selected products
@@ -12519,7 +12615,7 @@ app.post("/search", async (req, res) => {
         const reorderedProductIds = new Set(orderedProducts.map(p => p._id.toString()));
         let remainingResults = [];
 
-        console.log(`[${requestId}] Filtered remaining results: ${combinedResults.length} total - ${orderedProducts.length} LLM-selected (after hard category gate)`);
+        // Remaining: ${combinedResults.length} total − ${orderedProducts.length} LLM-selected
 
         // CRITICAL: Re-run vector search with category filter
         // 🛡️ PRIORITY: Use query-extracted hard category if available, otherwise fall back to LLM-product categories
@@ -12529,7 +12625,7 @@ app.post("/search", async (req, res) => {
           if (queryHardCatsForRerankArray.length > 0) {
             // 🛡️ Use query-extracted hard category - this is the authoritative source
             categoriesForVectorRerun = queryHardCatsForRerankArray;
-            console.log(`[${requestId}] 🛡️ VECTOR RE-RUN: Using QUERY-EXTRACTED hard category [${categoriesForVectorRerun.join(', ')}]`);
+            // Vector re-run with query-extracted hard categories
           } else {
             // Fallback: extract from LLM-selected products
             categoriesForVectorRerun = [];
@@ -12541,11 +12637,10 @@ app.post("/search", async (req, res) => {
                 }
               });
             });
-            console.log(`[${requestId}] 🔄 VECTOR RE-RUN: Using PRODUCT-EXTRACTED categories [${categoriesForVectorRerun.join(', ')}]`);
+            // Vector re-run with product-extracted categories
           }
 
           if (categoriesForVectorRerun.length > 0) {
-            console.log(`[${requestId}] 🔄 Re-running vector search with category filter: [${categoriesForVectorRerun.join(', ')}]`);
 
             // Build hard filters with extracted category
             const categoryFilteredHardFilters = { ...hardFilters, category: categoriesForVectorRerun };
@@ -12561,7 +12656,7 @@ app.post("/search", async (req, res) => {
               )
             ).toArray();
             
-            console.log(`[${requestId}] 🔄 Category-filtered vector search returned ${categoryFilteredVectorResults.length} results (limit: 100)`);
+            // Category-filtered vector search: ${categoryFilteredVectorResults.length} results
             
             // Convert to combinedResults format with QUERY-SPECIFIC boost map
             const querySoftCats = Array.isArray(softFilters.softCategory) 
@@ -12614,9 +12709,7 @@ app.post("/search", async (req, res) => {
             );
           });
           const remainingFiltered = beforeRemaining - remainingResults.length;
-          if (remainingFiltered > 0) {
-            console.log(`[${requestId}] 🛡️ [HARD CATEGORY GATE] Remaining results: Filtered out ${remainingFiltered} products not matching query hard category [${queryHardCatsForRerankArray.join(', ')}]`);
-          }
+          // Hard category gate filtered ${remainingFiltered} remaining results
         }
 
         // 🎯 POST-RERANK SOFT CATEGORY BOOST: After LLM reranking, boost soft category matches to the top
@@ -12645,7 +12738,7 @@ app.post("/search", async (req, res) => {
           });
 
           const softMatchCount = remainingResults.filter(r => r.softFilterMatch).length;
-          console.log(`[${requestId}] 🎯 POST-RERANK SOFT CATEGORY BOOST: ${softMatchCount}/${remainingResults.length} remaining results match soft categories [${querySoftCatsForBoost.join(', ')}] — boosted to top`);
+          // Post-rerank soft boost: ${softMatchCount}/${remainingResults.length} soft matches
         }
 
         // Construct finalResults and deduplicate
@@ -12714,12 +12807,10 @@ app.post("/search", async (req, res) => {
           }
         }
 
-        console.log(`[${requestId}] Complex query deduplication: ${complexFinalResults.length} -> ${uniqueComplexResults.length} unique results`);
+        // Deduped: ${complexFinalResults.length} → ${uniqueComplexResults.length}
         finalResults = uniqueComplexResults;
       }
     } else {
-      // Simple query or failed LLM reordering - use combinedResults directly (no database lookup)
-      console.log(`[${requestId}] ✅ Taking SIMPLE QUERY path: Using combinedResults directly (no database lookup)`);
       const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
 
       // First deduplicate combinedResults by _id to prevent pagination duplicates
@@ -12733,7 +12824,7 @@ app.post("/search", async (req, res) => {
         }
       }
 
-      console.log(`[${requestId}] Deduplication: ${combinedResults.length} -> ${uniqueCombinedResults.length} unique results`);
+      // Deduped: ${combinedResults.length} → ${uniqueCombinedResults.length}
 
       finalResults = uniqueCombinedResults.map((r) => {
         // For simple queries: flag products with strong text matches (threshold: 20000+)
@@ -12783,8 +12874,7 @@ app.post("/search", async (req, res) => {
       try {
         userProfile = await getUserProfileForBoosting(dbName, session_id);
         if (userProfile) {
-          console.log(`[${requestId}] 👤 PERSONALIZATION: Loaded profile for session ${session_id}`);
-          console.log(`[${requestId}] 👤 Profile has ${Object.keys(userProfile.preferences?.softCategories || {}).length} learned categories`);
+          // Personalization profile loaded
 
           // STEP 1: Separate textual results from non-textual results
           // Textual results = products that match the search text (highTextMatch OR have exactMatchBonus)
@@ -13157,23 +13247,14 @@ app.post("/search", async (req, res) => {
         paginationSessionId: paginationSessionId // 🎯 Reference to Redis session
       })).toString('base64');
 
-      console.log(`[${requestId}] 🎯 MEMORY OPTIMIZATION: Token size reduced from ~${Math.round(JSON.stringify(extractedFromLLM).length / 1024)}KB to ~${Math.round(JSON.stringify(lightweightExtractedCategories).length / 1024)}KB`);
-      
-      console.log(`[${requestId}] ✅ Complex query: Created tier-2 load-more token with categories from TOP 3 textual matches`);
-      console.log(`[${requestId}] 📊 LLM-extracted categories (from 3 products): hard=${extractedFromLLM.hardCategories?.length || 0}, soft=${extractedFromLLM.softCategories?.length || 0}`);
-      if (extractedFromLLM.hardCategories?.length > 0) {
-        console.log(`[${requestId}]    💎 Hard: ${JSON.stringify(extractedFromLLM.hardCategories)}`);
-      }
-      if (extractedFromLLM.softCategories?.length > 0) {
-        console.log(`[${requestId}]    🎯 Soft: ${JSON.stringify(extractedFromLLM.softCategories)}`);
-      }
+      // Tier-2 load-more token created (${extractedFromLLM.hardCategories?.length || 0} hard, ${extractedFromLLM.softCategories?.length || 0} soft)
     } else if (hasMore) {
       // Simple queries: Only create token if there are more results
       // Check if category extraction is enabled for simple queries
       let extractedForSimple = extractedCategoriesMetadata;
 
       if (req.store.enableSimpleCategoryExtraction && limitedResults.length > 0) {
-        console.log(`[${requestId}] 🎯 SIMPLE QUERY WITH CATEGORY EXTRACTION ENABLED - Preparing tier-2 token`);
+        // Simple query: preparing tier-2 token
 
         // Get the top 3 products for category extraction (same as complex queries)
         const top3Products = limitedResults.slice(0, 3);
