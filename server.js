@@ -3459,7 +3459,7 @@ Extract the following filters from the query if they exist:
    - EXTRACT AGGRESSIVELY: Extract EVERY relevant attribute you can identify from the query. If a query has multiple characteristics, extract ALL of them.
    - GEOGRAPHIC TERMS: "italian"/"איטלקי" → look for "Italy"/"איטליה" in list. "French"/"צרפתי" → "France"/"צרפת". "Spanish"/"ספרדי" → "Spain"/"ספרד". Always map adjective forms to country/region names in the list.
    - FOOD PAIRING: "for pasta"/"לפסטה" → look for "pasta"/"פסטה" in list. "for steak"/"לסטייק" → "steak"/"סטייק" or "meat"/"בשר".
-   - GRAPE VARIETIES: "cabernet"/"קברנה" → look for "cabernet sauvignon" in list. "merlot"/"מרלו" → "merlot" in list.
+   - GRAPE VARIETIES: Match the SPECIFIC variety mentioned. "cabernet franc"/"קברנה פרנק" → look for "קברנה פרנק" EXACTLY. "cabernet sauvignon"/"קברנה סוביניון" → look for "קברנה סוביניון". Only map bare "cabernet"/"קברנה" (no variety suffix) to "cabernet sauvignon"/"קברנה סוביניון". NEVER map "קברנה פרנק" to "קברנה סוביניון" — they are different grape varieties. "merlot"/"מרלו" → "merlot" in list.
    - STYLE/CHARACTER: "fruity"/"פירותי" → look for "fruity" in list. "dry"/"יבש" could be type or soft category.
    - OCCASIONS: "for a gift"/"למתנה" → "gift"/"מתנה". "for dinner"/"לארוחת ערב" → look for dinner/meal in list.
    - USE YOUR WINE KNOWLEDGE: When users mention brand names, extract associated characteristics if they exist in the list
@@ -11010,6 +11010,31 @@ app.post("/search", async (req, res) => {
     const enhancedFilters = analysisResult.filters;
     const isComplexQueryResult = !isSimpleResult;
 
+    // 🛡️ SOFT CATEGORY HALLUCINATION GUARD: Drop any extracted softCategory whose
+    // distinguishing words do not appear in the original query.
+    // Example: query "קברנה פרנק ישראלי" → LLM extracts "קברנה סוביניון" because the prompt
+    // used to say "קברנה → cabernet sauvignon". "סוביניון" is NOT in the query → drop it.
+    // This prevents wrong-variety matches while preserving stem-matched extractions like
+    // "ישראל" for "ישראלי".
+    if (enhancedFilters && Array.isArray(enhancedFilters.softCategory) && enhancedFilters.softCategory.length > 0) {
+      const queryWords = query.toLowerCase().split(/\s+/);
+      enhancedFilters.softCategory = enhancedFilters.softCategory.filter(sc => {
+        if (!sc || typeof sc !== 'string') return false;
+        const scWords = sc.toLowerCase().split(/\s+/).filter(w => w.length >= 3);
+        if (scWords.length === 0) return true; // keep very short single-word cats
+        if (scWords.length === 1) {
+          // Single-word soft categories (e.g. "איטליה" for "איטלקי", "ספרד" for "ספרדי"):
+          // These are valid LLM adjective→noun mappings — always keep them.
+          return true;
+        }
+        // Multi-word soft category (e.g. "קברנה סוביניון"): ALL words must appear in the query.
+        // This prevents "קברנה פרנק" query from extracting "קברנה סוביניון" because "סוביניון" ∉ query.
+        return scWords.every(scWord =>
+          queryWords.some(qw => qw.includes(scWord) || scWord.includes(qw))
+        );
+      });
+    }
+
     // phase 1 done
 
     // 🧠 SMART CATEGORY LEARNING: Fire-and-forget learning from AI filter extraction
@@ -14103,6 +14128,39 @@ app.post("/search-to-cart", async (req, res) => {
             }
           }
 
+          // Update hard category preferences
+          const hardCategories = Array.isArray(product.category)
+            ? product.category
+            : (product.category ? [product.category] : []);
+          for (const category of hardCategories) {
+            if (category && category.trim()) {
+              await profilesCollection.updateOne(
+                { session_id: document.session_id },
+                { $inc: { [`preferences.hardCategories.${category}.carts`]: 1 } }
+              );
+            }
+          }
+
+          // Track cart item (name + id) — keep last 50
+          if (product.name || product.id || product.ItemID) {
+            const cartItem = {
+              id: product.id || product.ItemID || null,
+              name: product.name || null,
+              addedAt: new Date()
+            };
+            await profilesCollection.updateOne(
+              { session_id: document.session_id },
+              {
+                $push: {
+                  'preferences.cartItems': {
+                    $each: [cartItem],
+                    $slice: -50
+                  }
+                }
+              }
+            );
+          }
+
           // Update price range
           if (price > 0) {
             const profile = await profilesCollection.findOne({ session_id: document.session_id });
@@ -14128,7 +14186,7 @@ app.post("/search-to-cart", async (req, res) => {
           }
 
           profileUpdated = true;
-          console.log(`[SEARCH-TO-CART] 👤 Profile updated from cart: categories=[${categoriesLearned.join(', ')}]`);
+          console.log(`[SEARCH-TO-CART] 👤 Profile updated from cart: softCategories=[${categoriesLearned.join(', ')}], hardCategories=[${hardCategories.join(', ')}]`);
         }
       } catch (profileError) {
         console.error("[SEARCH-TO-CART] Profile update error:", profileError.message);
@@ -15646,6 +15704,11 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
       ? product.softCategory
       : (product.softCategory ? [product.softCategory] : []);
 
+    // Extract hard categories from product
+    const hardCategories = Array.isArray(product.category)
+      ? product.category
+      : (product.category ? [product.category] : []);
+
     const price = parseFloat(product.price) || 0;
 
     // Build update operations
@@ -15699,6 +15762,38 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
           }
         );
       }
+    }
+
+    // Track hard category preferences (same weight system as soft categories)
+    for (const category of hardCategories) {
+      if (category && category.trim()) {
+        await profilesCollection.updateOne(
+          { session_id: sessionId },
+          {
+            $inc: { [`preferences.hardCategories.${category}.${categoryField}`]: 1 }
+          }
+        );
+      }
+    }
+
+    // Track cart items (name + id) for cart interactions — keep last 50
+    if (interactionType === 'cart' && (product.name || product.id || product.ItemID)) {
+      const cartItem = {
+        id: product.id || product.ItemID || null,
+        name: product.name || null,
+        addedAt: new Date()
+      };
+      await profilesCollection.updateOne(
+        { session_id: sessionId },
+        {
+          $push: {
+            'preferences.cartItems': {
+              $each: [cartItem],
+              $slice: -50  // keep the 50 most recent
+            }
+          }
+        }
+      );
     }
 
     // Update price range preferences (both global and category-specific)
@@ -15830,14 +15925,16 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
       }
     }
     
-    // Track hard categories from query (store in a separate field for potential future use)
-    if (hardCats.length > 0) {
-      await profilesCollection.updateOne(
-        { session_id: sessionId },
-        {
-          $addToSet: { 'preferences.searchedHardCategories': { $each: hardCats } }
-        }
-      );
+    // Track hard categories from query with weighted search counts
+    for (const category of hardCats) {
+      if (category && category.trim()) {
+        await profilesCollection.updateOne(
+          { session_id: sessionId },
+          {
+            $inc: { [`preferences.hardCategories.${category}.searches`]: 1 }
+          }
+        );
+      }
     }
     
     return true;
@@ -16025,7 +16122,23 @@ function calculateProfileBoost(product, userProfile) {
     }
   }
 
-  // 2. Category-specific price range boost
+  // 2. Hard category boost (preferred product categories from interactions)
+  if (prefs.hardCategories && product.category) {
+    const productHardCats = Array.isArray(product.category)
+      ? product.category
+      : [product.category];
+
+    for (const cat of productHardCats) {
+      const catData = prefs.hardCategories[cat];
+      if (catData) {
+        const score = calculateCategoryScore(catData);
+        // Moderate boost — hard category matches reinforce relevance but are less discriminating
+        boost += Math.min(score * 500, 10000);
+      }
+    }
+  }
+
+  // 3. Category-specific price range boost
   if (product.price) {
     const price = parseFloat(product.price);
     let categoryPriceRange = null;
@@ -16111,6 +16224,8 @@ app.post("/profile/init", async (req, res) => {
       session_id,
       preferences: {
         softCategories: {},
+        hardCategories: {},
+        cartItems: [],
         priceRangesByCategory: {
           // Category-specific price ranges will be added dynamically
           // Example structure:
@@ -16246,11 +16361,24 @@ app.get("/profile/:session_id", async (req, res) => {
       });
     }
 
-    // Calculate top categories with scores
+    // Calculate top soft categories with scores
     const topCategories = Object.entries(profile.preferences?.softCategories || {})
       .map(([category, data]) => ({
         category,
         score: calculateCategoryScore(data),
+        searches: data.searches || 0,
+        clicks: data.clicks || 0,
+        carts: data.carts || 0,
+        purchases: data.purchases || 0
+      }))
+      .sort((a, b) => b.score - a.score);
+
+    // Calculate top hard categories with scores
+    const topHardCategories = Object.entries(profile.preferences?.hardCategories || {})
+      .map(([category, data]) => ({
+        category,
+        score: calculateCategoryScore(data),
+        searches: data.searches || 0,
         clicks: data.clicks || 0,
         carts: data.carts || 0,
         purchases: data.purchases || 0
@@ -16269,8 +16397,12 @@ app.get("/profile/:session_id", async (req, res) => {
         updated_at: profile.updated_at
       },
       analysis: {
-        top_categories: topCategories.slice(0, 10),
-        total_categories_learned: topCategories.length,
+        top_soft_categories: topCategories.slice(0, 10),
+        top_hard_categories: topHardCategories.slice(0, 5),
+        preferred_hard_category: topHardCategories.length > 0 ? topHardCategories[0].category : null,
+        total_soft_categories_learned: topCategories.length,
+        total_hard_categories_learned: topHardCategories.length,
+        recent_cart_items: (profile.preferences?.cartItems || []).slice(-10),
         preference_strength: topCategories.length > 0
           ? (topCategories[0].score > 10 ? 'strong' : topCategories[0].score > 5 ? 'moderate' : 'weak')
           : 'none',
@@ -16308,9 +16440,11 @@ async function getUserProfileForBoosting(dbOrDbName, sessionId) {
     // Only return profile if it has meaningful data
     if (profile && profile.preferences) {
       const hasCategories = Object.keys(profile.preferences.softCategories || {}).length > 0;
+      const hasHardCategories = Object.keys(profile.preferences.hardCategories || {}).length > 0;
       const hasPriceData = (profile.preferences.priceRange?.count || 0) >= 2;
+      const hasCartItems = (profile.preferences.cartItems?.length || 0) > 0;
 
-      if (hasCategories || hasPriceData) {
+      if (hasCategories || hasHardCategories || hasPriceData || hasCartItems) {
         return profile;
       }
     }
