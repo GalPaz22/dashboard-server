@@ -13029,53 +13029,65 @@ app.post("/search", async (req, res) => {
       }
     }
 
-    // 🔄 ZERO-RESULT FALLBACK: If all search strategies returned 0 results,
-    // retry with no filters (plain text search) so the user sees something relevant
+    // 🔄 ZERO-RESULT FALLBACK: Never return 0 products.
+    // If all search strategies returned 0, run simple+vector in parallel with NO filters.
     if (finalResults.length === 0 && query && query.trim().length > 0) {
-      // 🛡️ STRICT MODE: If hard category filters were applied, respect the 0 results.
-      // Exception: if the query also had soft filters (e.g. "קברנה פרנק" → softCategory),
-      // the safety net above should have already found results via vector search.
-      // If we're still at 0 here it means even vector search found nothing — return 0 strictly.
-      if (hardFilters && hardFilters.category && hardFilters.category.length > 0) {
-        console.log(`[${requestId}] 🛡️ STRICT: 0 results found for hard category "${hardFilters.category}"${hasSoftFilters ? ' (soft-filter safety net also found nothing)' : ''}. Returning 0 results (skipping fallback).`);
-      } else {
-        console.log(`[${requestId}] ⚠️ 0 results after all search strategies — falling back to no-filter text search`);
-        try {
-          const noFilterPipeline = buildStandardSearchPipeline(
-            query,
-            query,
-            {}, // No hard filters
-            searchLimit * 2,
-            false,
-            false,
-            [],
-            {} // No soft filters
-          );
-          const noFilterResults = await collection.aggregate(noFilterPipeline).toArray();
-          if (noFilterResults.length > 0) {
-            finalResults = noFilterResults.map(product => ({
-              _id: product._id.toString(),
-              id: product.id,
-              name: product.name,
-              description: product.description,
-              price: product.price,
-              image: product.image,
-              url: product.url,
-              type: product.type,
-              category: product.category,
-              softCategory: product.softCategory,
-              specialSales: product.specialSales,
-              onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-              ItemID: product.ItemID,
-              highlight: false
-            }));
-            console.log(`[${requestId}] ✅ No-filter fallback found ${finalResults.length} results`);
+      const hadHardFilters = hardFilters && hardFilters.category && hardFilters.category.length > 0;
+      console.log(`[${requestId}] ⚠️ 0 results${hadHardFilters ? ` for hard category "${hardFilters.category}"` : ' after all strategies'} — falling back to simple+vector (no filters)`);
+      try {
+        const fallbackEmbed = precomputedEmbedding || await getQueryEmbedding(query).catch(() => null);
+
+        const [fuzzyFallback, vectorFallback] = await Promise.all([
+          collection.aggregate(buildStandardSearchPipeline(
+            query, query, {}, searchLimit * 2, false, false, [], {}
+          )).toArray().catch(() => []),
+          fallbackEmbed
+            ? collection.aggregate(buildStandardVectorSearchPipeline(fallbackEmbed, {}, searchLimit * 2, false)).toArray().catch(() => [])
+            : Promise.resolve([])
+        ]);
+
+        // Merge via reciprocal rank fusion
+        const rankMap = new Map();
+        fuzzyFallback.forEach((doc, i) => {
+          rankMap.set(doc._id.toString(), { fuzzyRank: i, vectorRank: Infinity, doc });
+        });
+        vectorFallback.forEach((doc, i) => {
+          const id = doc._id.toString();
+          const existing = rankMap.get(id);
+          if (existing) {
+            existing.vectorRank = i;
           } else {
-            console.log(`[${requestId}] ℹ️ No-filter fallback also returned 0 results`);
+            rankMap.set(id, { fuzzyRank: Infinity, vectorRank: i, doc });
           }
-        } catch (fallbackErr) {
-          console.warn(`[${requestId}] ⚠️ No-filter fallback failed:`, fallbackErr.message);
+        });
+
+        const merged = Array.from(rankMap.values())
+          .sort((a, b) => (1 / (b.fuzzyRank + 1) + 1 / (b.vectorRank + 1)) - (1 / (a.fuzzyRank + 1) + 1 / (a.vectorRank + 1)));
+
+        if (merged.length > 0) {
+          finalResults = merged.map(({ doc }) => ({
+            _id: doc._id.toString(),
+            id: doc.id,
+            name: doc.name,
+            description: doc.description,
+            price: doc.price,
+            image: doc.image,
+            url: doc.url,
+            type: doc.type,
+            category: doc.category,
+            softCategory: doc.softCategory,
+            specialSales: doc.specialSales,
+            onSale: !!(doc.specialSales && Array.isArray(doc.specialSales) && doc.specialSales.length > 0),
+            ItemID: doc.ItemID,
+            highlight: false,
+            searchMode: 'no-filter-fallback'
+          }));
+          console.log(`[${requestId}] ✅ Simple+vector fallback found ${finalResults.length} results (fuzzy: ${fuzzyFallback.length}, vector: ${vectorFallback.length})`);
+        } else {
+          console.log(`[${requestId}] ℹ️ Simple+vector fallback also returned 0 results`);
         }
+      } catch (fallbackErr) {
+        console.warn(`[${requestId}] ⚠️ Simple+vector fallback failed:`, fallbackErr.message);
       }
     }
 
