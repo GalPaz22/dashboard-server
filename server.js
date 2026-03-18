@@ -9648,6 +9648,20 @@ app.post("/fast-search", async (req, res) => {
         console.error(`[${requestId}] Failed to log fast-search query:`, logError.message);
       }
 
+      // 👤 PERSONALIZATION: Log extracted categories to profile immediately
+      if (session_id && filterCheck) {
+        const hardCats = llmExtractedFilters?.category
+          ? (Array.isArray(llmExtractedFilters.category) ? llmExtractedFilters.category : [llmExtractedFilters.category])
+          : (filterCheck.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories : null);
+        const softCats = llmExtractedFilters?.softCategory
+          ? (Array.isArray(llmExtractedFilters.softCategory) ? llmExtractedFilters.softCategory : [llmExtractedFilters.softCategory])
+          : (filterCheck.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : null);
+        if (hardCats || softCats) {
+          trackQueryCategories(db, session_id, hardCats, softCats)
+            .catch(err => console.error(`[${requestId}] Fast-search profile tracking error:`, err.message));
+        }
+      }
+
       return res.json({
         products: allProducts,
         metadata: {
@@ -10204,6 +10218,16 @@ app.post("/simple-search", async (req, res) => {
 
     console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results + ${aiRecommendations.length} AI recommendations in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
+    // 👤 PERSONALIZATION: Log extracted categories to profile immediately
+    if (session_id && filterCheck) {
+      const hardCats = filterCheck.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories : null;
+      const softCats = filterCheck.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : null;
+      if (hardCats || softCats) {
+        trackQueryCategories(db, session_id, hardCats, softCats)
+          .catch(err => console.error(`[${requestId}] Simple-search profile tracking error:`, err.message));
+      }
+    }
+
     res.json({
       products: allProducts,
       count: allProducts.length,
@@ -10650,6 +10674,17 @@ app.post("/search", async (req, res) => {
           await logQuery(querycollection, query, filters, allProducts, false);
         } catch (logError) {
           console.error(`[${requestId}] Failed to log Phase 0 query:`, logError.message);
+        }
+
+        // 👤 PERSONALIZATION: Log query-extracted categories to profile (Phase 0 path)
+        // Phase 0 returns early so trackQueryCategories (Phase 1) never runs — call it here
+        if (session_id && filterCheck) {
+          const hardCats = filterCheck.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories : null;
+          const softCats = filterCheck.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : null;
+          if (hardCats || softCats) {
+            trackQueryCategories(db, session_id, hardCats, softCats)
+              .catch(err => console.error(`[${requestId}] Phase 0 profile query tracking error:`, err.message));
+          }
         }
 
         return res.json(isModernMode ? {
