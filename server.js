@@ -10272,7 +10272,7 @@ app.post("/search", async (req, res) => {
   // Use limit from user config (via API key), fallback to 5 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
-  const vectorLimit = searchLimit * 3; // INCREASED: 3x for stronger semantic search
+  const vectorLimit = searchLimit * 2; // 2x: enough semantic coverage, lower read pressure
   
   // Limits: fuzzy=${searchLimit}, vector=${vectorLimit}
 
@@ -11423,7 +11423,7 @@ app.post("/search", async (req, res) => {
         // 🔄 FEW/ZERO-RESULT SUPPLEMENT: soft category matched too few products →
         // keep them at the top (they're the best matches) and pad with vector+fuzzy results
         // so the user sees a full page. LLM reranking decides final order.
-        const SOFT_MIN_RESULTS = 10;
+        const SOFT_MIN_RESULTS = 5;
         if (combinedResults.length < SOFT_MIN_RESULTS) {
           const hasExisting = combinedResults.length > 0;
           console.log(`[${requestId}] ⚠️ Soft-category search returned only ${combinedResults.length} results (< ${SOFT_MIN_RESULTS}) — supplementing with fuzzy+vector search`);
@@ -11522,7 +11522,7 @@ app.post("/search", async (req, res) => {
     // Atlas full-text search covers these fields too, but through stemming/fuzzy — this catches
     // literal term matches that Atlas misses or under-ranks (e.g. "cornflakes" in a description
     // when searching "דגני בוקר" → translated "breakfast cereal").
-    if (isComplexQueryResult && translatedQuery && translatedQuery !== query && translatedQuery.trim()) {
+    if (isComplexQueryResult && translatedQuery && translatedQuery !== query && translatedQuery.trim() && combinedResults.length < searchLimit) {
       const translatedWords = translatedQuery.trim().split(/\s+/).filter(w => w.length > 2);
       if (translatedWords.length > 0) {
         // Uses Atlas Search compound.should so queries hit the index (not a full collection scan)
@@ -12734,12 +12734,12 @@ app.post("/search", async (req, res) => {
             // Build hard filters with extracted category
             const categoryFilteredHardFilters = { ...hardFilters, category: categoriesForVectorRerun };
             
-            // Run new vector search with category filter - INCREASED LIMIT for more semantic results
+            // Run new vector search with category filter
             const categoryFilteredVectorResults = await collection.aggregate(
               buildStandardVectorSearchPipeline(
                 queryEmbedding,
                 categoryFilteredHardFilters,
-                100, // INCREASED: Get many more semantically similar results
+                searchLimit * 2, // was 100, now proportional to what we actually need
                 useOrLogic,
                 Array.from(reorderedProductIds) // Exclude already selected products
               )
@@ -16797,49 +16797,27 @@ app.post("/product-click", async (req, res) => {
 
  
 
-    // If product_name not provided, try to fetch it from products collection
-
+    // Fetch product once — used for name enrichment AND profile tracking (avoids double read)
+    let fetchedProduct = null;
     if (!clickDocument.product_name) {
-
       try {
-
         const productsCollection = db.collection('products');
-
-        const product = await productsCollection.findOne({
-
+        fetchedProduct = await productsCollection.findOne({
           $or: [
-
             { ItemID: parseInt(product_id) },
-
             { ItemID: product_id.toString() },
-
             { id: parseInt(product_id) },
-
             { id: product_id.toString() },
-
             { _id: product_id }
-
           ]
-
         });
-
- 
-
-        if (product && product.name) {
-
-          clickDocument.product_name = product.name;
-
+        if (fetchedProduct && fetchedProduct.name) {
+          clickDocument.product_name = fetchedProduct.name;
         }
-
       } catch (productError) {
-
         console.error("[PRODUCT CLICK] Error fetching product name:", productError);
-
       }
-
     }
-
- 
 
     // If search_query not provided but we have session, try to find the most recent query for this session
 
@@ -16889,7 +16867,7 @@ app.post("/product-click", async (req, res) => {
     // =========================================================
     // PERSONALIZATION: Auto-update profile from interaction
     // =========================================================
-    trackUserProfileInteraction(db, session_id, product_id, interactionType, null)
+    trackUserProfileInteraction(db, session_id, product_id, interactionType, fetchedProduct)
       .then(() => console.log(`[PRODUCT CLICK] 👤 Profile auto-updated (${interactionType}) for session: ${session_id}`))
       .catch(err => console.error("[PRODUCT CLICK] Profile update error:", err.message));
 
