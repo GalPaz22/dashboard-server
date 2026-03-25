@@ -10641,7 +10641,9 @@ app.post("/search", async (req, res) => {
           }
         }
 
-        const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations];
+        // 🛡️ STOCK SAFETY NET (Phase 0)
+        const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
+          .filter(p => !p.stockStatus || p.stockStatus === 'instock');
 
         // Update search mode if expansion occurred
         const finalSearchMode = isPerfectFilterMatch
@@ -13124,6 +13126,15 @@ app.post("/search", async (req, res) => {
       } catch (fallbackErr) {
         console.warn(`[${requestId}] ⚠️ Simple+vector fallback failed:`, fallbackErr.message);
       }
+    }
+
+    // 🛡️ STOCK SAFETY NET: Remove out-of-stock products regardless of how they got here.
+    // Vector search filters can be silently ignored if stockStatus isn't indexed in the
+    // vector index, letting outofstock products slip through any pipeline.
+    const beforeStockGate = finalResults.length;
+    finalResults = finalResults.filter(p => !p.stockStatus || p.stockStatus === 'instock');
+    if (beforeStockGate !== finalResults.length) {
+      console.log(`[${requestId}] 🛡️ [STOCK GATE] Removed ${beforeStockGate - finalResults.length} out-of-stock products`);
     }
 
     // Return products based on user's limit configuration
