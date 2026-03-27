@@ -16552,18 +16552,30 @@ const server = app.listen(PORT, async () => {
       await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, background: true });
       console.log("[STARTUP] Ensured index: users.apiKey");
 
-      // Index on profiles.session_id for every store DB
+      // Indexes on profiles + products for every store DB
       const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
       for (const store of storeList) {
         if (!store.dbName) continue;
         try {
           const storeDb = client.db(store.dbName);
+          const products = storeDb.collection("products");
+
+          // profiles.session_id
           await storeDb.collection("profiles").createIndex({ session_id: 1 }, { background: true });
+
+          // category + stockStatus + price — covers recommendation + sweep queries
+          await products.createIndex({ category: 1, stockStatus: 1, price: 1 }, { background: true });
+          // softCategory + stockStatus + price — covers sweep + expansion queries
+          await products.createIndex({ softCategory: 1, stockStatus: 1, price: 1 }, { background: true });
+          // type + stockStatus — covers type-based expansion queries
+          await products.createIndex({ type: 1, stockStatus: 1 }, { background: true });
+          // stockStatus alone — covers post-search $match stages
+          await products.createIndex({ stockStatus: 1 }, { background: true });
         } catch (e) {
           // Non-fatal — index may already exist or collection may not exist yet
         }
       }
-      console.log(`[STARTUP] Ensured index: profiles.session_id across ${storeList.length} stores`);
+      console.log(`[STARTUP] Ensured products + profiles indexes across ${storeList.length} stores`);
     } catch (error) {
       console.error("[STARTUP] Index creation failed:", error);
     }
