@@ -8898,6 +8898,11 @@ function calculateRelevanceScore(products, query, filterCheck) {
  * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
  */
 async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false) {
+  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${limit}`;
+  return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent), 60);
+}
+
+async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
 
   // 🎯 MEMORY PROTECTION: Limit query complexity to prevent OOM
