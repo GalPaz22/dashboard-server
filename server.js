@@ -1344,47 +1344,51 @@ app.get("/get-session-clicks", async (req, res) => {
 
 async function getStoreConfigByApiKey(apiKey) {
   if (!apiKey) return null;
-  const client = await connectToMongoDB(mongodbUri);
-  const coreDb = client.db("users");
-  const userDoc = await coreDb.collection("users").findOne({ apiKey });
-  
-  if (!userDoc) return null;
 
-  // Intelligent fallback: use boosted soft categories if available, otherwise use original
-  // This keeps the server context light by only loading one version
-  let softCategories = "";
-  let softCategoriesBoost = null; // Store boost scores for weighted ranking
+  const cacheKey = `store-config:${apiKey}`;
+  return withCache(cacheKey, async () => {
+    const client = await connectToMongoDB(mongodbUri);
+    const coreDb = client.db("users");
+    const userDoc = await coreDb.collection("users").findOne({ apiKey });
 
-  if (userDoc.credentials?.softCategoriesBoosted) {
-    const boostedObj = userDoc.credentials.softCategoriesBoosted;
-    softCategories = Object.entries(boostedObj)
-      .sort((a, b) => b[1] - a[1])
-      .map(([category, _]) => category);
-    softCategoriesBoost = boostedObj;
-    console.log(`[CONFIG] ${userDoc.dbName}: ${softCategories.length} boosted soft categories`);
-  } else if (userDoc.credentials?.softCategories) {
-    softCategories = userDoc.credentials.softCategories;
-    // using original soft categories
-  } else {
-    console.log(`[CONFIG] ${userDoc.dbName}: no soft categories`);
-  }
+    if (!userDoc) return null;
 
-  return {
-    dbName: userDoc.dbName,
-    products: userDoc.collections?.products || "products",
-    queries: userDoc.collections?.queries || "queries",
-    categories: userDoc.credentials?.categories || "",
-    types: userDoc.credentials?.type || "",
-    softCategories: softCategories,
-    softCategoriesBoost: softCategoriesBoost, // Boost scores for weighted ranking
-    syncMode: userDoc.syncMode || "text",
-    explain: userDoc.explain || false,
-    limit: userDoc.limit || 25,
-    context: userDoc.context || "wine store", // Search limit from user config, default to 25
-    enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
-    firstMatchCategory: userDoc.credentials?.firstMatchCategory || false,// Toggle for category extraction on simple queries (default: false)
-    colors: userDoc.credentials?.colors || "",
-  };
+    // Intelligent fallback: use boosted soft categories if available, otherwise use original
+    // This keeps the server context light by only loading one version
+    let softCategories = "";
+    let softCategoriesBoost = null; // Store boost scores for weighted ranking
+
+    if (userDoc.credentials?.softCategoriesBoosted) {
+      const boostedObj = userDoc.credentials.softCategoriesBoosted;
+      softCategories = Object.entries(boostedObj)
+        .sort((a, b) => b[1] - a[1])
+        .map(([category, _]) => category);
+      softCategoriesBoost = boostedObj;
+      console.log(`[CONFIG] ${userDoc.dbName}: ${softCategories.length} boosted soft categories`);
+    } else if (userDoc.credentials?.softCategories) {
+      softCategories = userDoc.credentials.softCategories;
+      // using original soft categories
+    } else {
+      console.log(`[CONFIG] ${userDoc.dbName}: no soft categories`);
+    }
+
+    return {
+      dbName: userDoc.dbName,
+      products: userDoc.collections?.products || "products",
+      queries: userDoc.collections?.queries || "queries",
+      categories: userDoc.credentials?.categories || "",
+      types: userDoc.credentials?.type || "",
+      softCategories: softCategories,
+      softCategoriesBoost: softCategoriesBoost, // Boost scores for weighted ranking
+      syncMode: userDoc.syncMode || "text",
+      explain: userDoc.explain || false,
+      limit: userDoc.limit || 25,
+      context: userDoc.context || "wine store", // Search limit from user config, default to 25
+      enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
+      firstMatchCategory: userDoc.credentials?.firstMatchCategory || false, // Toggle for category extraction on simple queries (default: false)
+      colors: userDoc.credentials?.colors || "",
+    };
+  }, 300); // 5-minute TTL — short enough to pick up config changes
 }
 
 async function authenticate(req, res, next) {
@@ -2330,6 +2334,9 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     }
   });
 
+  // 🛡️ STOCK SAFETY NET: $search filter may not cover all paths; enforce here
+  pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
+
   return pipeline;
 };
 
@@ -2517,6 +2524,10 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
       description3: 0
     }
   });
+
+  // 🛡️ STOCK SAFETY NET: $vectorSearch filter is silently ignored when stockStatus
+  // is not in the vector index; enforce filtering here at the pipeline level
+  pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
 
   return pipeline;
 }
@@ -8111,13 +8122,10 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
                 explanation: null
               }));
 
-              // Log query
-              try {
-                await logQuery(querycollection, query, extractedFilters, response, false);
-                // query logged to database
-              } catch (logError) {
-                console.error(`[${requestId}] Failed to log query:`, logError.message);
-              }
+              // Log query (fire-and-forget — does not block response)
+              logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+                console.error(`[${requestId}] Failed to log query:`, err.message)
+              );
 
               // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in LLM filter selection results
               logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
@@ -8198,13 +8206,10 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           explanation: null
         }));
 
-        // Log simple query (vector fallback path)
-        try {
-          await logQuery(querycollection, query, extractedFilters, response, false);
-          // query logged to database
-        } catch (logError) {
-          console.error(`[${requestId}] Failed to log query:`, logError.message);
-        }
+        // Log simple query (vector fallback path — fire-and-forget)
+        logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+          console.error(`[${requestId}] Failed to log query:`, err.message)
+        );
 
         res.json({
           products: response,
@@ -8420,13 +8425,10 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       })).toString('base64');
     }
 
-    // Log simple query (text matches path)
-    try {
-      await logQuery(querycollection, query, extractedFilters, response, false);
-      // query logged to database
-    } catch (logError) {
-      console.error(`[${requestId}] Failed to log query:`, logError.message);
-    }
+    // Log simple query (text matches path — fire-and-forget)
+    logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+      console.error(`[${requestId}] Failed to log query:`, err.message)
+    );
 
     res.json({
       products: response,
@@ -8640,13 +8642,10 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       extractedCategories: extractedCategories
     })).toString('base64') : null;
 
-    // Log simple query (category-filtered path)
-    try {
-      await logQuery(querycollection, query, categoryFilteredHardFilters, response, false);
-      // query logged to database
-    } catch (logError) {
-      console.error(`[${requestId}] Failed to log query:`, logError.message);
-    }
+    // Log simple query (category-filtered path — fire-and-forget)
+    logQuery(querycollection, query, categoryFilteredHardFilters, response, false).catch(err =>
+      console.error(`[${requestId}] Failed to log query:`, err.message)
+    );
 
     res.json({
       products: response,
@@ -8887,6 +8886,11 @@ function calculateRelevanceScore(products, query, filterCheck) {
  * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
  */
 async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false) {
+  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${limit}`;
+  return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent), 60);
+}
+
+async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
 
   // 🎯 MEMORY PROTECTION: Limit query complexity to prevent OOM
@@ -9643,9 +9647,11 @@ app.post("/fast-search", async (req, res) => {
           minPrice: llmExtractedFilters?.minPrice,
           maxPrice: llmExtractedFilters?.maxPrice
         };
-        await logQuery(querycollection, query, filters, allProducts, false);
-      } catch (logError) {
-        console.error(`[${requestId}] Failed to log fast-search query:`, logError.message);
+        logQuery(querycollection, query, filters, allProducts, false).catch(err =>
+          console.error(`[${requestId}] Failed to log fast-search query:`, err.message)
+        );
+      } catch (err) {
+        console.error(`[${requestId}] Failed to log fast-search query:`, err.message);
       }
 
       // 👤 PERSONALIZATION: Log extracted categories to profile immediately
@@ -10645,6 +10651,13 @@ app.post("/search", async (req, res) => {
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
           .filter(p => !p.stockStatus || p.stockStatus === 'instock');
 
+        // If stock filter wiped everything, fall through to Phase 1 so the zero-result
+        // fallback can return in-stock alternatives instead of returning nothing
+        if (allProducts.length === 0) {
+          console.log(`[${requestId}] ⚠️ [STOCK GATE] All Phase 0 results were out-of-stock — falling through to Phase 1 for alternatives`);
+          // fall through — don't return
+        } else {
+
         // Update search mode if expansion occurred
         const finalSearchMode = isPerfectFilterMatch
           ? 'perfect-filter-match'
@@ -10665,18 +10678,14 @@ app.post("/search", async (req, res) => {
         // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the Phase 0 results
         logBoostedProducts(allProducts, requestId, "PHASE-0");
 
-        // 📊 LOG QUERY TO DATABASE (Phase 0 path)
-        try {
-          const querycollection = db.collection("queries");
-          const filters = {
-            category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
-            softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
-            color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
-          };
-          await logQuery(querycollection, query, filters, allProducts, false);
-        } catch (logError) {
-          console.error(`[${requestId}] Failed to log Phase 0 query:`, logError.message);
-        }
+        // 📊 LOG QUERY TO DATABASE (Phase 0 path — fire-and-forget)
+        logQuery(db.collection("queries"), query, {
+          category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
+          softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
+          color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
+        }, allProducts, false).catch(err =>
+          console.error(`[${requestId}] Failed to log Phase 0 query:`, err.message)
+        );
 
         // 👤 PERSONALIZATION: Log query-extracted categories to profile (Phase 0 path)
         // Phase 0 returns early so trackQueryCategories (Phase 1) never runs — call it here
@@ -10701,6 +10710,7 @@ app.post("/search", async (req, res) => {
             aiRecommendationsCount: aiRecommendations.length
           }
         } : allProducts);
+        } // end else (allProducts.length > 0 after stock gate)
       }
     } else {
       // Atlas Search found 0 results — run filter extraction + embedding + translation in parallel.
@@ -10857,13 +10867,10 @@ app.post("/search", async (req, res) => {
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
 
-      // 📊 LOG SKU QUERY TO DATABASE
-      try {
-        const querycollection = db.collection("queries");
-        await logQuery(querycollection, query, {}, formattedSKUResults, false);
-      } catch (logError) {
-        console.error(`[${requestId}] Failed to log SKU query:`, logError.message);
-      }
+      // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
+      logQuery(db.collection("queries"), query, {}, formattedSKUResults, false).catch(err =>
+        console.error(`[${requestId}] Failed to log SKU query:`, err.message)
+      );
 
       return res.json(formattedSKUResults);
       
@@ -13116,6 +13123,7 @@ app.post("/search", async (req, res) => {
             specialSales: doc.specialSales,
             onSale: !!(doc.specialSales && Array.isArray(doc.specialSales) && doc.specialSales.length > 0),
             ItemID: doc.ItemID,
+            stockStatus: doc.stockStatus,
             highlight: false,
             searchMode: 'no-filter-fallback'
           }));
@@ -13140,13 +13148,10 @@ app.post("/search", async (req, res) => {
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
     
-    // Log all queries (both simple and complex)
-    try {
-        await logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult);
-        // query logged to database
-    } catch (logError) {
-      console.error(`[${requestId}] Failed to log query:`, logError.message);
-    }
+    // Log all queries (fire-and-forget — does not block response)
+    logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult).catch(err =>
+      console.error(`[${requestId}] Failed to log query:`, err.message)
+    );
 
     const executionTime = Date.now() - searchStartTime;
 
@@ -16547,8 +16552,7 @@ const server = app.listen(PORT, async () => {
       await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, background: true });
       console.log("[STARTUP] Ensured index: users.apiKey");
 
-      // Compound indexes on products collection for every store DB
-      // These cover the sweep, recommendation, and expansion find() calls that were doing full collection scans
+      // Indexes on profiles + products for every store DB
       const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
       for (const store of storeList) {
         if (!store.dbName) continue;
@@ -16571,7 +16575,7 @@ const server = app.listen(PORT, async () => {
           // Non-fatal — index may already exist or collection may not exist yet
         }
       }
-      console.log(`[STARTUP] Ensured products indexes across ${storeList.length} stores`);
+      console.log(`[STARTUP] Ensured products + profiles indexes across ${storeList.length} stores`);
     } catch (error) {
       console.error("[STARTUP] Index creation failed:", error);
     }
