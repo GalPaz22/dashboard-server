@@ -15975,8 +15975,7 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
           "stats.totalClicks": 0,
           "stats.totalCarts": 0,
           "stats.totalPurchases": 0,
-          "stats.totalSpent": 0,
-          "stats.totalSearches": 0
+          "stats.totalSpent": 0
         },
         $inc: incFields
       },
