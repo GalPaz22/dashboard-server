@@ -16537,6 +16537,46 @@ const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
   
+  // Ensure critical MongoDB indexes exist at startup
+  setTimeout(async () => {
+    try {
+      const client = await getMongoClient();
+
+      // Index on users.apiKey — queried on every authenticated request
+      const usersDb = client.db("users");
+      await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, background: true });
+      console.log("[STARTUP] Ensured index: users.apiKey");
+
+      // Compound indexes on products collection for every store DB
+      // These cover the sweep, recommendation, and expansion find() calls that were doing full collection scans
+      const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
+      for (const store of storeList) {
+        if (!store.dbName) continue;
+        try {
+          const storeDb = client.db(store.dbName);
+          const products = storeDb.collection("products");
+
+          // profiles.session_id
+          await storeDb.collection("profiles").createIndex({ session_id: 1 }, { background: true });
+
+          // category + stockStatus + price — covers recommendation + sweep queries
+          await products.createIndex({ category: 1, stockStatus: 1, price: 1 }, { background: true });
+          // softCategory + stockStatus + price — covers sweep + expansion queries
+          await products.createIndex({ softCategory: 1, stockStatus: 1, price: 1 }, { background: true });
+          // type + stockStatus — covers type-based expansion queries
+          await products.createIndex({ type: 1, stockStatus: 1 }, { background: true });
+          // stockStatus alone — covers post-search $match stages
+          await products.createIndex({ stockStatus: 1 }, { background: true });
+        } catch (e) {
+          // Non-fatal — index may already exist or collection may not exist yet
+        }
+      }
+      console.log(`[STARTUP] Ensured products indexes across ${storeList.length} stores`);
+    } catch (error) {
+      console.error("[STARTUP] Index creation failed:", error);
+    }
+  }, 2000);
+
   // Warm cache on startup (only if Redis is available)
   setTimeout(async () => {
     try {
