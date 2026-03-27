@@ -1344,47 +1344,51 @@ app.get("/get-session-clicks", async (req, res) => {
 
 async function getStoreConfigByApiKey(apiKey) {
   if (!apiKey) return null;
-  const client = await connectToMongoDB(mongodbUri);
-  const coreDb = client.db("users");
-  const userDoc = await coreDb.collection("users").findOne({ apiKey });
-  
-  if (!userDoc) return null;
 
-  // Intelligent fallback: use boosted soft categories if available, otherwise use original
-  // This keeps the server context light by only loading one version
-  let softCategories = "";
-  let softCategoriesBoost = null; // Store boost scores for weighted ranking
+  const cacheKey = `store-config:${apiKey}`;
+  return withCache(cacheKey, async () => {
+    const client = await connectToMongoDB(mongodbUri);
+    const coreDb = client.db("users");
+    const userDoc = await coreDb.collection("users").findOne({ apiKey });
 
-  if (userDoc.credentials?.softCategoriesBoosted) {
-    const boostedObj = userDoc.credentials.softCategoriesBoosted;
-    softCategories = Object.entries(boostedObj)
-      .sort((a, b) => b[1] - a[1])
-      .map(([category, _]) => category);
-    softCategoriesBoost = boostedObj;
-    console.log(`[CONFIG] ${userDoc.dbName}: ${softCategories.length} boosted soft categories`);
-  } else if (userDoc.credentials?.softCategories) {
-    softCategories = userDoc.credentials.softCategories;
-    // using original soft categories
-  } else {
-    console.log(`[CONFIG] ${userDoc.dbName}: no soft categories`);
-  }
+    if (!userDoc) return null;
 
-  return {
-    dbName: userDoc.dbName,
-    products: userDoc.collections?.products || "products",
-    queries: userDoc.collections?.queries || "queries",
-    categories: userDoc.credentials?.categories || "",
-    types: userDoc.credentials?.type || "",
-    softCategories: softCategories,
-    softCategoriesBoost: softCategoriesBoost, // Boost scores for weighted ranking
-    syncMode: userDoc.syncMode || "text",
-    explain: userDoc.explain || false,
-    limit: userDoc.limit || 25,
-    context: userDoc.context || "wine store", // Search limit from user config, default to 25
-    enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
-    firstMatchCategory: userDoc.credentials?.firstMatchCategory || false,// Toggle for category extraction on simple queries (default: false)
-    colors: userDoc.credentials?.colors || "",
-  };
+    // Intelligent fallback: use boosted soft categories if available, otherwise use original
+    // This keeps the server context light by only loading one version
+    let softCategories = "";
+    let softCategoriesBoost = null; // Store boost scores for weighted ranking
+
+    if (userDoc.credentials?.softCategoriesBoosted) {
+      const boostedObj = userDoc.credentials.softCategoriesBoosted;
+      softCategories = Object.entries(boostedObj)
+        .sort((a, b) => b[1] - a[1])
+        .map(([category, _]) => category);
+      softCategoriesBoost = boostedObj;
+      console.log(`[CONFIG] ${userDoc.dbName}: ${softCategories.length} boosted soft categories`);
+    } else if (userDoc.credentials?.softCategories) {
+      softCategories = userDoc.credentials.softCategories;
+      // using original soft categories
+    } else {
+      console.log(`[CONFIG] ${userDoc.dbName}: no soft categories`);
+    }
+
+    return {
+      dbName: userDoc.dbName,
+      products: userDoc.collections?.products || "products",
+      queries: userDoc.collections?.queries || "queries",
+      categories: userDoc.credentials?.categories || "",
+      types: userDoc.credentials?.type || "",
+      softCategories: softCategories,
+      softCategoriesBoost: softCategoriesBoost, // Boost scores for weighted ranking
+      syncMode: userDoc.syncMode || "text",
+      explain: userDoc.explain || false,
+      limit: userDoc.limit || 25,
+      context: userDoc.context || "wine store", // Search limit from user config, default to 25
+      enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
+      firstMatchCategory: userDoc.credentials?.firstMatchCategory || false, // Toggle for category extraction on simple queries (default: false)
+      colors: userDoc.credentials?.colors || "",
+    };
+  }, 300); // 5-minute TTL — short enough to pick up config changes
 }
 
 async function authenticate(req, res, next) {
@@ -2330,6 +2334,9 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     }
   });
 
+  // 🛡️ STOCK SAFETY NET: $search filter may not cover all paths; enforce here
+  pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
+
   return pipeline;
 };
 
@@ -2517,6 +2524,10 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
       description3: 0
     }
   });
+
+  // 🛡️ STOCK SAFETY NET: $vectorSearch filter is silently ignored when stockStatus
+  // is not in the vector index; enforce filtering here at the pipeline level
+  pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
 
   return pipeline;
 }
@@ -10645,6 +10656,13 @@ app.post("/search", async (req, res) => {
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
           .filter(p => !p.stockStatus || p.stockStatus === 'instock');
 
+        // If stock filter wiped everything, fall through to Phase 1 so the zero-result
+        // fallback can return in-stock alternatives instead of returning nothing
+        if (allProducts.length === 0) {
+          console.log(`[${requestId}] ⚠️ [STOCK GATE] All Phase 0 results were out-of-stock — falling through to Phase 1 for alternatives`);
+          // fall through — don't return
+        } else {
+
         // Update search mode if expansion occurred
         const finalSearchMode = isPerfectFilterMatch
           ? 'perfect-filter-match'
@@ -10701,6 +10719,7 @@ app.post("/search", async (req, res) => {
             aiRecommendationsCount: aiRecommendations.length
           }
         } : allProducts);
+        } // end else (allProducts.length > 0 after stock gate)
       }
     } else {
       // Atlas Search found 0 results — run filter extraction + embedding + translation in parallel.
@@ -13116,6 +13135,7 @@ app.post("/search", async (req, res) => {
             specialSales: doc.specialSales,
             onSale: !!(doc.specialSales && Array.isArray(doc.specialSales) && doc.specialSales.length > 0),
             ItemID: doc.ItemID,
+            stockStatus: doc.stockStatus,
             highlight: false,
             searchMode: 'no-filter-fallback'
           }));
@@ -16537,6 +16557,33 @@ const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
   
+  // Ensure critical MongoDB indexes exist at startup
+  setTimeout(async () => {
+    try {
+      const client = await getMongoClient();
+
+      // Index on users.apiKey — queried on every authenticated request
+      const usersDb = client.db("users");
+      await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, background: true });
+      console.log("[STARTUP] Ensured index: users.apiKey");
+
+      // Index on profiles.session_id for every store DB
+      const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
+      for (const store of storeList) {
+        if (!store.dbName) continue;
+        try {
+          const storeDb = client.db(store.dbName);
+          await storeDb.collection("profiles").createIndex({ session_id: 1 }, { background: true });
+        } catch (e) {
+          // Non-fatal — index may already exist or collection may not exist yet
+        }
+      }
+      console.log(`[STARTUP] Ensured index: profiles.session_id across ${storeList.length} stores`);
+    } catch (error) {
+      console.error("[STARTUP] Index creation failed:", error);
+    }
+  }, 2000);
+
   // Warm cache on startup (only if Redis is available)
   setTimeout(async () => {
     try {
