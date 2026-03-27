@@ -9650,6 +9650,9 @@ app.post("/fast-search", async (req, res) => {
         logQuery(querycollection, query, filters, allProducts, false).catch(err =>
           console.error(`[${requestId}] Failed to log fast-search query:`, err.message)
         );
+      } catch (err) {
+        console.error(`[${requestId}] Failed to log fast-search query:`, err.message);
+      }
 
       // 👤 PERSONALIZATION: Log extracted categories to profile immediately
       if (session_id && filterCheck) {
