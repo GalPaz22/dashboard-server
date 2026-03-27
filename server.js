@@ -15946,8 +15946,21 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
   
   try {
     const profilesCollection = db.collection('profiles');
-    
-    // Ensure profile exists
+
+    // Build a single $inc map covering totalSearches + all categories at once
+    const incFields = { 'stats.totalSearches': 1 };
+    for (const category of softCats) {
+      if (category && category.trim()) {
+        incFields[`preferences.softCategories.${category}.searches`] = 1;
+      }
+    }
+    for (const category of hardCats) {
+      if (category && category.trim()) {
+        incFields[`preferences.hardCategories.${category}.searches`] = 1;
+      }
+    }
+
+    // Single upsert: create profile if missing + apply all increments in one round-trip
     await profilesCollection.updateOne(
       { session_id: sessionId },
       {
@@ -15964,42 +15977,12 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
           "stats.totalPurchases": 0,
           "stats.totalSpent": 0,
           "stats.totalSearches": 0
-        }
+        },
+        $inc: incFields
       },
       { upsert: true }
     );
-    
-    // Increment search count
-    await profilesCollection.updateOne(
-      { session_id: sessionId },
-      { $inc: { 'stats.totalSearches': 1 } }
-    );
-    
-    // Track soft categories from query
-    // We use 'searches' field to differentiate from clicks/carts/purchases
-    for (const category of softCats) {
-      if (category && category.trim()) {
-        await profilesCollection.updateOne(
-          { session_id: sessionId },
-          {
-            $inc: { [`preferences.softCategories.${category}.searches`]: 1 }
-          }
-        );
-      }
-    }
-    
-    // Track hard categories from query with weighted search counts
-    for (const category of hardCats) {
-      if (category && category.trim()) {
-        await profilesCollection.updateOne(
-          { session_id: sessionId },
-          {
-            $inc: { [`preferences.hardCategories.${category}.searches`]: 1 }
-          }
-        );
-      }
-    }
-    
+
     return true;
   } catch (error) {
     console.error("[PROFILE] Error in trackQueryCategories:", error);
