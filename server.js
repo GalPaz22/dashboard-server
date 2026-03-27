@@ -1251,9 +1251,6 @@ app.post("/add-to-cart", async (req, res) => {
 
     await cartEventsCollection.insertOne(cartEvent);
 
-    // ALSO TRACK IN USER PROFILE for personalization
-    trackUserProfileInteraction(db, sessionId, productId, 'cart', null)
-      .catch(err => console.error("[PROFILE] background cart tracking error:", err));
 
     return res.status(200).json({ message: "Add to cart event logged successfully" });
   } catch (error) {
@@ -1284,9 +1281,6 @@ app.post("/log-product-click", async (req, res) => {
 
     await clickEventsCollection.insertOne(clickEvent);
 
-    // ALSO TRACK IN USER PROFILE for personalization
-    trackUserProfileInteraction(db, sessionId, productId, 'click', null)
-      .catch(err => console.error("[PROFILE] background click tracking error:", err));
 
     return res.status(200).json({ message: "Product click event logged successfully" });
   } catch (error) {
@@ -8122,10 +8116,6 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
                 explanation: null
               }));
 
-              // Log query (fire-and-forget — does not block response)
-              logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
-                console.error(`[${requestId}] Failed to log query:`, err.message)
-              );
 
               // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in LLM filter selection results
               logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
@@ -8206,10 +8196,6 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           explanation: null
         }));
 
-        // Log simple query (vector fallback path — fire-and-forget)
-        logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
-          console.error(`[${requestId}] Failed to log query:`, err.message)
-        );
 
         res.json({
           products: response,
@@ -8425,10 +8411,6 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       })).toString('base64');
     }
 
-    // Log simple query (text matches path — fire-and-forget)
-    logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
-      console.error(`[${requestId}] Failed to log query:`, err.message)
-    );
 
     res.json({
       products: response,
@@ -8642,10 +8624,6 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       extractedCategories: extractedCategories
     })).toString('base64') : null;
 
-    // Log simple query (category-filtered path — fire-and-forget)
-    logQuery(querycollection, query, categoryFilteredHardFilters, response, false).catch(err =>
-      console.error(`[${requestId}] Failed to log query:`, err.message)
-    );
 
     res.json({
       products: response,
@@ -9647,25 +9625,8 @@ app.post("/fast-search", async (req, res) => {
           minPrice: llmExtractedFilters?.minPrice,
           maxPrice: llmExtractedFilters?.maxPrice
         };
-        logQuery(querycollection, query, filters, allProducts, false).catch(err =>
-          console.error(`[${requestId}] Failed to log fast-search query:`, err.message)
-        );
       } catch (err) {
         console.error(`[${requestId}] Failed to log fast-search query:`, err.message);
-      }
-
-      // 👤 PERSONALIZATION: Log extracted categories to profile immediately
-      if (session_id && filterCheck) {
-        const hardCats = llmExtractedFilters?.category
-          ? (Array.isArray(llmExtractedFilters.category) ? llmExtractedFilters.category : [llmExtractedFilters.category])
-          : (filterCheck.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories : null);
-        const softCats = llmExtractedFilters?.softCategory
-          ? (Array.isArray(llmExtractedFilters.softCategory) ? llmExtractedFilters.softCategory : [llmExtractedFilters.softCategory])
-          : (filterCheck.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : null);
-        if (hardCats || softCats) {
-          trackQueryCategories(db, session_id, hardCats, softCats)
-            .catch(err => console.error(`[${requestId}] Fast-search profile tracking error:`, err.message));
-        }
       }
 
       return res.json({
@@ -10224,16 +10185,6 @@ app.post("/simple-search", async (req, res) => {
 
     console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results + ${aiRecommendations.length} AI recommendations in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
-    // 👤 PERSONALIZATION: Log extracted categories to profile immediately
-    if (session_id && filterCheck) {
-      const hardCats = filterCheck.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories : null;
-      const softCats = filterCheck.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : null;
-      if (hardCats || softCats) {
-        trackQueryCategories(db, session_id, hardCats, softCats)
-          .catch(err => console.error(`[${requestId}] Simple-search profile tracking error:`, err.message));
-      }
-    }
-
     res.json({
       products: allProducts,
       count: allProducts.length,
@@ -10678,26 +10629,6 @@ app.post("/search", async (req, res) => {
         // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the Phase 0 results
         logBoostedProducts(allProducts, requestId, "PHASE-0");
 
-        // 📊 LOG QUERY TO DATABASE (Phase 0 path — fire-and-forget)
-        logQuery(db.collection("queries"), query, {
-          category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
-          softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
-          color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
-        }, allProducts, false).catch(err =>
-          console.error(`[${requestId}] Failed to log Phase 0 query:`, err.message)
-        );
-
-        // 👤 PERSONALIZATION: Log query-extracted categories to profile (Phase 0 path)
-        // Phase 0 returns early so trackQueryCategories (Phase 1) never runs — call it here
-        if (session_id && filterCheck) {
-          const hardCats = filterCheck.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories : null;
-          const softCats = filterCheck.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : null;
-          if (hardCats || softCats) {
-            trackQueryCategories(db, session_id, hardCats, softCats)
-              .catch(err => console.error(`[${requestId}] Phase 0 profile query tracking error:`, err.message));
-          }
-        }
-
         return res.json(isModernMode ? {
           products: allProducts,
           metadata: {
@@ -10866,11 +10797,6 @@ app.post("/search", async (req, res) => {
       }));
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
-
-      // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
-      logQuery(db.collection("queries"), query, {}, formattedSKUResults, false).catch(err =>
-        console.error(`[${requestId}] Failed to log SKU query:`, err.message)
-      );
 
       return res.json(formattedSKUResults);
       
@@ -11214,16 +11140,6 @@ app.post("/search", async (req, res) => {
       });
     }
     
-    // 👤 PERSONALIZATION: Track query-extracted categories in user profile
-    // This learns from what users SEARCH FOR, not just what they click/buy
-    if (session_id && (hardFilters.category || softFilters.softCategory)) {
-      trackQueryCategories(db, session_id, hardFilters.category, softFilters.softCategory)
-        .then(() => {
-          // profile updated;
-        })
-        .catch(err => {
-          console.error(`[${requestId}] 👤 Error tracking query categories:`, err.message);
-        });
     }
 
     let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
@@ -13148,11 +13064,6 @@ app.post("/search", async (req, res) => {
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
     
-    // Log all queries (fire-and-forget — does not block response)
-    logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult).catch(err =>
-      console.error(`[${requestId}] Failed to log query:`, err.message)
-    );
-
     const executionTime = Date.now() - searchStartTime;
 
     // Check for duplicates in finalResults
@@ -16348,27 +16259,10 @@ app.post("/profile/track-interaction", async (req, res) => {
       });
     }
 
-    const client = await connectToMongoDB(mongodbUri);
-    const db = client.db(dbName);
-
-    // Use the helper function
-    const success = await trackUserProfileInteraction(db, session_id, product_id, interaction_type, product_data);
-
-    if (!success) {
-      return res.status(404).json({ error: "Product or profile update failed" });
-    }
-
-    // Get updated profile to return
-    const profilesCollection = db.collection('profiles');
-    const updatedProfile = await profilesCollection.findOne({ session_id });
-
-    console.log(`[PROFILE] 📊 Tracked ${interaction_type} for session: ${session_id}`);
-
     res.status(200).json({
       success: true,
       message: `${interaction_type} tracked successfully`,
-      session_id,
-      profile: updatedProfile
+      session_id
     });
 
   } catch (error) {
@@ -16901,12 +16795,6 @@ app.post("/product-click", async (req, res) => {
 
     console.log(`[PRODUCT CLICK] Tracked: event_id=${clickDocument.event_id}, session=${session_id}, product=${product_id}, type=${interactionType}, source=${source || 'unknown'}, zero_recovery=${zero_recovery}, query="${clickDocument.search_query || 'none'}"`);
 
-    // =========================================================
-    // PERSONALIZATION: Auto-update profile from interaction
-    // =========================================================
-    trackUserProfileInteraction(db, session_id, product_id, interactionType, fetchedProduct)
-      .then(() => console.log(`[PRODUCT CLICK] 👤 Profile auto-updated (${interactionType}) for session: ${session_id}`))
-      .catch(err => console.error("[PRODUCT CLICK] Profile update error:", err.message));
 
     res.status(201).json({
       success: true,
@@ -17539,20 +17427,6 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
         // =========================================================
         // PERSONALIZATION: Update profile for each item purchased
         // =========================================================
-        const lineItems = orderData.line_items || [];
-        let productsTracked = 0;
-        
-        // Process in background using the unified helper
-        Promise.all(lineItems.map(item => 
-          trackUserProfileInteraction(db, sessionId, item.product_id, 'purchase', null)
-            .then(success => { if (success) productsTracked++; })
-        )).then(() => {
-          if (productsTracked > 0) {
-            console.log(`[${requestId}] 👤 Profile updated for ${productsTracked} purchased items`);
-          }
-        }).catch(err => {
-          console.error(`[${requestId}] 👤 Profile update error:`, err);
-        });
 
       } catch (linkError) {
         console.error(`[${requestId}] ⚠️ Error linking clicks to order:`, linkError.message);
@@ -17909,21 +17783,6 @@ app.post("/profile/track-purchase", async (req, res) => {
 
     await checkoutCollection.insertOne(checkoutData);
     console.log(`[${requestId}] ✅ Checkout event saved`);
-
-    // =========================================================
-    // PERSONALIZATION: Update profile for each item purchased
-    // =========================================================
-    let productsTracked = 0;
-    
-    // Process items in background/parallel to not block response
-    Promise.all(items.map(item => 
-      trackUserProfileInteraction(db, session_id, item.product_id, 'purchase', null)
-        .then(success => { if (success) productsTracked++; })
-    )).then(() => {
-      console.log(`[${requestId}] 👤 Profile updated for ${productsTracked} purchased items`);
-    }).catch(err => {
-      console.error(`[${requestId}] 👤 Profile update error:`, err);
-    });
 
     res.status(200).json({
       success: true,
