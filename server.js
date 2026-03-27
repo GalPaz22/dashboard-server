@@ -11139,8 +11139,6 @@ app.post("/search", async (req, res) => {
         return c;
       });
     }
-    
-    }
 
     let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
     if (hardFilters.category) {
