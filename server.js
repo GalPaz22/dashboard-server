@@ -8120,6 +8120,11 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
               // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in LLM filter selection results
               logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
 
+              // Log query (fire-and-forget — does not block response)
+              logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+                console.error(`[${requestId}] Failed to log query:`, err.message)
+              );
+
               return res.json({
                 products: response,
                 pagination: {
@@ -8196,6 +8201,10 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           explanation: null
         }));
 
+        // Log simple query (vector fallback path — fire-and-forget)
+        logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+          console.error(`[${requestId}] Failed to log query:`, err.message)
+        );
 
         res.json({
           products: response,
@@ -8411,6 +8420,10 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       })).toString('base64');
     }
 
+    // Log simple query (text matches path — fire-and-forget)
+    logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+      console.error(`[${requestId}] Failed to log query:`, err.message)
+    );
 
     res.json({
       products: response,
@@ -8624,6 +8637,10 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       extractedCategories: extractedCategories
     })).toString('base64') : null;
 
+    // Log simple query (category-filtered path — fire-and-forget)
+    logQuery(querycollection, query, categoryFilteredHardFilters, response, false).catch(err =>
+      console.error(`[${requestId}] Failed to log query:`, err.message)
+    );
 
     res.json({
       products: response,
@@ -9625,6 +9642,9 @@ app.post("/fast-search", async (req, res) => {
           minPrice: llmExtractedFilters?.minPrice,
           maxPrice: llmExtractedFilters?.maxPrice
         };
+        logQuery(querycollection, query, filters, allProducts, false).catch(err =>
+          console.error(`[${requestId}] Failed to log fast-search query:`, err.message)
+        );
       } catch (err) {
         console.error(`[${requestId}] Failed to log fast-search query:`, err.message);
       }
@@ -10629,6 +10649,15 @@ app.post("/search", async (req, res) => {
         // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the Phase 0 results
         logBoostedProducts(allProducts, requestId, "PHASE-0");
 
+        // 📊 LOG QUERY TO DATABASE (Phase 0 path — fire-and-forget)
+        logQuery(db.collection("queries"), query, {
+          category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
+          softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
+          color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
+        }, allProducts, false).catch(err =>
+          console.error(`[${requestId}] Failed to log Phase 0 query:`, err.message)
+        );
+
         return res.json(isModernMode ? {
           products: allProducts,
           metadata: {
@@ -10797,6 +10826,11 @@ app.post("/search", async (req, res) => {
       }));
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
+
+      // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
+      logQuery(db.collection("queries"), query, {}, formattedSKUResults, false).catch(err =>
+        console.error(`[${requestId}] Failed to log SKU query:`, err.message)
+      );
 
       return res.json(formattedSKUResults);
       
@@ -13061,7 +13095,12 @@ app.post("/search", async (req, res) => {
 
     // Return products based on user's limit configuration
     const limitedResults = finalResults.slice(0, searchLimit);
-    
+
+    // Log all queries (fire-and-forget — does not block response)
+    logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult).catch(err =>
+      console.error(`[${requestId}] Failed to log query:`, err.message)
+    );
+
     const executionTime = Date.now() - searchStartTime;
 
     // Check for duplicates in finalResults
