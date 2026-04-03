@@ -6879,9 +6879,9 @@ app.get("/search/auto-load-more", async (req, res) => {
     
     console.log(`[${requestId}] Search found ${combinedResults.length} new results`);
     
-    // No need to filter - already excluded in MongoDB query
-    let newResults = combinedResults;
-    
+    // 🛡️ STOCK SAFETY NET: enforce here regardless of MongoDB pipeline filter behavior
+    let newResults = combinedResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+
     // FALLBACK: If no new results and we had soft filters, retry with simple search (no soft filters)
     if (newResults.length === 0 && hasSoftFilters) {
       console.log(`[${requestId}] No results with soft filters - falling back to simple search without soft categories`);
@@ -6936,8 +6936,8 @@ app.get("/search/auto-load-more", async (req, res) => {
         })
         .sort((a, b) => b.rrf_score - a.rrf_score);
       
-      // No need to filter - already excluded in MongoDB query
-      newResults = fallbackResults;
+      // 🛡️ STOCK SAFETY NET
+      newResults = fallbackResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
       
       console.log(`[${requestId}] Fallback search found ${newResults.length} new results (without soft filters)`);
     }
@@ -7672,6 +7672,9 @@ app.get("/search/load-more", async (req, res) => {
 
     // Pagination debug logs removed for brevity
     
+    // 🛡️ STOCK SAFETY NET: filter cached results before slicing (catches both field name variants)
+    cachedResults = cachedResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+
     // Get the requested slice
     let paginatedResults = cachedResults.slice(startIndex, endIndex);
     
@@ -10620,7 +10623,7 @@ app.post("/search", async (req, res) => {
 
         // 🛡️ STOCK SAFETY NET (Phase 0)
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
-          .filter(p => !p.stockStatus || p.stockStatus === 'instock');
+          .filter(p => (p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock'));
 
         // If stock filter wiped everything, fall through to Phase 1 so the zero-result
         // fallback can return in-stock alternatives instead of returning nothing
@@ -13087,8 +13090,9 @@ app.post("/search", async (req, res) => {
     // 🛡️ STOCK SAFETY NET: Remove out-of-stock products regardless of how they got here.
     // Vector search filters can be silently ignored if stockStatus isn't indexed in the
     // vector index, letting outofstock products slip through any pipeline.
+    // Checks both camelCase (stockStatus) and snake_case (stock_status) field names.
     const beforeStockGate = finalResults.length;
-    finalResults = finalResults.filter(p => !p.stockStatus || p.stockStatus === 'instock');
+    finalResults = finalResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
     if (beforeStockGate !== finalResults.length) {
       console.log(`[${requestId}] 🛡️ [STOCK GATE] Removed ${beforeStockGate - finalResults.length} out-of-stock products`);
     }
