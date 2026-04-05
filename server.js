@@ -6886,7 +6886,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     console.log(`[${requestId}] Search found ${combinedResults.length} new results`);
     
     // 🛡️ STOCK SAFETY NET: enforce here regardless of MongoDB pipeline filter behavior
-    let newResults = combinedResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+    let newResults = combinedResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
 
     // FALLBACK: If no new results and we had soft filters, retry with simple search (no soft filters)
     if (newResults.length === 0 && hasSoftFilters) {
@@ -6943,7 +6943,7 @@ app.get("/search/auto-load-more", async (req, res) => {
         .sort((a, b) => b.rrf_score - a.rrf_score);
       
       // 🛡️ STOCK SAFETY NET
-      newResults = fallbackResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+      newResults = fallbackResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
       
       console.log(`[${requestId}] Fallback search found ${newResults.length} new results (without soft filters)`);
     }
@@ -7679,7 +7679,7 @@ app.get("/search/load-more", async (req, res) => {
     // Pagination debug logs removed for brevity
     
     // 🛡️ STOCK SAFETY NET: filter cached results before slicing (catches both field name variants)
-    cachedResults = cachedResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+    cachedResults = cachedResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
 
     // Get the requested slice
     let paginatedResults = cachedResults.slice(startIndex, endIndex);
@@ -8103,7 +8103,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
             if (llmSelectionResult.success && llmSelectionResult.products.length > 0) {
               console.log(`[${requestId}] ✅ LLM selected ${llmSelectionResult.products.length} relevant products`);
 
-              const response = llmSelectionResult.products.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => ({
+              const response = llmSelectionResult.products.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => ({
                 _id: product._id.toString(),
                 id: product.id,
                 name: product.name,
@@ -8187,7 +8187,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, extractedFilters, searchLimit, false, [], extractedFilters);
         const vectorResults = await collection.aggregate(vectorPipeline).toArray();
 
-        const response = vectorResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').slice(0, searchLimit).map((product, index) => ({
+        const response = vectorResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).slice(0, searchLimit).map((product, index) => ({
           _id: product._id.toString(),
           id: product.id,
           name: product.name,
@@ -8590,7 +8590,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     }
 
     // Return category-filtered results
-    let response = (categoryFilteredResults || []).filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => {
+    let response = (categoryFilteredResults || []).filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => {
       let profileBoost = 0;
       if (userProfile) {
         profileBoost = calculateProfileBoost(product, userProfile);
@@ -9443,7 +9443,7 @@ app.post("/fast-search", async (req, res) => {
         userProfile = await getUserProfileForBoosting(db, session_id);
       }
 
-      const productsWithBoost = validatedProducts.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => {
+      const productsWithBoost = validatedProducts.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => {
         const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
         return {
           _id: product._id.toString(),
@@ -9490,7 +9490,7 @@ app.post("/fast-search", async (req, res) => {
           const recTime = Date.now() - recStart;
 
           aiRecommendations = rawRecommendations
-            .filter(p => !existingIds.includes(p._id.toString()) && p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock')
+            .filter(p => !existingIds.includes(p._id.toString()) && (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'))
             .map(product => {
             const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
             return {
@@ -9517,7 +9517,7 @@ app.post("/fast-search", async (req, res) => {
         }
       }
 
-      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations].filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations].filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
 
       const executionTime = Date.now() - searchStartTime;
       const personalizedCount = allProducts.filter(p => (p.profileBoost || 0) > 0).length;
@@ -10105,7 +10105,7 @@ app.post("/simple-search", async (req, res) => {
         const rawRecommendations = await findAiRecommendations(collection, results, 5);
         const recTime = Date.now() - recStart;
 
-        aiRecommendations = rawRecommendations.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => {
+        aiRecommendations = rawRecommendations.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => {
           const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
           const exactMatchBonus = getExactMatchBonus(product.name, query, query);
           return {
@@ -10133,7 +10133,7 @@ app.post("/simple-search", async (req, res) => {
       }
     }
 
-    const allProducts = [...response, ...aiRecommendations].filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+    const allProducts = [...response, ...aiRecommendations].filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
 
     console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results + ${aiRecommendations.length} AI recommendations in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
@@ -10562,7 +10562,7 @@ app.post("/search", async (req, res) => {
 
         // 🛡️ STOCK SAFETY NET (Phase 0)
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
-          .filter(p => (p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock'));
+          .filter(p => ((!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')));
 
         // If stock filter wiped everything, fall through to Phase 1 so the zero-result
         // fallback can return in-stock alternatives instead of returning nothing
@@ -10698,7 +10698,7 @@ app.post("/search", async (req, res) => {
         const quickEngResults = await _engCollection.aggregate(engSearchPipeline).toArray();
         if (quickEngResults.length > 0) {
           console.log(`[${requestId}] ⚡ QUICK ENGLISH SEARCH: found ${quickEngResults.length} products for "${precomputedTranslation}" — returning without full search`);
-          const formatted = quickEngResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map((p, i) => ({
+          const formatted = quickEngResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map((p, i) => ({
             _id: p._id.toString(),
             id: p.id,
             name: p.name,
@@ -10757,7 +10757,7 @@ app.post("/search", async (req, res) => {
       const skuResults = await executeSKUSearch(collection, query.trim());
       
       // Format SKU results for response
-      const formattedSKUResults = skuResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map((product) => ({
+      const formattedSKUResults = skuResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map((product) => ({
         _id: product._id.toString(),
         id: product.id, // Keep for backward compatibility if needed, but _id is primary
         name: product.name,
@@ -13054,7 +13054,7 @@ app.post("/search", async (req, res) => {
     // vector index, letting outofstock products slip through any pipeline.
     // Checks both camelCase (stockStatus) and snake_case (stock_status) field names.
     const beforeStockGate = finalResults.length;
-    finalResults = finalResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
+    finalResults = finalResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
     if (beforeStockGate !== finalResults.length) {
       console.log(`[${requestId}] 🛡️ [STOCK GATE] Removed ${beforeStockGate - finalResults.length} out-of-stock products`);
     }
