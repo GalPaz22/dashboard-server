@@ -8103,7 +8103,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
             if (llmSelectionResult.success && llmSelectionResult.products.length > 0) {
               console.log(`[${requestId}] ✅ LLM selected ${llmSelectionResult.products.length} relevant products`);
 
-              const response = llmSelectionResult.products.map(product => ({
+              const response = llmSelectionResult.products.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => ({
                 _id: product._id.toString(),
                 id: product.id,
                 name: product.name,
@@ -8187,7 +8187,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, extractedFilters, searchLimit, false, [], extractedFilters);
         const vectorResults = await collection.aggregate(vectorPipeline).toArray();
 
-        const response = vectorResults.slice(0, searchLimit).map((product, index) => ({
+        const response = vectorResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').slice(0, searchLimit).map((product, index) => ({
           _id: product._id.toString(),
           id: product.id,
           name: product.name,
@@ -8590,7 +8590,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     }
 
     // Return category-filtered results
-    let response = (categoryFilteredResults || []).map(product => {
+    let response = (categoryFilteredResults || []).filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => {
       let profileBoost = 0;
       if (userProfile) {
         profileBoost = calculateProfileBoost(product, userProfile);
@@ -9607,7 +9607,7 @@ app.post("/fast-search", async (req, res) => {
         }
       }
 
-      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations];
+      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations].filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
 
       const executionTime = Date.now() - searchStartTime;
       const personalizedCount = allProducts.filter(p => (p.profileBoost || 0) > 0).length;
@@ -10223,7 +10223,7 @@ app.post("/simple-search", async (req, res) => {
       }
     }
 
-    const allProducts = [...response, ...aiRecommendations];
+    const allProducts = [...response, ...aiRecommendations].filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock');
 
     console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results + ${aiRecommendations.length} AI recommendations in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
@@ -10788,7 +10788,7 @@ app.post("/search", async (req, res) => {
         const quickEngResults = await _engCollection.aggregate(engSearchPipeline).toArray();
         if (quickEngResults.length > 0) {
           console.log(`[${requestId}] ⚡ QUICK ENGLISH SEARCH: found ${quickEngResults.length} products for "${precomputedTranslation}" — returning without full search`);
-          const formatted = quickEngResults.map((p, i) => ({
+          const formatted = quickEngResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map((p, i) => ({
             _id: p._id.toString(),
             id: p.id,
             name: p.name,
@@ -10847,7 +10847,7 @@ app.post("/search", async (req, res) => {
       const skuResults = await executeSKUSearch(collection, query.trim());
       
       // Format SKU results for response
-      const formattedSKUResults = skuResults.map((product) => ({
+      const formattedSKUResults = skuResults.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map((product) => ({
         _id: product._id.toString(),
         id: product.id, // Keep for backward compatibility if needed, but _id is primary
         name: product.name,
