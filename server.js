@@ -9443,7 +9443,7 @@ app.post("/fast-search", async (req, res) => {
         userProfile = await getUserProfileForBoosting(db, session_id);
       }
 
-      const productsWithBoost = validatedProducts.map(product => {
+      const productsWithBoost = validatedProducts.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => {
         const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
         return {
           _id: product._id.toString(),
@@ -9530,7 +9530,7 @@ app.post("/fast-search", async (req, res) => {
             }
           }
 
-          softCategoryExpansion = newProducts.slice(0, slotsAvailable).map(product => {
+          softCategoryExpansion = newProducts.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').slice(0, slotsAvailable).map(product => {
             const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
             return {
               _id: product._id.toString(),
@@ -9580,7 +9580,7 @@ app.post("/fast-search", async (req, res) => {
           const recTime = Date.now() - recStart;
 
           aiRecommendations = rawRecommendations
-            .filter(p => !existingIds.includes(p._id.toString()))
+            .filter(p => !existingIds.includes(p._id.toString()) && p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock')
             .map(product => {
             const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
             return {
@@ -10195,7 +10195,7 @@ app.post("/simple-search", async (req, res) => {
         const rawRecommendations = await findAiRecommendations(collection, results, 5);
         const recTime = Date.now() - recStart;
 
-        aiRecommendations = rawRecommendations.map(product => {
+        aiRecommendations = rawRecommendations.filter(p => p.stockStatus !== 'outofstock' && p.stock_status !== 'outofstock').map(product => {
           const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
           const exactMatchBonus = getExactMatchBonus(product.name, query, query);
           return {
