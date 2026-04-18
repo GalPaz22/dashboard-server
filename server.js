@@ -1125,48 +1125,47 @@ function getMongoClient() {
   return cachedPromise;
 }
 
-// GET /queries endpoint (with pagination support via query parameters)
+// GET /queries endpoint (with cursor-based pagination via beforeId param)
+// Pass beforeId=<lastSeenId> instead of skip to avoid slow skip-scans on large collections.
+// Falls back to skip-based pagination if beforeId is not provided (first page).
 app.get("/queries", async (req, res) => {
-  const { dbName, skip = 0, limit = 100 } = req.query;
+  const { dbName, limit = 100, beforeId, skip = 0 } = req.query;
   if (!dbName) {
     return res.status(400).json({ error: "dbName parameter is required as a query parameter" });
   }
-  
-  // Validate skip and limit
-  const skipNum = parseInt(skip, 10);
+
   const limitNum = parseInt(limit, 10);
-  
-  if (isNaN(skipNum) || skipNum < 0) {
-    return res.status(400).json({ error: "skip must be a non-negative integer" });
-  }
   if (isNaN(limitNum) || limitNum <= 0 || limitNum > 1000) {
     return res.status(400).json({ error: "limit must be a positive integer between 1 and 1000" });
   }
-  
+
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const queriesCollection = db.collection("queries");
 
-    // Fetch one extra document to check if there are more queries
+    // Cursor-based: filter by _id < beforeId so MongoDB uses the _id index seek directly
+    const filter = beforeId ? { _id: { $lt: new ObjectId(beforeId) } } : {};
+    const skipNum = beforeId ? 0 : parseInt(skip, 10) || 0;
+
     const queries = await queriesCollection
-      .find({})
+      .find(filter)
       .sort({ _id: -1 })
       .skip(skipNum)
       .limit(limitNum + 1)
       .toArray();
 
-    // Determine if there are more queries
     const hasMoreQueries = queries.length > limitNum;
-    
-    // If we fetched an extra document, remove it from the results
     const resultQueries = hasMoreQueries ? queries.slice(0, limitNum) : queries;
+    const nextCursor = hasMoreQueries ? resultQueries[resultQueries.length - 1]._id.toString() : null;
 
-    console.log(`[QUERIES GET] Request: skip=${skipNum}, limit=${limitNum}, returned=${resultQueries.length}, hasMore=${hasMoreQueries}`);
+    console.log(`[QUERIES GET] beforeId=${beforeId || 'none'}, limit=${limitNum}, returned=${resultQueries.length}, hasMore=${hasMoreQueries}`);
 
-    return res.status(200).json({ 
+    return res.status(200).json({
       queries: resultQueries,
-      hasMoreQueries: hasMoreQueries,
+      hasMoreQueries,
+      nextCursor,
+      // keep skip in response for backwards-compat with existing clients
       skip: skipNum,
       limit: limitNum
     });
@@ -1176,48 +1175,43 @@ app.get("/queries", async (req, res) => {
   }
 });
 
-// POST /queries endpoint (with pagination support via request body)
+// POST /queries endpoint (with cursor-based pagination via beforeId field)
 app.post("/queries", async (req, res) => {
-  const { dbName, skip = 0, limit = 100 } = req.body;
+  const { dbName, limit = 100, beforeId, skip = 0 } = req.body;
   if (!dbName) {
     return res.status(400).json({ error: "dbName parameter is required in the request body" });
   }
-  
-  // Validate skip and limit
-  const skipNum = parseInt(skip, 10);
+
   const limitNum = parseInt(limit, 10);
-  
-  if (isNaN(skipNum) || skipNum < 0) {
-    return res.status(400).json({ error: "skip must be a non-negative integer" });
-  }
   if (isNaN(limitNum) || limitNum <= 0 || limitNum > 1000) {
     return res.status(400).json({ error: "limit must be a positive integer between 1 and 1000" });
   }
-  
+
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const queriesCollection = db.collection("queries");
 
-    // Fetch one extra document to check if there are more queries
+    const filter = beforeId ? { _id: { $lt: new ObjectId(beforeId) } } : {};
+    const skipNum = beforeId ? 0 : parseInt(skip, 10) || 0;
+
     const queries = await queriesCollection
-      .find({})
+      .find(filter)
       .sort({ _id: -1 })
       .skip(skipNum)
       .limit(limitNum + 1)
       .toArray();
 
-    // Determine if there are more queries
     const hasMoreQueries = queries.length > limitNum;
-    
-    // If we fetched an extra document, remove it from the results
     const resultQueries = hasMoreQueries ? queries.slice(0, limitNum) : queries;
+    const nextCursor = hasMoreQueries ? resultQueries[resultQueries.length - 1]._id.toString() : null;
 
-    console.log(`[QUERIES POST] Request: skip=${skipNum}, limit=${limitNum}, returned=${resultQueries.length}, hasMore=${hasMoreQueries}`);
+    console.log(`[QUERIES POST] beforeId=${beforeId || 'none'}, limit=${limitNum}, returned=${resultQueries.length}, hasMore=${hasMoreQueries}`);
 
-    return res.status(200).json({ 
+    return res.status(200).json({
       queries: resultQueries,
-      hasMoreQueries: hasMoreQueries,
+      hasMoreQueries,
+      nextCursor,
       skip: skipNum,
       limit: limitNum
     });
@@ -16379,30 +16373,82 @@ const server = app.listen(PORT, async () => {
       await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, background: true });
       console.log("[STARTUP] Ensured index: users.apiKey");
 
-      // Indexes on profiles + products for every store DB
+      // Ensure indexes on all per-store collections (products search + slow query profiler targets)
       const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
+
+      // Per-collection index specs: [ [keySpec, options?], ... ]
+      const storeIndexSpecs = {
+        profiles: [
+          [{ session_id: 1 }, { unique: false }],
+          [{ updated_at: -1 }, {}],
+          [{ visitor_id: 1 }, {}],
+        ],
+        queries: [
+          [{ timestamp: -1 }, {}],
+          // compound covers filter-by-query + sort-by-time (e.g. recent queries for a search term)
+          [{ search_query: 1, timestamp: -1 }, {}],
+        ],
+        product_click_events: [
+          [{ sessionId: 1, timestamp: 1 }, {}],
+          [{ timestamp: -1 }, {}],
+        ],
+        add_to_cart_events: [
+          [{ sessionId: 1, timestamp: 1 }, {}],
+          [{ timestamp: -1 }, {}],
+        ],
+        cart: [
+          [{ session_id: 1 }, {}],
+          [{ timestamp: -1 }, {}],
+        ],
+        checkout_events: [
+          [{ session_id: 1 }, {}],
+          [{ timestamp: -1 }, {}],
+        ],
+        tracking_events: [
+          [{ session_id: 1, timestamp: 1 }, {}],
+          [{ timestamp: -1 }, {}],
+        ],
+        active_users: [
+          [{ last_updated: -1 }, {}],
+          [{ visitor_id: 1 }, {}],
+          [{ customer_segment: 1, last_updated: -1 }, {}],
+        ],
+        query_complexity_feedback: [
+          [{ timestamp: -1 }, {}],
+        ],
+        query_complexity_learned: [
+          [{ query: 1 }, {}],
+        ],
+        orders: [
+          [{ session_id: 1 }, {}],
+          [{ order_id: 1 }, { unique: false }],
+          [{ created_at: -1 }, {}],
+        ],
+        // covers recommendation, sweep, and expansion queries on products
+        products: [
+          [{ category: 1, stockStatus: 1, price: 1 }, {}],
+          [{ softCategory: 1, stockStatus: 1, price: 1 }, {}],
+          [{ type: 1, stockStatus: 1 }, {}],
+          [{ stockStatus: 1 }, {}],
+        ],
+      };
+
+      let indexCount = 0;
       for (const store of storeList) {
         if (!store.dbName) continue;
-        try {
-          const storeDb = client.db(store.dbName);
-          const products = storeDb.collection("products");
-
-          // profiles.session_id
-          await storeDb.collection("profiles").createIndex({ session_id: 1 }, { background: true });
-
-          // category + stockStatus + price — covers recommendation + sweep queries
-          await products.createIndex({ category: 1, stockStatus: 1, price: 1 }, { background: true });
-          // softCategory + stockStatus + price — covers sweep + expansion queries
-          await products.createIndex({ softCategory: 1, stockStatus: 1, price: 1 }, { background: true });
-          // type + stockStatus — covers type-based expansion queries
-          await products.createIndex({ type: 1, stockStatus: 1 }, { background: true });
-          // stockStatus alone — covers post-search $match stages
-          await products.createIndex({ stockStatus: 1 }, { background: true });
-        } catch (e) {
-          // Non-fatal — index may already exist or collection may not exist yet
+        const storeDb = client.db(store.dbName);
+        for (const [collName, specs] of Object.entries(storeIndexSpecs)) {
+          for (const [keySpec, opts] of specs) {
+            try {
+              await storeDb.collection(collName).createIndex(keySpec, { background: true, ...opts });
+              indexCount++;
+            } catch (e) {
+              // Non-fatal — index may already exist or collection may not exist yet
+            }
+          }
         }
       }
-      console.log(`[STARTUP] Ensured products + profiles indexes across ${storeList.length} stores`);
+      console.log(`[STARTUP] Ensured ${indexCount} indexes across ${storeList.length} store DBs`);
     } catch (error) {
       console.error("[STARTUP] Index creation failed:", error);
     }
