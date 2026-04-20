@@ -16380,16 +16380,16 @@ const server = app.listen(PORT, async () => {
       // Ensure indexes on all per-store collections (products search + slow query profiler targets)
       const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
 
-      // Per-collection index specs: [ [keySpec, options?], ... ]
-      const storeIndexSpecs = {
+      // Small collections — lightweight, safe to create at startup immediately.
+      // These are event/tracking collections; indexes are tiny and build instantly.
+      const fastIndexSpecs = {
         profiles: [
-          [{ session_id: 1 }, { unique: false }],
+          [{ session_id: 1 }, {}],
           [{ updated_at: -1 }, {}],
           [{ visitor_id: 1 }, {}],
         ],
         queries: [
           [{ timestamp: -1 }, {}],
-          // compound covers filter-by-query + sort-by-time (e.g. recent queries for a search term)
           [{ search_query: 1, timestamp: -1 }, {}],
         ],
         product_click_events: [
@@ -16425,15 +16425,8 @@ const server = app.listen(PORT, async () => {
         ],
         orders: [
           [{ session_id: 1 }, {}],
-          [{ order_id: 1 }, { unique: false }],
+          [{ order_id: 1 }, {}],
           [{ created_at: -1 }, {}],
-        ],
-        // covers recommendation, sweep, and expansion queries on products
-        products: [
-          [{ category: 1, stockStatus: 1, price: 1 }, {}],
-          [{ softCategory: 1, stockStatus: 1, price: 1 }, {}],
-          [{ type: 1, stockStatus: 1 }, {}],
-          [{ stockStatus: 1 }, {}],
         ],
       };
 
@@ -16441,7 +16434,7 @@ const server = app.listen(PORT, async () => {
       for (const store of storeList) {
         if (!store.dbName) continue;
         const storeDb = client.db(store.dbName);
-        for (const [collName, specs] of Object.entries(storeIndexSpecs)) {
+        for (const [collName, specs] of Object.entries(fastIndexSpecs)) {
           for (const [keySpec, opts] of specs) {
             try {
               await storeDb.collection(collName).createIndex(keySpec, { background: true, ...opts });
@@ -16451,8 +16444,10 @@ const server = app.listen(PORT, async () => {
             }
           }
         }
+        // Yield between stores so we don't saturate the connection pool
+        await new Promise(resolve => setImmediate(resolve));
       }
-      console.log(`[STARTUP] Ensured ${indexCount} indexes across ${storeList.length} store DBs`);
+      console.log(`[STARTUP] Ensured ${indexCount} fast indexes across ${storeList.length} store DBs`);
     } catch (error) {
       console.error("[STARTUP] Index creation failed:", error);
     }
@@ -16466,6 +16461,43 @@ const server = app.listen(PORT, async () => {
       console.error('Cache warming failed on startup:', error);
     }
   }, 5000);
+
+  // Products indexes — deferred and sequential to avoid hammering Atlas during startup.
+  // Runs 2 minutes after boot, one store at a time with a 500ms pause between each.
+  // createIndex is idempotent so subsequent restarts are instant (index already exists).
+  setTimeout(async () => {
+    try {
+      const client = await getMongoClient();
+      const usersDb = client.db("users");
+      const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
+
+      const productIndexSpecs = [
+        [{ category: 1, stockStatus: 1, price: 1 }, {}],
+        [{ softCategory: 1, stockStatus: 1, price: 1 }, {}],
+        [{ type: 1, stockStatus: 1 }, {}],
+        [{ stockStatus: 1 }, {}],
+      ];
+
+      let built = 0;
+      for (const store of storeList) {
+        if (!store.dbName) continue;
+        const products = client.db(store.dbName).collection("products");
+        for (const [keySpec, opts] of productIndexSpecs) {
+          try {
+            await products.createIndex(keySpec, { background: true, ...opts });
+            built++;
+          } catch (e) {
+            // Non-fatal
+          }
+        }
+        // 500ms pause between stores — keeps Atlas load low during live traffic
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      console.log(`[STARTUP] Products indexes ensured for ${storeList.length} stores (${built} total)`);
+    } catch (err) {
+      console.error("[STARTUP] Products index creation failed:", err.message);
+    }
+  }, 2 * 60 * 1000);
   
   // 🎯 MEMORY MANAGEMENT: Monitor and log memory usage every 30 minutes
   setInterval(() => {
