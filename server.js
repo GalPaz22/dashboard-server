@@ -1147,8 +1147,10 @@ function getMongoClient() {
       serverSelectionTimeoutMS: 5000, // 5 second server selection timeout
       // Compression for faster data transfer over network
       compressors: ['snappy', 'zlib'],
-      // Read preference for better performance on replica sets
-      readPreference: 'primaryPreferred'
+      // Spread read load across secondaries so the primary is reserved for writes.
+      // Writes (insertOne, updateOne, createIndex, etc) still go to primary automatically.
+      // Falls back to primary if no secondary is healthy.
+      readPreference: 'secondaryPreferred'
     });
     cachedPromise = cachedClient.connect();
   }
