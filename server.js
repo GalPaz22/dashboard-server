@@ -17883,21 +17883,40 @@ app.post("/profile/track-purchase", async (req, res) => {
     const productsCollection = db.collection('products');
     const checkoutCollection = db.collection('checkout_events');
 
+    // Resolve product names to actual product _ids and prices from the products collection
+    const resolvedLineItems = await Promise.all(items.map(async item => {
+      let productId = String(item.product_id);
+      let productPrice = parseFloat(item.price) || 0;
+      let productName = item.name || null;
+
+      // Attempt to find product by name if product_id is not a valid ObjectId or not found by _id
+      const productDoc = await productsCollection.findOne({ name: productName });
+      if (productDoc) {
+        productId = productDoc._id.toString();
+        productPrice = productDoc.price || productPrice;
+        productName = productDoc.name;
+      } else {
+        console.warn(`[${requestId}] ⚠️ Product not found by name: "${productName}". Using provided ID and price.`);
+      }
+
+      return {
+        product_id: productId,
+        title: productName,
+        quantity: item.quantity || 1,
+        price: productPrice,
+      };
+    }));
+
     // Save checkout event
     const checkoutData = {
       order_id: order_id || `order-${Date.now()}`,
       session_id,
       platform,
       created_at: new Date().toISOString(),
-      total_price: parseFloat(total_price) || items.reduce((sum, i) => sum + (i.price * i.quantity), 0),
+      total_price: parseFloat(total_price) || resolvedLineItems.reduce((sum, i) => sum + (i.price * i.quantity), 0),
       currency,
       customer: customer || null,
-      line_items: items.map(item => ({
-        product_id: String(item.product_id),
-        title: item.name || null,
-        quantity: item.quantity || 1,
-        price: parseFloat(item.price) || 0
-      })),
+      line_items: resolvedLineItems,
       webhook_received_at: new Date().toISOString()
     };
 
