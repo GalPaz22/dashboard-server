@@ -16405,16 +16405,33 @@ const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
   
-  // Ensure critical MongoDB indexes exist at startup
+  // Ensure critical MongoDB indexes exist at startup.
+  //
+  // Index creation runs in two modes:
+  //  - Default (SKIP_INDEX_ENSURE not set): only performs a lightweight listIndexes check per
+  //    collection and skips createIndex entirely when indexes already exist. This avoids
+  //    hammering Atlas on every restart.
+  //  - SKIP_INDEX_ENSURE=1 : skip the entire block. Use in production after indexes are built.
+  if (process.env.SKIP_INDEX_ENSURE === '1') {
+    console.log('[STARTUP] SKIP_INDEX_ENSURE=1 — skipping index ensure block entirely');
+  } else {
   setTimeout(async () => {
     try {
       const client = await getMongoClient();
 
-      // Index on users.apiKey — queried on every authenticated request
+      // Index on users.apiKey — NOT unique, because legacy data has duplicate real apiKeys.
+      // Query-time logic handles dedup; we just need the lookup index for findOne({apiKey}).
       const usersDb = client.db("users");
-      // sparse: true excludes null/missing apiKey docs so duplicate nulls don't violate uniqueness
-      await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, sparse: true, background: true });
-      console.log("[STARTUP] Ensured index: users.apiKey");
+      try {
+        const existing = await usersDb.collection("users").listIndexes().toArray();
+        const hasApiKeyIdx = existing.some(i => i.key && i.key.apiKey === 1);
+        if (!hasApiKeyIdx) {
+          await usersDb.collection("users").createIndex({ apiKey: 1 }, { background: true });
+          console.log("[STARTUP] Created index: users.apiKey");
+        }
+      } catch (e) {
+        console.warn("[STARTUP] users.apiKey index check failed:", e.message);
+      }
 
       // Ensure indexes on all per-store collections (products search + slow query profiler targets)
       const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
@@ -16469,28 +16486,43 @@ const server = app.listen(PORT, async () => {
         ],
       };
 
-      let indexCount = 0;
+      const keyToString = (keySpec) => Object.entries(keySpec).map(([k, v]) => `${k}_${v}`).join('_');
+      let createdCount = 0;
+      let skippedCount = 0;
       for (const store of storeList) {
         if (!store.dbName) continue;
         const storeDb = client.db(store.dbName);
         for (const [collName, specs] of Object.entries(fastIndexSpecs)) {
+          let existing;
+          try {
+            existing = await storeDb.collection(collName).listIndexes().toArray();
+          } catch {
+            // Collection doesn't exist yet — skip
+            continue;
+          }
+          const existingKeys = new Set(existing.map(i => keyToString(i.key)));
           for (const [keySpec, opts] of specs) {
+            if (existingKeys.has(keyToString(keySpec))) {
+              skippedCount++;
+              continue;
+            }
             try {
               await storeDb.collection(collName).createIndex(keySpec, { background: true, ...opts });
-              indexCount++;
+              createdCount++;
             } catch (e) {
-              // Non-fatal — index may already exist or collection may not exist yet
+              // Non-fatal — concurrent create or permission issue
             }
           }
         }
         // Yield between stores so we don't saturate the connection pool
         await new Promise(resolve => setImmediate(resolve));
       }
-      console.log(`[STARTUP] Ensured ${indexCount} fast indexes across ${storeList.length} store DBs`);
+      console.log(`[STARTUP] Fast indexes across ${storeList.length} stores: ${createdCount} created, ${skippedCount} already existed`);
     } catch (error) {
       console.error("[STARTUP] Index creation failed:", error);
     }
   }, 2000);
+  }
 
   // Warm cache on startup (only if Redis is available)
   setTimeout(async () => {
@@ -16502,8 +16534,8 @@ const server = app.listen(PORT, async () => {
   }, 5000);
 
   // Products indexes — deferred and sequential to avoid hammering Atlas during startup.
-  // Runs 2 minutes after boot, one store at a time with a 500ms pause between each.
-  // createIndex is idempotent so subsequent restarts are instant (index already exists).
+  // Skips entirely if SKIP_INDEX_ENSURE=1 or if listIndexes shows they already exist.
+  if (process.env.SKIP_INDEX_ENSURE !== '1') {
   setTimeout(async () => {
     try {
       const client = await getMongoClient();
@@ -16517,14 +16549,27 @@ const server = app.listen(PORT, async () => {
         [{ stockStatus: 1 }, {}],
       ];
 
-      let built = 0;
+      const keyToString = (keySpec) => Object.entries(keySpec).map(([k, v]) => `${k}_${v}`).join('_');
+      let created = 0;
+      let skipped = 0;
       for (const store of storeList) {
         if (!store.dbName) continue;
         const products = client.db(store.dbName).collection("products");
+        let existing;
+        try {
+          existing = await products.listIndexes().toArray();
+        } catch {
+          continue;
+        }
+        const existingKeys = new Set(existing.map(i => keyToString(i.key)));
         for (const [keySpec, opts] of productIndexSpecs) {
+          if (existingKeys.has(keyToString(keySpec))) {
+            skipped++;
+            continue;
+          }
           try {
             await products.createIndex(keySpec, { background: true, ...opts });
-            built++;
+            created++;
           } catch (e) {
             // Non-fatal
           }
@@ -16532,11 +16577,12 @@ const server = app.listen(PORT, async () => {
         // 500ms pause between stores — keeps Atlas load low during live traffic
         await new Promise(resolve => setTimeout(resolve, 500));
       }
-      console.log(`[STARTUP] Products indexes ensured for ${storeList.length} stores (${built} total)`);
+      console.log(`[STARTUP] Products indexes across ${storeList.length} stores: ${created} created, ${skipped} already existed`);
     } catch (err) {
       console.error("[STARTUP] Products index creation failed:", err.message);
     }
   }, 2 * 60 * 1000);
+  }
   
   // 🎯 MEMORY MANAGEMENT: Monitor and log memory usage every 30 minutes
   setInterval(() => {
