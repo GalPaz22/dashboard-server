@@ -662,6 +662,8 @@ function getRecommendedSearchIndexDefinition() {
         }
       }
     },
+    // vector_index on products — used by $vectorSearch
+    // Filter fields MUST be declared here or $vectorSearch silently ignores them.
     "vector_index": {
       "type": "vectorSearch",
       "fields": [
@@ -670,8 +672,36 @@ function getRecommendedSearchIndexDefinition() {
           "path": "embedding",
           "numDimensions": 1536,
           "similarity": "cosine"
-        }
+        },
+        // Filter fields — without these, $vectorSearch filter clauses are silently dropped
+        { "type": "filter", "path": "stockStatus" },
+        { "type": "filter", "path": "category" },
+        { "type": "filter", "path": "softCategory" },
+        { "type": "filter", "path": "type" },
+        { "type": "filter", "path": "colors" }
       ]
+    },
+    // default2 on queries collection — used by autocomplete on search history
+    "default2": {
+      "mappings": {
+        "dynamic": false,
+        "fields": {
+          "query": [
+            {
+              "type": "string",
+              "analyzer": "lucene.standard"
+            },
+            {
+              "type": "autocomplete",
+              "analyzer": "lucene.standard",
+              "tokenization": "edgeGram",
+              "minGrams": 2,
+              "maxGrams": 15,
+              "foldDiacritics": true
+            }
+          ]
+        }
+      }
     }
   };
 }
@@ -14623,17 +14653,26 @@ app.get("/search-index-config", async (req, res) => {
     
     res.json({
       message: "Atlas Search Index Configuration",
+      important: "These indexes must be created manually in Atlas UI (Atlas → Cluster → Search) — they cannot be created via the MongoDB driver.",
+      requiredIndexes: [
+        { index: "default",       collection: "products", purpose: "Full-text search (fuzzy, autocomplete, filters)" },
+        { index: "vector_index",  collection: "products", purpose: "Semantic / embedding search + stockStatus filter" },
+        { index: "default2",      collection: "queries",  purpose: "Autocomplete on search history" },
+      ],
       instructions: {
-        step1: "Go to MongoDB Atlas → Your Cluster → Search",
-        step2: "For the 'default' index: Click 'Edit' → 'Edit Index Definition (JSON)'",
-        step3: "Replace or merge the mappings section with the provided definition",
-        step4: "Click 'Save' and wait for the index to rebuild (this may take a few minutes)",
-        step5: "For the 'vector_index': Ensure it exists with the provided configuration",
+        forExistingStores: [
+          "1. Go to MongoDB Atlas → Your Cluster → Search",
+          "2. Select the store database from the dropdown",
+          "3. For 'default' and 'default2': Click 'Edit' → 'Edit Index Definition (JSON)' and paste the definition",
+          "4. For 'vector_index': Create a new Vector Search index and paste the definition",
+          "5. Click 'Save' and wait for rebuild (a few minutes per index)",
+        ],
+        forNewStores: "Repeat the above for every new store database. There is no automated creation yet.",
+        criticalNote: "The vector_index MUST include the filter fields (stockStatus, category, etc.) or $vectorSearch filters will be silently ignored.",
         documentation: "https://www.mongodb.com/docs/atlas/atlas-search/define-field-mappings/"
       },
       missingFields: Array.from(missingSearchIndexFields),
       indexDefinitions: indexDefinition,
-      note: "The 'stringFacet' type is required for fields you want to use as filters in search queries"
     });
   } catch (error) {
     console.error("Error generating search index config:", error);
