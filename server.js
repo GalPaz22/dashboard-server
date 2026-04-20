@@ -16370,7 +16370,8 @@ const server = app.listen(PORT, async () => {
 
       // Index on users.apiKey — queried on every authenticated request
       const usersDb = client.db("users");
-      await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, background: true });
+      // sparse: true excludes null/missing apiKey docs so duplicate nulls don't violate uniqueness
+      await usersDb.collection("users").createIndex({ apiKey: 1 }, { unique: true, sparse: true, background: true });
       console.log("[STARTUP] Ensured index: users.apiKey");
 
       // Ensure indexes on all per-store collections (products search + slow query profiler targets)
