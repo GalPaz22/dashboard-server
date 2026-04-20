@@ -10526,13 +10526,15 @@ app.post("/search", async (req, res) => {
         }
 
         // 🛡️ STOCK SAFETY NET (Phase 0)
+        const preStockTotal = finalProducts.length + softCategoryExpansion.length + aiRecommendations.length;
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
           .filter(p => ((!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')));
+        const stockFiltered = preStockTotal - allProducts.length;
 
         // If stock filter wiped everything, fall through to Phase 1 so the zero-result
         // fallback can return in-stock alternatives instead of returning nothing
         if (allProducts.length === 0) {
-          console.log(`[${requestId}] ⚠️ [STOCK GATE] All Phase 0 results were out-of-stock — falling through to Phase 1 for alternatives`);
+          console.log(`[${requestId}] ⚠️ [STOCK GATE] All ${preStockTotal} Phase 0 results were out-of-stock — falling through to Phase 1 for alternatives`);
           // fall through — don't return
         } else {
 
@@ -10541,7 +10543,8 @@ app.post("/search", async (req, res) => {
           ? 'perfect-filter-match'
           : (softCategoryExpansion.length > 0 ? 'soft-category-expanded' : searchMode);
 
-        console.log(`[${requestId}] 🚀 [SEARCH] Phase 0 COMPLETE (${finalSearchMode}) - returning ${allProducts.length} products (${finalProducts.length} exact + ${softCategoryExpansion.length} soft-cat + ${aiRecommendations.length} AI)`);
+        const stockNote = stockFiltered > 0 ? ` [⚠️ ${stockFiltered}/${preStockTotal} removed by stock filter]` : '';
+        console.log(`[${requestId}] 🚀 [SEARCH] Phase 0 COMPLETE (${finalSearchMode}) - returning ${allProducts.length} products (${finalProducts.length} exact + ${softCategoryExpansion.length} soft-cat + ${aiRecommendations.length} AI → ${allProducts.length} in-stock)${stockNote}`);
 
         // 🧠 SMART CATEGORY LEARNING: Learn from Phase 0 unmatched words
         if (filterCheck?.unmatchedWords?.length > 0) {
