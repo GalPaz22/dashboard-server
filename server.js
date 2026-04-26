@@ -9238,15 +9238,16 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
     query.price = { $gte: minPrice, $lte: maxPrice };
   }
 
-  // Fetch more candidates than needed so we can sort/prioritize
-  const candidates = await collection.find(query).limit(limit * 4).toArray();
+  // Fetch more candidates than needed so we can sort/prioritize.
+  // Keep this bounded because it is also used as a latency-sensitive stock fallback.
+  const candidates = await collection.find(query).limit(limit * 4).maxTimeMS(1500).toArray();
   console.log(`[AI RECOMMEND] Found ${candidates.length} candidates (price: ${minPrice.toFixed(0)}-${maxPrice.toFixed(0)})`);
 
   if (candidates.length === 0 && hardCats.size > 0) {
     // Fallback: relax price constraint, keep hard category
     console.log(`[AI RECOMMEND] No candidates with price filter - relaxing price constraint, keeping category: ${[...hardCats].join(', ')}`);
     delete query.price;
-    const fallbackCandidates = await collection.find(query).limit(limit * 4).toArray();
+    const fallbackCandidates = await collection.find(query).limit(limit * 4).maxTimeMS(1500).toArray();
     console.log(`[AI RECOMMEND] Fallback found ${fallbackCandidates.length} candidates (any price)`);
     return scoreAndSliceRecommendations(fallbackCandidates, matchedProducts, hardCats, softCats, avgPrice, limit);
   }
@@ -10563,11 +10564,71 @@ app.post("/search", async (req, res) => {
           .filter(p => ((!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')));
         const stockFiltered = preStockTotal - allProducts.length;
 
-        // If stock filter wiped everything, fall through to Phase 1 so the zero-result
-        // fallback can return in-stock alternatives instead of returning nothing
+        // If stock filter wiped everything, try a bounded same-category fallback before
+        // Phase 1. Phase 1 can trigger LLM/vector work, so avoid it for common OOS cases.
         if (allProducts.length === 0) {
-          console.log(`[${requestId}] ⚠️ [STOCK GATE] All ${preStockTotal} Phase 0 results were out-of-stock — falling through to Phase 1 for alternatives`);
-          // fall through — don't return
+          console.log(`[${requestId}] ⚠️ [STOCK GATE] All ${preStockTotal} Phase 0 results were out-of-stock - trying fast in-stock alternatives`);
+
+          try {
+            const stockFallbackStart = Date.now();
+            const existingIds = new Set(
+              [...finalProducts, ...softCategoryExpansion, ...aiRecommendations].map(p => p._id.toString())
+            );
+            const rawStockAlternatives = await findAiRecommendations(collection, approvedProducts, searchLimit);
+            const stockAlternatives = rawStockAlternatives
+              .filter(p => {
+                const id = p._id.toString();
+                return !existingIds.has(id) &&
+                  (!p.stockStatus || p.stockStatus === 'instock') &&
+                  (!p.stock_status || p.stock_status === 'instock');
+              })
+              .slice(0, searchLimit)
+              .map(product => {
+                const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+                return {
+                  ...product,
+                  _id: product._id.toString(),
+                  profileBoost,
+                  highlight: false,
+                  stockFallback: true,
+                  searchMode: 'stock-fallback-alternatives'
+                };
+              });
+
+            stockAlternatives.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
+
+            if (stockAlternatives.length > 0) {
+              console.log(`[${requestId}] ⚡ [STOCK GATE] Fast stock fallback returned ${stockAlternatives.length} alternatives in ${Date.now() - stockFallbackStart}ms`);
+
+              logBoostedProducts(stockAlternatives, requestId, "STOCK-FALLBACK");
+
+              logQuery(db.collection("queries"), query, {
+                category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
+                softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
+                color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
+              }, stockAlternatives, false).catch(err =>
+                console.error(`[${requestId}] Failed to log stock fallback query:`, err.message)
+              );
+
+              return res.json(isModernMode ? {
+                products: stockAlternatives,
+                metadata: {
+                  query,
+                  requestId,
+                  executionTime: Date.now() - searchStartTime,
+                  searchMode: 'stock-fallback-alternatives',
+                  isPerfectFilterMatch,
+                  stockFilteredCount: stockFiltered,
+                  softCategoryExpansionCount: softCategoryExpansion.length,
+                  aiRecommendationsCount: aiRecommendations.length
+                }
+              } : stockAlternatives);
+            }
+
+            console.log(`[${requestId}] ⚠️ [STOCK GATE] Fast stock fallback found no alternatives in ${Date.now() - stockFallbackStart}ms - falling through to Phase 1`);
+          } catch (stockFallbackError) {
+            console.warn(`[${requestId}] ⚠️ [STOCK GATE] Fast stock fallback failed - falling through to Phase 1:`, stockFallbackError.message);
+          }
         } else {
 
         // Update search mode if expansion occurred
@@ -17883,40 +17944,21 @@ app.post("/profile/track-purchase", async (req, res) => {
     const productsCollection = db.collection('products');
     const checkoutCollection = db.collection('checkout_events');
 
-    // Resolve product names to actual product _ids and prices from the products collection
-    const resolvedLineItems = await Promise.all(items.map(async item => {
-      let productId = String(item.product_id);
-      let productPrice = parseFloat(item.price) || 0;
-      let productName = item.name || null;
-
-      // Attempt to find product by name if product_id is not a valid ObjectId or not found by _id
-      const productDoc = await productsCollection.findOne({ name: productName });
-      if (productDoc) {
-        productId = productDoc._id.toString();
-        productPrice = productDoc.price || productPrice;
-        productName = productDoc.name;
-      } else {
-        console.warn(`[${requestId}] ⚠️ Product not found by name: "${productName}". Using provided ID and price.`);
-      }
-
-      return {
-        product_id: productId,
-        title: productName,
-        quantity: item.quantity || 1,
-        price: productPrice,
-      };
-    }));
-
     // Save checkout event
     const checkoutData = {
       order_id: order_id || `order-${Date.now()}`,
       session_id,
       platform,
       created_at: new Date().toISOString(),
-      total_price: parseFloat(total_price) || resolvedLineItems.reduce((sum, i) => sum + (i.price * i.quantity), 0),
+      total_price: parseFloat(total_price) || items.reduce((sum, i) => sum + (i.price * i.quantity), 0),
       currency,
       customer: customer || null,
-      line_items: resolvedLineItems,
+      line_items: items.map(item => ({
+        product_id: String(item.product_id),
+        title: item.name || null,
+        quantity: item.quantity || 1,
+        price: parseFloat(item.price) || 0
+      })),
       webhook_received_at: new Date().toISOString()
     };
 
