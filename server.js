@@ -996,7 +996,11 @@ async function withCache(cacheKey, fn, ttl = 604800) {
   // Store in Redis cache
   if (redisClient && redisReady) {
     try {
-      await redisClient.setEx(cacheKey, ttl, JSON.stringify(result));
+      if (result && result.__skipCache) {
+        delete result.__skipCache;
+      } else {
+        await redisClient.setEx(cacheKey, ttl, JSON.stringify(result));
+      }
     } catch (error) {
       console.error(`[CACHE ERROR] Redis set failed for ${cacheKey}:`, error.message);
       // Don't throw - return the result even if caching fails
@@ -5099,51 +5103,66 @@ ${productData.length > 0
 
 Extract filters from the query and decide the search path.`;
 
-      const unifiedLlmPromise = genAI.models.generateContent({
-        model: 'gemini-2.5-flash',
-        contents: [{ text: userPrompt }],
-        config: {
-          systemInstruction,
-          temperature: 0.1,
-          thinkingConfig: { thinkingBudget: 0 },
-          responseMimeType: 'application/json',
-          responseSchema: {
+      const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          decision: {
+            type: Type.STRING,
+            description: '"return_results" or "full_search"'
+          },
+          filters: {
             type: Type.OBJECT,
             properties: {
-              decision: {
-                type: Type.STRING,
-                description: '"return_results" or "full_search"'
-              },
-              filters: {
-                type: Type.OBJECT,
-                properties: {
-                  category: { type: Type.STRING, description: 'Exact matched category or empty string' },
-                  type: { type: Type.STRING, description: 'Exact matched type or empty string' },
-                  softCategory: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched soft categories' },
-                  color: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched colors' },
-                  minPrice: { type: Type.NUMBER, description: 'Min price bound or 0' },
-                  maxPrice: { type: Type.NUMBER, description: 'Max price bound or 0' }
-                },
-                required: ['category', 'type', 'softCategory', 'color']
-              },
-              validProductIndices: {
-                type: Type.ARRAY,
-                items: { type: Type.NUMBER },
-                description: 'Indices of relevant products in ranked order (for return_results only)'
-              },
-              reason: {
-                type: Type.STRING,
-                description: 'Brief reason for decision (max 15 words)'
-              }
+              category: { type: Type.STRING, description: 'Exact matched category or empty string' },
+              type: { type: Type.STRING, description: 'Exact matched type or empty string' },
+              softCategory: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched soft categories' },
+              color: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched colors' },
+              minPrice: { type: Type.NUMBER, description: 'Min price bound or 0' },
+              maxPrice: { type: Type.NUMBER, description: 'Max price bound or 0' }
             },
-            required: ['decision', 'filters', 'validProductIndices', 'reason']
+            required: ['category', 'type', 'softCategory', 'color']
+          },
+          validProductIndices: {
+            type: Type.ARRAY,
+            items: { type: Type.NUMBER },
+            description: 'Indices of relevant products in ranked order (for return_results only)'
+          },
+          reason: {
+            type: Type.STRING,
+            description: 'Brief reason for decision (max 15 words)'
           }
-        }
-      });
-      const unifiedTimeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Unified search LLM timeout after 8s')), 8000)
-      );
-      const response = await Promise.race([unifiedLlmPromise, unifiedTimeoutPromise]);
+        },
+        required: ['decision', 'filters', 'validProductIndices', 'reason']
+      };
+
+      const generateUnifiedWithModel = async (model, timeoutMs) => {
+        const started = Date.now();
+        const unifiedLlmPromise = genAI.models.generateContent({
+          model,
+          contents: [{ text: userPrompt }],
+          config: {
+            systemInstruction,
+            temperature: 0.1,
+            thinkingConfig: { thinkingBudget: 0 },
+            responseMimeType: 'application/json',
+            responseSchema
+          }
+        });
+        const unifiedTimeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error(`Unified search ${model} timeout after ${timeoutMs / 1000}s`)), timeoutMs)
+        );
+        const response = await Promise.race([unifiedLlmPromise, unifiedTimeoutPromise]);
+        console.log(`[UNIFIED] ${model} responded in ${Date.now() - started}ms`);
+        return response;
+      };
+
+      let response;
+      try {
+        response = await generateUnifiedWithModel('gemini-2.5-flash', 2500);
+      } catch (primaryError) {
+        console.warn(`[UNIFIED] gemini-2.5-flash unavailable/slow (${primaryError.message}) - falling back to gemini-2.5-flash-lite`);
+        response = await generateUnifiedWithModel('gemini-2.5-flash-lite', 3500);
+      }
 
       let text = response.text ? response.text.trim() : null;
       if (!text && response.candidates?.[0]?.content?.parts?.[0]) {
@@ -5182,7 +5201,7 @@ Extract filters from the query and decide the search path.`;
     } catch (error) {
       console.error('[UNIFIED SEARCH] Error:', error.message);
       aiCircuitBreaker.recordFailure();
-      return { decision: 'full_search', filters: {}, validProducts: [], reason: `Error: ${error.message}` };
+      return { decision: 'full_search', filters: {}, validProducts: [], reason: `Error: ${error.message}`, __skipCache: true };
     }
   }, 1800); // 30-min cache (keyed on query + product IDs so it's result-aware)
 }
