@@ -8924,6 +8924,117 @@ function calculateRelevanceScore(products, query, filterCheck) {
   };
 }
 
+function getRelaxedProductTerms(query) {
+  const words = normalizeQuoteCharacters(String(query || '').toLowerCase())
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .split(/\s+/)
+    .map(w => w.trim())
+    .filter(Boolean);
+
+  const stopWords = new Set([
+    'עם', 'עד', 'של', 'על', 'ללא', 'כולל', 'כוללת', 'חדש', 'חדשה',
+    'שקל', 'שח', '₪', 'קילו', 'קג', 'ק"ג', 'ליטר', 'אינץ', 'אינטש',
+    'cm', 'סמ', '4k', 'uhd', 'fhd'
+  ]);
+  const meaningful = words.filter(w => w.length >= 2 && !/^\d+$/.test(w) && !stopWords.has(w));
+  const has = (...terms) => terms.every(term => meaningful.includes(term));
+
+  if (has('מכונת', 'כביסה')) return ['מכונת', 'כביסה'];
+  if (has('שואב', 'אבק')) return ['שואב', 'אבק'];
+  if (meaningful.includes('מיקרוגל')) return ['מיקרוגל'];
+  if (meaningful.includes('מקרר')) return ['מקרר'];
+  if (meaningful.includes('טלוויזיה')) return ['טלוויזיה'];
+  if (meaningful.includes('טלויזיה')) return ['טלויזיה'];
+
+  return meaningful.slice(0, Math.min(2, meaningful.length));
+}
+
+async function findRelaxedTextAlternatives(collection, query, excludeIds = [], limit = 10) {
+  const requiredTerms = getRelaxedProductTerms(query);
+  if (requiredTerms.length === 0) return [];
+
+  const excludeSet = new Set(excludeIds.map(id => id.toString()));
+  const getTermVariants = (term) => {
+    if (term === 'טלוויזיה') return ['טלוויזיה', 'טלויזיה'];
+    if (term === 'טלויזיה') return ['טלויזיה', 'טלוויזיה'];
+    return [term];
+  };
+
+  const mustClauses = requiredTerms.map(term => ({
+    compound: {
+      should: getTermVariants(term).flatMap(variant => [
+        { autocomplete: { query: variant, path: 'name', tokenOrder: 'any', score: { boost: { value: 10 } } } },
+        { text: { query: variant, path: 'name', fuzzy: { maxEdits: 1, prefixLength: 2 }, score: { boost: { value: 8 } } } }
+      ]),
+      minimumShouldMatch: 1
+    }
+  }));
+
+  const pipeline = [
+    {
+      $search: {
+        index: 'default',
+        compound: {
+          must: mustClauses,
+          filter: [
+            {
+              compound: {
+                should: [
+                  { compound: { mustNot: [{ exists: { path: 'stockStatus' } }] } },
+                  { text: { query: 'instock', path: 'stockStatus' } }
+                ],
+                minimumShouldMatch: 1
+              }
+            }
+          ]
+        }
+      }
+    },
+    { $limit: Math.max(limit * 3, 15) }
+  ];
+
+  const filterAndSlice = (docs) => docs
+    .filter(p => {
+      const id = p._id.toString();
+      return !excludeSet.has(id) &&
+        (!p.stockStatus || p.stockStatus === 'instock') &&
+        (!p.stock_status || p.stock_status === 'instock');
+    })
+    .slice(0, limit);
+
+  const regexConditions = requiredTerms.map(term => ({
+    $or: getTermVariants(term).map(variant => ({
+      name: { $regex: variant.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' }
+    }))
+  }));
+
+  try {
+    const regexResults = await collection.find({
+      $and: [
+        ...regexConditions,
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+      ]
+    })
+      .limit(Math.max(limit * 3, 15))
+      .maxTimeMS(1500)
+      .toArray();
+
+    const directResults = filterAndSlice(regexResults);
+    if (directResults.length > 0) return directResults;
+  } catch (regexError) {
+    console.warn(`[RELAXED SEARCH] Regex fallback failed for "${query}":`, regexError.message);
+  }
+
+  let results = [];
+  try {
+    results = await collection.aggregate(pipeline, { maxTimeMS: 1200 }).toArray();
+  } catch (atlasError) {
+    console.warn(`[RELAXED SEARCH] Atlas fallback failed for "${query}":`, atlasError.message);
+  }
+
+  return filterAndSlice(results);
+}
+
 /**
  * 🎯 CORE SIMPLE SEARCH LOGIC
  * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
@@ -9375,6 +9486,58 @@ app.post("/fast-search", async (req, res) => {
       relevanceScore = calculateRelevanceScore(simpleResults, query, filterCheck);
     }
 
+    if (simpleResults.length > 0) {
+      const simpleInStockResults = simpleResults.filter(p =>
+        (!p.stockStatus || p.stockStatus === 'instock') &&
+        (!p.stock_status || p.stock_status === 'instock')
+      );
+
+      if (simpleInStockResults.length === 0) {
+        console.log(`[${requestId}] ⚡ FAST STOCK: ${simpleResults.length} simple results are out-of-stock - skipping LLM and finding relaxed alternatives`);
+        const existingIds = simpleResults.map(p => p._id);
+        const relaxedAlternatives = await findRelaxedTextAlternatives(collection, query, existingIds, FAST_LIMIT);
+        const formattedAlternatives = relaxedAlternatives.map(product => ({
+          _id: product._id.toString(),
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          price: product.price,
+          image: product.image,
+          url: product.url,
+          type: product.type,
+          category: product.category,
+          softCategory: product.softCategory,
+          specialSales: product.specialSales,
+          onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+          ItemID: product.ItemID,
+          profileBoost: 0,
+          highlight: false,
+          fastSearchMode: 'fast-stock-relaxed-alternatives'
+        }));
+
+        const executionTime = Date.now() - searchStartTime;
+        logQuery(querycollection, query, {}, formattedAlternatives, false).catch(err =>
+          console.error(`[${requestId}] Failed to log fast stock relaxed query:`, err.message)
+        );
+
+        return res.json({
+          products: formattedAlternatives,
+          metadata: {
+            query,
+            requestId,
+            executionTime,
+            isFastSearch: true,
+            searchMode: formattedAlternatives.length > 0 ? 'fast-stock-relaxed-alternatives' : 'out-of-stock-no-alternatives',
+            isPerfectFilterMatch,
+            personalizedResults: false,
+            personalizedCount: 0,
+            softCategoryExpansionCount: 0,
+            aiRecommendationsCount: 0
+          }
+        });
+      }
+    }
+
     // ============================================================
     // STEP 3: UNIFIED LLM DECISION — single call replacing:
     //   extractFiltersBrief + validateSimpleSearchResults + classification
@@ -9471,7 +9634,48 @@ app.post("/fast-search", async (req, res) => {
         }
       }
     } else {
-      console.log(`[${requestId}] 📋 No simple results found - falling back to full search`);
+      console.log(`[${requestId}] 📋 No simple results found - trying relaxed fast text alternatives`);
+
+      const executionTime = Date.now() - searchStartTime;
+      const relaxedAlternatives = await findRelaxedTextAlternatives(collection, query, [], FAST_LIMIT);
+      const formattedAlternatives = relaxedAlternatives.map(product => ({
+        _id: product._id.toString(),
+        id: product.id,
+        name: product.name,
+        description: product.description,
+        price: product.price,
+        image: product.image,
+        url: product.url,
+        type: product.type,
+        category: product.category,
+        softCategory: product.softCategory,
+        specialSales: product.specialSales,
+        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+        ItemID: product.ItemID,
+        profileBoost: 0,
+        highlight: false,
+        fastSearchMode: 'relaxed-text-alternatives'
+      }));
+
+      logQuery(querycollection, query, {}, formattedAlternatives, false).catch(err =>
+        console.error(`[${requestId}] Failed to log fast-search empty query:`, err.message)
+      );
+
+      return res.json({
+        products: formattedAlternatives,
+        metadata: {
+          query,
+          requestId,
+          executionTime,
+          isFastSearch: true,
+          searchMode: formattedAlternatives.length > 0 ? 'relaxed-text-alternatives' : 'no-simple-results',
+          isPerfectFilterMatch: false,
+          personalizedResults: false,
+          personalizedCount: 0,
+          softCategoryExpansionCount: 0,
+          aiRecommendationsCount: 0
+        }
+      });
     }
 
     // ============================================================
@@ -9560,6 +9764,55 @@ app.post("/fast-search", async (req, res) => {
 
       const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations].filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
 
+      if (allProducts.length === 0 && validatedProducts.length > 0) {
+        const existingIds = validatedProducts.map(p => p._id);
+        const relaxedAlternatives = await findRelaxedTextAlternatives(collection, query, existingIds, FAST_LIMIT);
+        const formattedAlternatives = relaxedAlternatives.map(product => {
+          const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+          return {
+            _id: product._id.toString(),
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            image: product.image,
+            url: product.url,
+            type: product.type,
+            category: product.category,
+            softCategory: product.softCategory,
+            specialSales: product.specialSales,
+            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+            ItemID: product.ItemID,
+            profileBoost,
+            highlight: false,
+            fastSearchMode: 'fast-stock-relaxed-alternatives'
+          };
+        });
+
+        const executionTime = Date.now() - searchStartTime;
+        console.log(`[${requestId}] ⚡ FAST STOCK RELAXED: ${formattedAlternatives.length} alternatives in ${executionTime}ms`);
+
+        logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false).catch(err =>
+          console.error(`[${requestId}] Failed to log fast-search relaxed alternatives:`, err.message)
+        );
+
+        return res.json({
+          products: formattedAlternatives,
+          metadata: {
+            query,
+            requestId,
+            executionTime,
+            isFastSearch: true,
+            searchMode: formattedAlternatives.length > 0 ? 'fast-stock-relaxed-alternatives' : 'out-of-stock-no-alternatives',
+            isPerfectFilterMatch,
+            personalizedResults: formattedAlternatives.some(p => (p.profileBoost || 0) > 0),
+            personalizedCount: formattedAlternatives.filter(p => (p.profileBoost || 0) > 0).length,
+            softCategoryExpansionCount: 0,
+            aiRecommendationsCount: 0
+          }
+        });
+      }
+
       const executionTime = Date.now() - searchStartTime;
       const personalizedCount = allProducts.filter(p => (p.profileBoost || 0) > 0).length;
 
@@ -9626,66 +9879,47 @@ app.post("/fast-search", async (req, res) => {
     }
 
     // ============================================================
-    // STEP 3b: If LLM rejected → Fall back to full /search
+    // STEP 3b: If LLM rejected, stay fast. Do not call full /search.
     // ============================================================
-    console.log(`[${requestId}] 🔄 Falling back to full /search (complex query path)`);
+    console.log(`[${requestId}] ⚡ LLM rejected simple results - trying relaxed fast text alternatives`);
+    const existingIds = simpleResults.map(p => p._id);
+    const relaxedAlternatives = await findRelaxedTextAlternatives(collection, query, existingIds, FAST_LIMIT);
+    const formattedAlternatives = relaxedAlternatives.map(product => ({
+      _id: product._id.toString(),
+      id: product.id,
+      name: product.name,
+      description: product.description,
+      price: product.price,
+      image: product.image,
+      url: product.url,
+      type: product.type,
+      category: product.category,
+      softCategory: product.softCategory,
+      specialSales: product.specialSales,
+      onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+      ItemID: product.ItemID,
+      profileBoost: 0,
+      highlight: false,
+      fastSearchMode: 'relaxed-text-alternatives'
+    }));
 
-    // Use faster LLM model for reordering
-    req.body.modern = true;
-    req.body.limit = FAST_LIMIT;
-    req.body.useFastLLM = true;
-    req.body.fastSearchMode = true;
-
-    // 🚀 CRITICAL: Disable explanations in fast search for maximum speed
-    const originalLimit = req.store.limit;
-    const originalExplain = req.store.explain;
-    req.store.limit = FAST_LIMIT;
-    req.store.explain = false;
-
-    const originalJson = res.json.bind(res);
-    let responseSent = false;
-
-    res.json = function(data) {
-      if (responseSent) return;
-      responseSent = true;
-
-      // Restore original store settings
-      req.store.limit = originalLimit;
-      req.store.explain = originalExplain;
-
-      const allProducts = data.products || [];
-      const products = allProducts.slice(0, FAST_LIMIT);
-
-      const executionTime = Date.now() - searchStartTime;
-      const personalizedCount = products.filter(p => (p.profileBoost || 0) > 0).length;
-
-      console.log(`[${requestId}] ⚡ FAST SEARCH (full-search fallback) completed in ${executionTime}ms - returning ${products.length} products`);
-
-      return originalJson({
-        products: products,
-        metadata: {
-          query,
-          requestId,
-          executionTime,
-          isFastSearch: true,
-          searchMode: 'full-search-fallback',
-          personalizedResults: personalizedCount > 0,
-          personalizedCount: personalizedCount
-        }
-      });
-    };
-    
-    // Call the /search handler
-    const searchRoute = app._router.stack.find(layer => 
-      layer.route && layer.route.path === '/search' && layer.route.methods.post
+    const executionTime = Date.now() - searchStartTime;
+    logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false).catch(err =>
+      console.error(`[${requestId}] Failed to log fast-search relaxed fallback:`, err.message)
     );
-    
-    if (searchRoute && searchRoute.route) {
-      const searchHandler = searchRoute.route.stack[0].handle;
-      return await searchHandler(req, res);
-    } else {
-      throw new Error('Could not find /search handler');
-    }
+
+    return res.json({
+      products: formattedAlternatives,
+      metadata: {
+        query,
+        requestId,
+        executionTime,
+        isFastSearch: true,
+        searchMode: formattedAlternatives.length > 0 ? 'relaxed-text-alternatives' : 'llm-rejected-no-fast-results',
+        personalizedResults: false,
+        personalizedCount: 0
+      }
+    });
 
   } catch (error) {
     console.error(`[${requestId}] ⚡ Fast search error:`, error);
@@ -10272,6 +10506,11 @@ app.post("/search", async (req, res) => {
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
         // ⚡ OPTIMIZATION: Skip LLM for high-confidence text matches (saves ~500-1000ms)
+        if (phase === 'text-matches-only') {
+          approvedProducts = simpleResults.slice(0, searchLimit);
+          searchMode = 'text-matches-only-simple';
+          console.log(`[${requestId}] ⚡ Phase text-matches-only: using ${approvedProducts.length} simple results without LLM validation`);
+        } else {
         const quickScore = calculateRelevanceScore(simpleResults, query, filterCheck);
         if (quickScore.isHighConfidence) {
           approvedProducts = quickScore.topProducts.slice(0, searchLimit);
@@ -10309,6 +10548,7 @@ app.post("/search", async (req, res) => {
             validationNeedsReranking = true;
             console.log(`[${requestId}] 🔍 [SEARCH] Unified → full_search: ${unified.reason}`);
           }
+        }
         }
       }
 
@@ -10593,7 +10833,14 @@ app.post("/search", async (req, res) => {
             const existingIds = new Set(
               [...finalProducts, ...softCategoryExpansion, ...aiRecommendations].map(p => p._id.toString())
             );
-            const rawStockAlternatives = await findAiRecommendations(collection, approvedProducts, searchLimit);
+            const hasRecommendationCategories = approvedProducts.some(p => {
+              const cats = Array.isArray(p.category) ? p.category : (p.category ? [p.category] : []);
+              const softCats = Array.isArray(p.softCategory) ? p.softCategory : (p.softCategory ? [p.softCategory] : []);
+              return cats.filter(Boolean).length > 0 || softCats.filter(Boolean).length > 0;
+            });
+            const rawStockAlternatives = hasRecommendationCategories
+              ? await findAiRecommendations(collection, approvedProducts, searchLimit)
+              : await findRelaxedTextAlternatives(collection, query, [...existingIds], searchLimit);
             const stockAlternatives = rawStockAlternatives
               .filter(p => {
                 const id = p._id.toString();
@@ -10610,14 +10857,15 @@ app.post("/search", async (req, res) => {
                   profileBoost,
                   highlight: false,
                   stockFallback: true,
-                  searchMode: 'stock-fallback-alternatives'
+                  searchMode: hasRecommendationCategories ? 'stock-fallback-alternatives' : 'stock-relaxed-text-alternatives'
                 };
               });
 
             stockAlternatives.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
 
             if (stockAlternatives.length > 0) {
-              console.log(`[${requestId}] ⚡ [STOCK GATE] Fast stock fallback returned ${stockAlternatives.length} alternatives in ${Date.now() - stockFallbackStart}ms`);
+              const stockSearchMode = hasRecommendationCategories ? 'stock-fallback-alternatives' : 'stock-relaxed-text-alternatives';
+              console.log(`[${requestId}] ⚡ [STOCK GATE] Fast stock fallback returned ${stockAlternatives.length} alternatives in ${Date.now() - stockFallbackStart}ms (${stockSearchMode})`);
 
               logBoostedProducts(stockAlternatives, requestId, "STOCK-FALLBACK");
 
@@ -10635,7 +10883,7 @@ app.post("/search", async (req, res) => {
                   query,
                   requestId,
                   executionTime: Date.now() - searchStartTime,
-                  searchMode: 'stock-fallback-alternatives',
+                  searchMode: stockSearchMode,
                   isPerfectFilterMatch,
                   stockFilteredCount: stockFiltered,
                   softCategoryExpansionCount: softCategoryExpansion.length,
@@ -10695,6 +10943,27 @@ app.post("/search", async (req, res) => {
         } // end else (allProducts.length > 0 after stock gate)
       }
     } else {
+      if (phase === 'text-matches-only' || isFastSearchMode) {
+        const fastEmptyMode = phase === 'text-matches-only' ? 'text-matches-only-empty' : 'fast-no-simple-results';
+        console.log(`[${requestId}] 📭 No Atlas results - returning empty ${fastEmptyMode} response`);
+
+        const emptyResponse = [];
+        logQuery(db.collection("queries"), query, {}, emptyResponse, false).catch(err =>
+          console.error(`[${requestId}] Failed to log empty ${fastEmptyMode} query:`, err.message)
+        );
+
+        return res.json(isModernMode ? {
+          products: emptyResponse,
+          metadata: {
+            query,
+            requestId,
+            executionTime: Date.now() - searchStartTime,
+            searchMode: fastEmptyMode,
+            isPerfectFilterMatch: false
+          }
+        } : emptyResponse);
+      }
+
       // Atlas Search found 0 results — run filter extraction + embedding + translation in parallel.
       // Uses extractFiltersBrief (simpler prompt, faster) instead of the heavier unifiedSearchDecision
       // since there are no products to evaluate — only filter extraction is needed.
