@@ -8946,7 +8946,7 @@ function getRelaxedProductTerms(query) {
   if (meaningful.includes('טלוויזיה')) return ['טלוויזיה'];
   if (meaningful.includes('טלויזיה')) return ['טלויזיה'];
 
-  return meaningful.slice(0, Math.min(2, meaningful.length));
+  return [];
 }
 
 async function findRelaxedTextAlternatives(collection, query, excludeIds = [], limit = 10) {
@@ -9064,8 +9064,8 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
   
   let results = [];
   if (queryWords.length > 0) {
-    // If PERFECT MATCH → no limit (return all matching products), else small limit for validation
-    const searchLimit = isPerfectFilterMatch ? 0 : 15; // 0 = no limit in MongoDB
+    // If PERFECT MATCH → use caller limit for fast paths; else small limit for validation
+    const searchLimit = isPerfectFilterMatch ? Math.min(Math.max(limit, 10), 50) : 15;
     
     let searchQuery;
     
@@ -9076,6 +9076,8 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         softCategories: filterCheck.matchedSoftCategories,
         colors: filterCheck.matchedColors
       });
+
+      const perfectMatchLimit = searchLimit > 0 ? Math.min(Math.max(searchLimit, 10), 50) : 50;
 
       const mustClauses = [
         // Stock status filter
@@ -9143,7 +9145,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
             }
           }
         },
-        { $limit: 50 }
+        { $limit: perfectMatchLimit }
       ];
 
       results = await collection.aggregate(perfectMatchPipeline).toArray();
@@ -9829,16 +9831,6 @@ app.post("/fast-search", async (req, res) => {
         tier2_validationReason: relevanceScore?.reason || 'perfect match',
         executionTime: executionTime
       });
-
-      // 🧠 SMART CATEGORY LEARNING: Learn from unmatched words in fast-search
-      if (filterCheck?.unmatchedWords?.length > 0) {
-        learnPotentialSoftCategories(
-          req.get("X-API-Key"),
-          filterCheck.unmatchedWords,
-          [],
-          query
-        ).catch(() => {}); // Fire-and-forget
-      }
 
       // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the results
       logBoostedProducts(allProducts, requestId, "FAST-SEARCH");
@@ -10906,16 +10898,6 @@ app.post("/search", async (req, res) => {
         const stockNote = stockFiltered > 0 ? ` [⚠️ ${stockFiltered}/${preStockTotal} removed by stock filter]` : '';
         console.log(`[${requestId}] 🚀 [SEARCH] Phase 0 COMPLETE (${finalSearchMode}) - returning ${allProducts.length} products (${finalProducts.length} exact + ${softCategoryExpansion.length} soft-cat + ${aiRecommendations.length} AI → ${allProducts.length} in-stock)${stockNote}`);
 
-        // 🧠 SMART CATEGORY LEARNING: Learn from Phase 0 unmatched words
-        if (filterCheck?.unmatchedWords?.length > 0) {
-          learnPotentialSoftCategories(
-            req.get("X-API-Key"),
-            filterCheck.unmatchedWords,
-            [],
-            query
-          ).catch(() => {}); // Fire-and-forget
-        }
-
         // 🎯 LOG BOOSTED PRODUCTS: Show which boosted products are in the Phase 0 results
         logBoostedProducts(allProducts, requestId, "PHASE-0");
 
@@ -11331,19 +11313,6 @@ app.post("/search", async (req, res) => {
     }
 
     // phase 1 done
-
-    // 🧠 SMART CATEGORY LEARNING: Fire-and-forget learning from AI filter extraction
-    // Combine unmatched words from Phase 0 with AI-rejected soft categories
-    const aiRejectedSoftCats = enhancedFilters?._rejectedSoftCategories || [];
-    const phase0UnmatchedWords = filterCheck?.unmatchedWords || [];
-    if (aiRejectedSoftCats.length > 0 || phase0UnmatchedWords.length > 0) {
-      learnPotentialSoftCategories(
-        req.get("X-API-Key"),
-        phase0UnmatchedWords,
-        aiRejectedSoftCats,
-        query
-      ).catch(() => {}); // Fire-and-forget
-    }
 
     // ============================================================
     // 🛤️ ROUTING BASED ON CLASSIFICATION
@@ -16238,156 +16207,13 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
   }
 }
 
-// ============================================================
-// 🧠 SMART CATEGORY LEARNING SYSTEM
-// Learns potential soft categories from search queries.
-// When users search for terms that don't exist in the current
-// category lists, the system tracks them as potentialSoftCategories.
-// Sources: unmatched query words + AI-rejected soft categories.
-// ============================================================
-
-// Hebrew stop words that should NOT be learned as potential categories
-const HEBREW_STOP_WORDS = new Set([
-  'של', 'עם', 'על', 'את', 'זה', 'זו', 'אני', 'הוא', 'היא', 'אנחנו', 'הם', 'הן',
-  'טוב', 'טובה', 'יפה', 'גדול', 'קטן', 'חדש', 'ישן', 'הכי', 'יותר', 'פחות', 'מאוד',
-  'כל', 'כמה', 'איזה', 'מה', 'למה', 'איך', 'מתי', 'איפה', 'לא', 'כן', 'גם', 'רק',
-  'אם', 'או', 'אבל', 'כי', 'עד', 'מן', 'בין', 'לפני', 'אחרי', 'בלי', 'כמו',
-  'שקל', 'שקלים', 'nis', 'the', 'and', 'for', 'with', 'best', 'good', 'new', 'old',
-  'cheap', 'expensive', 'big', 'small', 'top', 'free', 'buy', 'price', 'under', 'over',
-  'זול', 'זולה', 'יקר', 'יקרה', 'מחיר', 'מומלץ', 'מומלצת', 'אהוב', 'פופולרי',
-  'משלוח', 'חינם', 'מבצע', 'הנחה', 'sale', 'deal', 'offer'
-]);
-
 /**
- * Learn potential soft categories from search queries.
- * Tracks unmatched terms that could be valuable soft categories.
- * Called fire-and-forget from search endpoints.
- *
- * @param {string} apiKey - The store's API key
- * @param {string[]} unmatchedTerms - Words from query that didn't match any category
- * @param {string[]} rejectedSoftCategories - AI-extracted soft categories rejected by validation
- * @param {string} query - The original search query
+ * Soft category learning is disabled for now.
+ * Keep this no-op so any future/old call site cannot write potentialSoftCategories
+ * or promote anything into newSoftCategories.
  */
 async function learnPotentialSoftCategories(apiKey, unmatchedTerms = [], rejectedSoftCategories = [], query = '') {
-  try {
-    if (!apiKey) return;
-
-    // Combine both sources and deduplicate
-    const allTerms = [...new Set([
-      ...unmatchedTerms.map(t => t.trim().toLowerCase()),
-      ...rejectedSoftCategories.map(t => t.trim().toLowerCase())
-    ])].filter(term => {
-      // Filter out noise: too short, stop words, pure numbers
-      if (term.length < 2) return false;
-      if (HEBREW_STOP_WORDS.has(term)) return false;
-      if (/^\d+$/.test(term)) return false;
-      // Filter out terms with Hebrew prefix that are just prefixed stop words
-      if (term.length <= 2) return false;
-      // Filter out terms with dots or $ (invalid MongoDB field name characters)
-      if (term.includes('.') || term.includes('$')) return false;
-      return true;
-    });
-
-    if (allTerms.length === 0) return;
-
-    const client = await connectToMongoDB(mongodbUri);
-    const coreDb = client.db("users");
-    const now = new Date();
-
-    // Build atomic update operations for each term
-    const updateOps = {};
-    allTerms.forEach(term => {
-      updateOps[`credentials.potentialSoftCategories.${term}.count`] = 1;
-    });
-
-    const setOnInsertOps = {};
-    allTerms.forEach(term => {
-      setOnInsertOps[`credentials.potentialSoftCategories.${term}.firstSeen`] = now;
-    });
-
-    const setOps = {};
-    allTerms.forEach(term => {
-      setOps[`credentials.potentialSoftCategories.${term}.lastSeen`] = now;
-    });
-
-    // Use bulkWrite for efficient atomic updates
-    const bulkOps = allTerms.map(term => ({
-      updateOne: {
-        filter: { apiKey },
-        update: {
-          $inc: { [`credentials.potentialSoftCategories.${term}.count`]: 1 },
-          $set: { [`credentials.potentialSoftCategories.${term}.lastSeen`]: now },
-          $min: { [`credentials.potentialSoftCategories.${term}.firstSeen`]: now },
-          $addToSet: {
-            [`credentials.potentialSoftCategories.${term}.exampleQueries`]: {
-              $each: [query.substring(0, 100)] // Limit query length, store as example
-            }
-          }
-        }
-      }
-    }));
-
-    await coreDb.collection("users").bulkWrite(bulkOps);
-
-    // Trim exampleQueries to max 10 per term (prevent unbounded growth)
-    // Done as a separate lightweight operation
-    const trimOps = allTerms.map(term => ({
-      updateOne: {
-        filter: { apiKey },
-        update: {
-          $push: {
-            [`credentials.potentialSoftCategories.${term}.exampleQueries`]: {
-              $each: [],
-              $slice: -10 // Keep only the last 10 queries
-            }
-          }
-        }
-      }
-    }));
-
-    await coreDb.collection("users").bulkWrite(trimOps);
-
-    // ⚡ AUTO-PROMOTION: Check for popular categories (count >= 10) and promote to newSoftCategories
-    const PROMOTION_THRESHOLD = 10;
-
-    // Fetch updated user document to check counts
-    const user = await coreDb.collection("users").findOne(
-      { apiKey },
-      { projection: { 'credentials.potentialSoftCategories': 1, 'credentials.newSoftCategories': 1 } }
-    );
-
-    if (user?.credentials?.potentialSoftCategories) {
-      const potentialCats = user.credentials.potentialSoftCategories;
-      const existingNewCats = new Set(user.credentials.newSoftCategories || []);
-      const categoriesToPromote = [];
-
-      // Check which terms crossed the threshold
-      for (const term of allTerms) {
-        const catData = potentialCats[term];
-        if (catData && catData.count >= PROMOTION_THRESHOLD && !existingNewCats.has(term)) {
-          categoriesToPromote.push(term);
-        }
-      }
-
-      // Promote popular categories to newSoftCategories array
-      if (categoriesToPromote.length > 0) {
-        await coreDb.collection("users").updateOne(
-          { apiKey },
-          {
-            $addToSet: {
-              'credentials.newSoftCategories': { $each: categoriesToPromote }
-            }
-          }
-        );
-        console.log(`[CATEGORY LEARNING] 🎯 PROMOTED ${categoriesToPromote.length} popular categories to newSoftCategories: ${categoriesToPromote.join(', ')}`);
-      }
-    }
-
-    console.log(`[CATEGORY LEARNING] 🧠 Learned ${allTerms.length} potential soft categories: ${allTerms.join(', ')} (from query: "${query}")`);
-  } catch (error) {
-    // Fire-and-forget - don't let learning failures affect search
-    console.error(`[CATEGORY LEARNING] Error learning categories:`, error.message);
-  }
+  return;
 }
 
 /**
