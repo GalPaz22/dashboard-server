@@ -287,6 +287,78 @@ async function findDirectExactNameMatches(collection, query, limit = 10) {
   return [];
 }
 
+function isNumericModelQuery(query) {
+  return /^\d{2,6}$/.test(String(query || '').trim());
+}
+
+function productNameHasNumericToken(productName, query) {
+  if (!productName || !isNumericModelQuery(query)) return false;
+  const escaped = escapeRegExp(String(query).trim());
+  return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'u')
+    .test(String(productName));
+}
+
+function scoreNumericModelProduct(product, query) {
+  const name = String(product?.name || '').toLowerCase();
+  const categories = Array.isArray(product?.category)
+    ? product.category.join(' ').toLowerCase()
+    : String(product?.category || '').toLowerCase();
+  let score = 0;
+
+  if (productNameHasNumericToken(name, query)) score += 100;
+  if (name.includes('forerunner')) score += 40;
+  if (name.includes('שעון')) score += 60;
+  if (categories.includes('שעוני')) score += 30;
+  if (name.includes('תוכנית טיפולים') || name.includes('קליניקה') || name.includes('מסובסד')) score -= 80;
+  if (name.includes('שירות')) score -= 60;
+
+  return score;
+}
+
+async function findDirectNumericModelMatches(collection, query, limit = 10) {
+  if (!isNumericModelQuery(query)) return [];
+
+  const numeric = String(query).trim();
+  const numericTokenRegex = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(numeric)}([^\\p{L}\\p{N}]|$)`, 'iu');
+
+  try {
+    const nameMatches = await collection.find({ name: numericTokenRegex })
+      .limit(limit * 2)
+      .maxTimeMS(350)
+      .toArray();
+
+    if (nameMatches.length > 0) {
+      return nameMatches
+        .filter(product => productNameHasNumericToken(product.name, numeric))
+        .sort((a, b) => scoreNumericModelProduct(b, numeric) - scoreNumericModelProduct(a, numeric))
+        .slice(0, limit);
+    }
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[NUMERIC MODEL] Name lookup failed for "${query}":`, error.message);
+    }
+  }
+
+  try {
+    return await collection.find({
+      $or: [
+        { sku: numeric },
+        { ItemID: numeric },
+        { id: numeric },
+        { barcode: numeric }
+      ]
+    })
+      .limit(limit)
+      .maxTimeMS(200)
+      .toArray();
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[NUMERIC MODEL] Identifier lookup failed for "${query}":`, error.message);
+    }
+    return [];
+  }
+}
+
 /* =========================================================== *\
    MEMORY MONITORING & PROTECTION
 \* =========================================================== */
@@ -9310,6 +9382,18 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       };
     }
 
+    const numericModelMatches = await findDirectNumericModelMatches(collection, query, limit);
+    if (numericModelMatches.length > 0) {
+      if (!silent) console.log(`[SIMPLE-SEARCH] Direct numeric model match: ${numericModelMatches.length} results for "${query}"`);
+      return {
+        results: numericModelMatches,
+        isPerfectFilterMatch: false,
+        isModelNumberMatch: true,
+        filterCheck,
+        queryWords
+      };
+    }
+
     // If PERFECT MATCH → use caller limit for fast paths; else small limit for validation
     const searchLimit = isPerfectFilterMatch ? Math.min(Math.max(limit, 10), 50) : 15;
     
@@ -9740,7 +9824,7 @@ app.post("/fast-search", async (req, res) => {
     const collection = db.collection(req.store.products);
     const querycollection = db.collection("queries");
 
-    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, filterCheck, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, isModelNumberMatch, filterCheck, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
@@ -9813,7 +9897,10 @@ app.post("/fast-search", async (req, res) => {
       }
 
       const strictExactInStockResults = simpleInStockResults.filter(product =>
-        isExactTextMatch || isStrictExactNameMatch(product.name, query)
+        isExactTextMatch ||
+        isModelNumberMatch ||
+        isStrictExactNameMatch(product.name, query) ||
+        productNameHasNumericToken(product.name, query)
       );
 
       if (strictExactInStockResults.length > 0) {
@@ -9840,12 +9927,13 @@ app.post("/fast-search", async (req, res) => {
             ItemID: product.ItemID,
             profileBoost,
             highlight: true,
-            fastSearchMode: 'exact-text-match'
+            fastSearchMode: isModelNumberMatch ? 'model-number-match' : 'exact-text-match'
           };
         });
 
         const executionTime = Date.now() - searchStartTime;
-        console.log(`[${requestId}] ⚡ FAST EXACT TEXT MATCH completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
+        const exactSearchMode = isModelNumberMatch ? 'model-number-match' : 'exact-text-match';
+        console.log(`[${requestId}] ⚡ FAST ${exactSearchMode.toUpperCase()} completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
 
         logQuery(querycollection, query, {}, exactProducts, false).catch(err =>
           console.error(`[${requestId}] Failed to log fast exact text query:`, err.message)
@@ -9858,9 +9946,10 @@ app.post("/fast-search", async (req, res) => {
             requestId,
             executionTime,
             isFastSearch: true,
-            searchMode: 'exact-text-match',
+            searchMode: exactSearchMode,
             isPerfectFilterMatch: false,
-            isExactTextMatch: true,
+            isExactTextMatch: !isModelNumberMatch,
+            isModelNumberMatch: !!isModelNumberMatch,
             personalizedResults: exactProducts.some(p => (p.profileBoost || 0) > 0),
             personalizedCount: exactProducts.filter(p => (p.profileBoost || 0) > 0).length,
             softCategoryExpansionCount: 0,
@@ -10550,11 +10639,14 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     }
   }
 
-  // 🎯 PRICE WORD DETECTION: Mark price-related words as matched so they don't count as unmatched
-  // Handles: "עד 100", "מ 50", "בין 50 ל 100", "מינימום 50", "up to 200"
+  // 🎯 PRICE WORD DETECTION: Mark price-related words as matched so they don't count as unmatched.
+  // Standalone numbers are NOT prices. Queries like "970" are often model numbers/SKUs.
+  // Handles explicit price context: "עד 100", "מ 50", "בין 50 ל 100", "100 שקל", "up to 200".
   const priceKeywords = new Set(['עד', 'מ', 'מ-', 'עד-', 'בין', 'ל', 'ל-', 'מינימום', 'מקסימום', 'minimum', 'maximum', 'max', 'min', 'up', 'to', 'from']);
+  const priceUnitWords = new Set(['שקל', 'שקלים', 'שח', '₪', 'nis', 'ils']);
   let extractedMinPrice = null;
   let extractedMaxPrice = null;
+  const priceMatchedIndices = new Set();
 
   for (let i = 0; i < queryWords.length; i++) {
     if (matchedWordIndices.has(i)) continue;
@@ -10564,17 +10656,39 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       const num = parseInt(word, 10);
       const prevWord = i > 0 ? queryWords[i - 1] : null;
       const prevPrevWord = i > 1 ? queryWords[i - 2] : null;
+      const nextWord = i < queryWords.length - 1 ? queryWords[i + 1] : null;
       const isMaxKw = w => w && ['עד', 'עד-', 'maximum', 'max', 'to'].includes(w);
       const isMinKw = w => w && ['מ', 'מ-', 'מינימום', 'minimum', 'min', 'from'].includes(w);
+      const hasPriceContext = isMaxKw(prevWord) || isMaxKw(prevPrevWord) ||
+        isMinKw(prevWord) || isMinKw(prevPrevWord) ||
+        priceUnitWords.has(nextWord) || priceUnitWords.has(prevWord);
 
       if (isMaxKw(prevWord) || isMaxKw(prevPrevWord)) extractedMaxPrice = num;
       else if (isMinKw(prevWord) || isMinKw(prevPrevWord)) extractedMinPrice = num;
-      else if (num >= 10 && num <= 10000) extractedMaxPrice = num; // standalone number → maxPrice
+      else if (hasPriceContext && num >= 10 && num <= 10000) extractedMaxPrice = num;
+      else continue;
+
       matchedWordIndices.add(i);
+      priceMatchedIndices.add(i);
       continue;
     }
 
-    if (priceKeywords.has(word)) matchedWordIndices.add(i);
+    if (priceKeywords.has(word)) {
+      const prevWord = i > 0 ? queryWords[i - 1] : null;
+      const nextWord = i < queryWords.length - 1 ? queryWords[i + 1] : null;
+      if (/^\d+$/.test(prevWord || '') || /^\d+$/.test(nextWord || '')) {
+        matchedWordIndices.add(i);
+        priceMatchedIndices.add(i);
+      }
+    }
+  }
+
+  // Mark price units only when they are attached to a matched numeric price token.
+  for (let i = 0; i < queryWords.length; i++) {
+    if (matchedWordIndices.has(i) || !priceUnitWords.has(queryWords[i])) continue;
+    if (priceMatchedIndices.has(i - 1) || priceMatchedIndices.has(i + 1)) {
+      matchedWordIndices.add(i);
+    }
   }
 
   // Collect unmatched words
@@ -17120,6 +17234,11 @@ const server = app.listen(PORT, async () => {
       const storeList = await usersDb.collection("users").find({}, { projection: { dbName: 1 } }).toArray();
 
       const productIndexSpecs = [
+        [{ name: 1 }, { name: "idx_name" }],
+        [{ sku: 1 }, { name: "idx_sku" }],
+        [{ id: 1 }, { name: "idx_id" }],
+        [{ ItemID: 1 }, { name: "idx_itemid" }],
+        [{ barcode: 1 }, { name: "idx_barcode" }],
         [{ category: 1, stockStatus: 1, price: 1 }, {}],
         [{ softCategory: 1, stockStatus: 1, price: 1 }, {}],
         [{ type: 1, stockStatus: 1 }, {}],
