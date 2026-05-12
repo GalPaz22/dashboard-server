@@ -135,6 +135,158 @@ function includesWholeWord(text, word) {
   return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(text);
 }
 
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function isAtlasSearchIndexUnavailable(error) {
+  const message = String(error?.message || error?.errmsg || '');
+  const codeName = String(error?.codeName || error?.errorResponse?.codeName || '');
+  return message.includes('cannot query search index') ||
+    message.includes('while in state UNKNOWN') ||
+    message.includes('operation exceeded time limit') ||
+    message.includes('localhost:28000') ||
+    codeName === 'MaxTimeMSExpired' ||
+    codeName === 'HostUnreachable' && message.includes('onInvoke') ||
+    message.includes('index default') && message.includes('state UNKNOWN');
+}
+
+async function directNameFallbackProducts(collection, query, limit = 10, maxTimeMS = 700) {
+  const terms = String(query || '')
+    .toLowerCase()
+    .trim()
+    .split(/\s+/)
+    .filter(term => term.length >= 2)
+    .slice(0, 5);
+
+  if (terms.length === 0) return [];
+
+  const termConditions = terms.map(term => {
+    const variants = typeof getSimpleSearchWordVariants === 'function'
+      ? getSimpleSearchWordVariants(term)
+      : [term];
+
+    return {
+      $or: variants.map(variant => ({
+        name: { $regex: escapeRegExp(variant), $options: 'i' }
+      }))
+    };
+  });
+
+  let docs = [];
+  try {
+    docs = await collection.find({
+      $and: [
+        ...termConditions,
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+      ]
+    })
+      .project({
+        name: 1,
+        description: 1,
+        price: 1,
+        image: 1,
+        url: 1,
+        type: 1,
+        category: 1,
+        softCategory: 1,
+        specialSales: 1,
+        ItemID: 1,
+        id: 1,
+        stockStatus: 1,
+        stock_status: 1
+      })
+      .limit(Math.max(limit * 2, limit))
+      .maxTimeMS(maxTimeMS)
+      .toArray();
+  } catch (error) {
+    if (isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[DIRECT FALLBACK] Timed out for "${query}" after ${maxTimeMS}ms; returning empty fallback`);
+      return [];
+    }
+    throw error;
+  }
+
+  return docs
+    .sort((a, b) => {
+      const aName = String(a.name || '').toLowerCase();
+      const bName = String(b.name || '').toLowerCase();
+      const firstTerm = terms[0];
+      const aStarts = aName.startsWith(firstTerm) ? 1 : 0;
+      const bStarts = bName.startsWith(firstTerm) ? 1 : 0;
+      return bStarts - aStarts;
+    })
+    .slice(0, limit);
+}
+
+function formatFallbackProduct(product, query, mode = 'direct-name-fallback') {
+  return {
+    _id: product._id?.toString(),
+    id: product.id,
+    name: product.name,
+    description: product.description,
+    price: product.price,
+    image: product.image,
+    url: product.url,
+    type: product.type,
+    category: product.category,
+    softCategory: product.softCategory,
+    specialSales: product.specialSales,
+    onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+    ItemID: product.ItemID,
+    exactMatchBonus: getExactMatchBonus(product.name, query, query),
+    highlight: true,
+    searchMode: mode
+  };
+}
+
+function isProductInStock(product = {}) {
+  if (product.stock_status) return product.stock_status === 'instock';
+  if (product.stockStatus) return product.stockStatus === 'instock';
+  return true;
+}
+
+function getExactNameQueryVariants(query) {
+  const normalized = normalizeQuoteCharacters(String(query || '').trim());
+  const lower = normalized.toLowerCase();
+  const variants = new Set([String(query || '').trim(), normalized]);
+
+  // Allow the conservative Hebrew extra-yod spelling fix for single-token exact lookups too.
+  if (lower && !lower.includes(' ')) {
+    getSimpleSearchWordVariants(lower).forEach(variant => variants.add(variant));
+  }
+
+  return Array.from(variants).filter(Boolean);
+}
+
+function isStrictExactNameMatch(productName, query) {
+  if (!productName || !query) return false;
+  const productNameLower = normalizeQuoteCharacters(String(productName).toLowerCase().trim());
+  return getExactNameQueryVariants(query).some(variant =>
+    productNameLower === normalizeQuoteCharacters(String(variant).toLowerCase().trim())
+  );
+}
+
+async function findDirectExactNameMatches(collection, query, limit = 10) {
+  const variants = getExactNameQueryVariants(query);
+  if (variants.length === 0) return [];
+
+  try {
+    const exactMatches = await collection.find({ name: { $in: variants } })
+      .limit(limit)
+      .maxTimeMS(100)
+      .toArray();
+
+    if (exactMatches.length > 0) return exactMatches;
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[DIRECT EXACT] Exact $in lookup failed for "${query}":`, error.message);
+    }
+  }
+
+  return [];
+}
+
 /* =========================================================== *\
    MEMORY MONITORING & PROTECTION
 \* =========================================================== */
@@ -965,11 +1117,49 @@ function generateCacheKey(prefix, ...args) {
   return `${prefix}:${hash}`;
 }
 
-// Cache wrapper function - Redis only
+const memoryCache = new Map();
+const MEMORY_CACHE_MAX_ENTRIES = 500;
+
+function getMemoryCache(cacheKey) {
+  const cached = memoryCache.get(cacheKey);
+  if (!cached) return null;
+
+  if (cached.expiresAt <= Date.now()) {
+    memoryCache.delete(cacheKey);
+    return null;
+  }
+
+  return cached.value;
+}
+
+function setMemoryCache(cacheKey, value, ttlSeconds) {
+  if (value && value.__skipCache) return;
+
+  if (memoryCache.size >= MEMORY_CACHE_MAX_ENTRIES) {
+    const oldestKey = memoryCache.keys().next().value;
+    if (oldestKey) memoryCache.delete(oldestKey);
+  }
+
+  memoryCache.set(cacheKey, {
+    value,
+    expiresAt: Date.now() + ttlSeconds * 1000
+  });
+}
+
+// Cache wrapper function - Redis when available, in-memory fallback otherwise
 async function withCache(cacheKey, fn, ttl = 604800) {
   // Check if Redis is available and ready
   if (!redisClient || !redisReady) {
-    return await fn();
+    const cached = getMemoryCache(cacheKey);
+    if (cached !== null) return cached;
+
+    const result = await fn();
+    if (result && result.__skipCache) {
+      delete result.__skipCache;
+    } else {
+      setMemoryCache(cacheKey, result, ttl);
+    }
+    return result;
   }
 
   try {
@@ -4469,6 +4659,19 @@ function generateHebrewQueryVariations(text) {
   return [text, normalizeHebrew(text)];
 }
 
+function getSimpleSearchWordVariants(word) {
+  const variants = new Set([word]);
+  const stem = stemHebrew(word);
+  if (stem && stem !== word) variants.add(stem);
+
+  // Common Hebrew typo/transliteration: an extra yod after alef, e.g. אימבר -> אמבר.
+  if (/^אי[\u0590-\u05FF]{2,}$/.test(word)) {
+    variants.add(`א${word.slice(2)}`);
+  }
+
+  return Array.from(variants);
+}
+
 // Function to detect exact text matches
 // Returns much higher bonuses to ensure text matches rank above soft category matches
 function getExactMatchBonus(productName, query, cleanedQuery) {
@@ -6925,7 +7128,7 @@ app.get("/search/auto-load-more", async (req, res) => {
     console.log(`[${requestId}] Search found ${combinedResults.length} new results`);
     
     // 🛡️ STOCK SAFETY NET: enforce here regardless of MongoDB pipeline filter behavior
-    let newResults = combinedResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
+    let newResults = combinedResults.filter(isProductInStock);
 
     // FALLBACK: If no new results and we had soft filters, retry with simple search (no soft filters)
     if (newResults.length === 0 && hasSoftFilters) {
@@ -6982,7 +7185,7 @@ app.get("/search/auto-load-more", async (req, res) => {
         .sort((a, b) => b.rrf_score - a.rrf_score);
       
       // 🛡️ STOCK SAFETY NET
-      newResults = fallbackResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
+      newResults = fallbackResults.filter(isProductInStock);
       
       console.log(`[${requestId}] Fallback search found ${newResults.length} new results (without soft filters)`);
     }
@@ -7718,7 +7921,7 @@ app.get("/search/load-more", async (req, res) => {
     // Pagination debug logs removed for brevity
     
     // 🛡️ STOCK SAFETY NET: filter cached results before slicing (catches both field name variants)
-    cachedResults = cachedResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
+    cachedResults = cachedResults.filter(isProductInStock);
 
     // Get the requested slice
     let paginatedResults = cachedResults.slice(startIndex, endIndex);
@@ -7867,10 +8070,32 @@ app.get("/autocomplete", async (req, res) => {
       suggestions1,
       suggestions2Raw
     ] = await Promise.all([
-      performSimpleSearch(db, collection1, query, req.store, 5, true),
-      collection1.aggregate(pipeline1).toArray(),
+      performSimpleSearch(db, collection1, query, req.store, 5, true).catch(async (err) => {
+        if (!isAtlasSearchIndexUnavailable(err)) throw err;
+        console.warn(`[AUTOCOMPLETE] Product Atlas index unavailable for ${dbName}; using direct name fallback`);
+        const fallbackProducts = await directNameFallbackProducts(collection1, query, 5, 600);
+        return {
+          results: fallbackProducts,
+          isPerfectFilterMatch: false,
+          filterCheck: detectPerfectFilterMatch(query, req.store.categories || [], req.store.softCategories || [], req.store.colors || [])
+        };
+      }),
+      collection1.aggregate(pipeline1, { maxTimeMS: 800 }).toArray().catch(async (err) => {
+        if (!isAtlasSearchIndexUnavailable(err)) throw err;
+        console.warn(`[AUTOCOMPLETE] Product suggestions Atlas index unavailable for ${dbName}; using direct name fallback`);
+        const fallbackProducts = await directNameFallbackProducts(collection1, query, 5, 600);
+        return fallbackProducts.map(product => ({
+          suggestion: product.name,
+          score: 80,
+          url: product.url,
+          image: product.image,
+          price: product.price,
+          softCategory: product.softCategory,
+          colors: product.colors
+        }));
+      }),
       // Isolate pipeline2: if "default2" index missing on this store, return [] instead of crashing
-      collection2.aggregate(pipeline2).toArray().catch(() => [])
+      collection2.aggregate(pipeline2, { maxTimeMS: 500 }).toArray().catch(() => [])
     ]);
     const suggestions2 = suggestions2Raw;
 
@@ -7952,7 +8177,7 @@ app.get("/autocomplete", async (req, res) => {
     res.json(combinedSuggestions);
   } catch (error) {
     console.error("Error fetching autocomplete suggestions:", error);
-    res.status(500).json({ error: "Server error" });
+    res.json([]);
   }
 });
 
@@ -8142,7 +8367,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
             if (llmSelectionResult.success && llmSelectionResult.products.length > 0) {
               console.log(`[${requestId}] ✅ LLM selected ${llmSelectionResult.products.length} relevant products`);
 
-              const response = llmSelectionResult.products.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => ({
+              const response = llmSelectionResult.products.filter(isProductInStock).map(product => ({
                 _id: product._id.toString(),
                 id: product.id,
                 name: product.name,
@@ -8227,7 +8452,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, extractedFilters, searchLimit, false, [], extractedFilters);
         const vectorResults = await collection.aggregate(vectorPipeline).toArray();
 
-        const response = vectorResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).slice(0, searchLimit).map((product, index) => ({
+        const response = vectorResults.filter(isProductInStock).slice(0, searchLimit).map((product, index) => ({
           _id: product._id.toString(),
           id: product.id,
           name: product.name,
@@ -8630,7 +8855,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     }
 
     // Return category-filtered results
-    let response = (categoryFilteredResults || []).filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => {
+    let response = (categoryFilteredResults || []).filter(isProductInStock).map(product => {
       let profileBoost = 0;
       if (userProfile) {
         profileBoost = calculateProfileBoost(product, userProfile);
@@ -8884,10 +9109,17 @@ function calculateRelevanceScore(products, query, filterCheck) {
     return { isHighConfidence: false, score: 0, topProducts: [], reason: 'No results' };
   }
 
+  const queryWords = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const queryVariants = queryWords.length === 1
+    ? getSimpleSearchWordVariants(queryWords[0])
+    : [query];
+
   // Score each product based on exact match bonus
   const scoredProducts = products.map(product => {
-    const exactMatchBonus = getExactMatchBonus(product.name, query, query);
-    return { product, exactMatchBonus };
+    const exactMatchBonus = Math.max(
+      ...queryVariants.map(variant => getExactMatchBonus(product.name, variant, variant))
+    );
+    return { product, exactMatchBonus, strictExactNameMatch: isStrictExactNameMatch(product.name, query) };
   });
 
   // Sort by exact match bonus (highest first)
@@ -8900,6 +9132,8 @@ function calculateRelevanceScore(products, query, filterCheck) {
 
   const topScore = scoredProducts[0]?.exactMatchBonus || 0;
   const hasStrongMatch = topScore >= 60000;
+  const hasStrictExactNameMatch = scoredProducts.some(sp => sp.strictExactNameMatch);
+  const hasSmallSetStrongMatch = hasStrongMatch && products.length <= 3 && queryWords.length <= 2;
 
   const top3Scores = scoredProducts.slice(0, 3).map(sp => sp.exactMatchBonus);
   const allTop3Good = top3Scores.length >= 3 && top3Scores.every(s => s >= 50000);
@@ -8912,13 +9146,15 @@ function calculateRelevanceScore(products, query, filterCheck) {
                 (allTop3Good ? 30 : 0) +
                 (hasMultipleGoodMatches ? 30 : 0);
 
-  const isHighConfidence = score >= 60; // Require 60/100 for high confidence
+  const isHighConfidence = score >= 60 || hasStrictExactNameMatch || hasSmallSetStrongMatch; // Exact product-name result sets can skip LLM
 
   return {
     isHighConfidence,
     score,
     topProducts: scoredProducts.map(sp => sp.product),
-    reason: hasStrongMatch ? 'Strong exact match' :
+    reason: hasStrictExactNameMatch ? 'Strict exact product name match' :
+            hasSmallSetStrongMatch ? 'Small exact text match set' :
+            hasStrongMatch ? 'Strong exact match' :
             allTop3Good ? 'Multiple good matches' :
             'Ambiguous results'
   };
@@ -8996,9 +9232,7 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
   const filterAndSlice = (docs) => docs
     .filter(p => {
       const id = p._id.toString();
-      return !excludeSet.has(id) &&
-        (!p.stockStatus || p.stockStatus === 'instock') &&
-        (!p.stock_status || p.stock_status === 'instock');
+      return !excludeSet.has(id) && isProductInStock(p);
     })
     .slice(0, limit);
 
@@ -9064,6 +9298,18 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
   
   let results = [];
   if (queryWords.length > 0) {
+    const exactNameMatches = await findDirectExactNameMatches(collection, query, limit);
+    if (exactNameMatches.length > 0) {
+      if (!silent) console.log(`[SIMPLE-SEARCH] Direct exact name match: ${exactNameMatches.length} results for "${query}"`);
+      return {
+        results: exactNameMatches,
+        isPerfectFilterMatch: false,
+        isExactTextMatch: true,
+        filterCheck,
+        queryWords
+      };
+    }
+
     // If PERFECT MATCH → use caller limit for fast paths; else small limit for validation
     const searchLimit = isPerfectFilterMatch ? Math.min(Math.max(limit, 10), 50) : 15;
     
@@ -9148,8 +9394,52 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         { $limit: perfectMatchLimit }
       ];
 
-      results = await collection.aggregate(perfectMatchPipeline).toArray();
-      if (!silent) console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
+      try {
+        results = await collection.aggregate(perfectMatchPipeline, { maxTimeMS: 1500 }).toArray();
+        if (!silent) console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
+      } catch (atlasError) {
+        if (!isAtlasSearchIndexUnavailable(atlasError)) throw atlasError;
+        if (!silent) console.warn(`[SIMPLE-SEARCH] Atlas Search perfect match unavailable; using direct Mongo fallback:`, atlasError.message);
+        results = [];
+      }
+
+      if (results.length === 0) {
+        try {
+          const directAndConditions = [
+            { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] }
+          ];
+
+          if (filterCheck.matchedHardCategories?.length > 0) {
+            directAndConditions.push({
+              $or: [
+                { category: { $in: filterCheck.matchedHardCategories } },
+                { type: { $in: filterCheck.matchedHardCategories } }
+              ]
+            });
+          }
+
+          if (filterCheck.matchedSoftCategories?.length > 0) {
+            directAndConditions.push({ softCategory: { $all: filterCheck.matchedSoftCategories } });
+          }
+
+          if (filterCheck.extractedMinPrice !== null || filterCheck.extractedMaxPrice !== null) {
+            const priceFilter = {};
+            if (filterCheck.extractedMinPrice !== null) priceFilter.$gte = filterCheck.extractedMinPrice;
+            if (filterCheck.extractedMaxPrice !== null) priceFilter.$lte = filterCheck.extractedMaxPrice;
+            directAndConditions.push({ price: priceFilter });
+          }
+
+          const directQuery = { $and: directAndConditions };
+          results = await collection.find(directQuery)
+            .limit(perfectMatchLimit)
+            .maxTimeMS(1000)
+            .toArray();
+
+          if (!silent) console.log(`[SIMPLE-SEARCH] Direct Mongo perfect match fallback: ${results.length} results`);
+        } catch (directErr) {
+          if (!silent) console.warn(`[SIMPLE-SEARCH] Direct Mongo perfect match fallback failed:`, directErr.message);
+        }
+      }
 
       // 🛡️ Hard category safety net: even with `phrase`, Atlas Search can occasionally
       // surface products whose category only partially overlaps (e.g. multi-value arrays).
@@ -9186,51 +9476,31 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
               // Every word must appear in the name (AND logic)
               // Also search for Hebrew-stemmed variants (e.g. פלפלים → פלפל)
               must: queryWords.map(word => {
-                const stem = stemHebrew(word);
                 const shouldClauses = [
-                  {
+                  ...getSimpleSearchWordVariants(word).flatMap(variant => [
+                    {
                     autocomplete: {
-                      query: word,
+                        query: variant,
                       path: "name",
                       tokenOrder: "any",
                       score: { boost: { value: 10 } }
                     }
-                  },
-                  {
+                    },
+                    {
                     text: {
-                      query: word,
+                        query: variant,
                       path: "name",
                       fuzzy: { maxEdits: 1, prefixLength: 2 },
                       score: { boost: { value: 8 } }
                     }
-                  }
-                ];
-                // Add stemmed form as fallback (handles Hebrew plural→singular)
-                if (stem && stem !== word) {
-                  shouldClauses.push(
-                    {
-                      autocomplete: {
-                        query: stem,
-                        path: "name",
-                        tokenOrder: "any",
-                        score: { boost: { value: 9 } }
-                      }
-                    },
-                    {
-                      text: {
-                        query: stem,
-                        path: "name",
-                        fuzzy: { maxEdits: 1, prefixLength: 2 },
-                        score: { boost: { value: 7 } }
-                      }
                     }
-                  );
-                }
+                  ])
+                ];
                 // Construct state (סמיכות): word ending in ת is often the construct form
                 // of a feminine noun ending in ה. e.g., ריבת→ריבה, עוגת→עוגה, גבינת→גבינה
                 if (word.endsWith('ת') && word.length > 2) {
                   const constructBase = word.slice(0, -1) + 'ה';
-                  if (constructBase !== word && constructBase !== stem) {
+                  if (constructBase !== word && !getSimpleSearchWordVariants(word).includes(constructBase)) {
                     shouldClauses.push(
                       {
                         autocomplete: {
@@ -9255,22 +9525,22 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
               }),
               // Optional: boost if words also match category or softCategory
               should: [
-                ...queryWords.map(word => ({
+                ...queryWords.flatMap(word => getSimpleSearchWordVariants(word).map(variant => ({
                   autocomplete: {
-                    query: word,
+                    query: variant,
                     path: "category",
                     tokenOrder: "any",
                     score: { boost: { value: 5 } }
                   }
-                })),
-                ...queryWords.map(word => ({
+                }))),
+                ...queryWords.flatMap(word => getSimpleSearchWordVariants(word).map(variant => ({
                   autocomplete: {
-                    query: word,
+                    query: variant,
                     path: "softCategory",
                     tokenOrder: "any",
                     score: { boost: { value: 3 } }
                   }
-                }))
+                })))
               ],
               // Stock status filter inside compound (avoids post-$search $match)
               filter: [
@@ -9290,8 +9560,14 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         { $limit: searchLimit > 0 ? searchLimit : 50 }
       ];
 
-      results = await collection.aggregate(atlasPipeline).toArray();
-      if (!silent) console.log(`[SIMPLE-SEARCH] Atlas Search: ${results.length} results for "${query}"`);
+      try {
+        results = await collection.aggregate(atlasPipeline, { maxTimeMS: 1500 }).toArray();
+      } catch (atlasError) {
+        if (!isAtlasSearchIndexUnavailable(atlasError)) throw atlasError;
+        if (!silent) console.warn(`[SIMPLE-SEARCH] Atlas Search unavailable for "${query}"; using direct Mongo fallback:`, atlasError.message);
+        results = await directNameFallbackProducts(collection, query, searchLimit > 0 ? searchLimit : 10, 700);
+      }
+      if (!silent) console.log(`[SIMPLE-SEARCH] Atlas/Search fallback: ${results.length} results for "${query}"`);
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     }
   }
@@ -9464,7 +9740,7 @@ app.post("/fast-search", async (req, res) => {
     const collection = db.collection(req.store.products);
     const querycollection = db.collection("queries");
 
-    const { results: simpleResults, isPerfectFilterMatch, filterCheck, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, filterCheck, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
@@ -9489,10 +9765,7 @@ app.post("/fast-search", async (req, res) => {
     }
 
     if (simpleResults.length > 0) {
-      const simpleInStockResults = simpleResults.filter(p =>
-        (!p.stockStatus || p.stockStatus === 'instock') &&
-        (!p.stock_status || p.stock_status === 'instock')
-      );
+      const simpleInStockResults = simpleResults.filter(isProductInStock);
 
       if (simpleInStockResults.length === 0) {
         console.log(`[${requestId}] ⚡ FAST STOCK: ${simpleResults.length} simple results are out-of-stock - skipping LLM and finding relaxed alternatives`);
@@ -9533,6 +9806,63 @@ app.post("/fast-search", async (req, res) => {
             isPerfectFilterMatch,
             personalizedResults: false,
             personalizedCount: 0,
+            softCategoryExpansionCount: 0,
+            aiRecommendationsCount: 0
+          }
+        });
+      }
+
+      const strictExactInStockResults = simpleInStockResults.filter(product =>
+        isExactTextMatch || isStrictExactNameMatch(product.name, query)
+      );
+
+      if (strictExactInStockResults.length > 0) {
+        let userProfile = null;
+        if (session_id) {
+          userProfile = await getUserProfileForBoosting(db, session_id);
+        }
+
+        const exactProducts = strictExactInStockResults.slice(0, FAST_LIMIT).map(product => {
+          const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+          return {
+            _id: product._id.toString(),
+            id: product.id,
+            name: product.name,
+            description: product.description,
+            price: product.price,
+            image: product.image,
+            url: product.url,
+            type: product.type,
+            category: product.category,
+            softCategory: product.softCategory,
+            specialSales: product.specialSales,
+            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+            ItemID: product.ItemID,
+            profileBoost,
+            highlight: true,
+            fastSearchMode: 'exact-text-match'
+          };
+        });
+
+        const executionTime = Date.now() - searchStartTime;
+        console.log(`[${requestId}] ⚡ FAST EXACT TEXT MATCH completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
+
+        logQuery(querycollection, query, {}, exactProducts, false).catch(err =>
+          console.error(`[${requestId}] Failed to log fast exact text query:`, err.message)
+        );
+
+        return res.json({
+          products: exactProducts,
+          metadata: {
+            query,
+            requestId,
+            executionTime,
+            isFastSearch: true,
+            searchMode: 'exact-text-match',
+            isPerfectFilterMatch: false,
+            isExactTextMatch: true,
+            personalizedResults: exactProducts.some(p => (p.profileBoost || 0) > 0),
+            personalizedCount: exactProducts.filter(p => (p.profileBoost || 0) > 0).length,
             softCategoryExpansionCount: 0,
             aiRecommendationsCount: 0
           }
@@ -9690,7 +10020,7 @@ app.post("/fast-search", async (req, res) => {
         userProfile = await getUserProfileForBoosting(db, session_id);
       }
 
-      const productsWithBoost = validatedProducts.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => {
+      const productsWithBoost = validatedProducts.filter(isProductInStock).map(product => {
         const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
         return {
           _id: product._id.toString(),
@@ -9737,7 +10067,7 @@ app.post("/fast-search", async (req, res) => {
           const recTime = Date.now() - recStart;
 
           aiRecommendations = rawRecommendations
-            .filter(p => !existingIds.includes(p._id.toString()) && (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'))
+            .filter(p => !existingIds.includes(p._id.toString()) && isProductInStock(p))
             .map(product => {
             const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
             return {
@@ -9764,7 +10094,7 @@ app.post("/fast-search", async (req, res) => {
         }
       }
 
-      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations].filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
+      const allProducts = [...productsWithBoost, ...softCategoryExpansion, ...aiRecommendations].filter(isProductInStock);
 
       if (allProducts.length === 0 && validatedProducts.length > 0) {
         const existingIds = validatedProducts.map(p => p._id);
@@ -10358,7 +10688,7 @@ app.post("/simple-search", async (req, res) => {
         const rawRecommendations = await findAiRecommendations(collection, results, 5);
         const recTime = Date.now() - recStart;
 
-        aiRecommendations = rawRecommendations.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map(product => {
+        aiRecommendations = rawRecommendations.filter(isProductInStock).map(product => {
           const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
           const exactMatchBonus = getExactMatchBonus(product.name, query, query);
           return {
@@ -10386,7 +10716,7 @@ app.post("/simple-search", async (req, res) => {
       }
     }
 
-    const allProducts = [...response, ...aiRecommendations].filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
+    const allProducts = [...response, ...aiRecommendations].filter(isProductInStock);
 
     console.log(`[${requestId}] 🔍 Simple search returned ${response.length} results + ${aiRecommendations.length} AI recommendations in ${Date.now() - searchStartTime}ms${userProfile ? ' (personalized)' : ''}`);
 
@@ -10812,7 +11142,7 @@ app.post("/search", async (req, res) => {
         // 🛡️ STOCK SAFETY NET (Phase 0)
         const preStockTotal = finalProducts.length + softCategoryExpansion.length + aiRecommendations.length;
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
-          .filter(p => ((!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')));
+          .filter(isProductInStock);
         const stockFiltered = preStockTotal - allProducts.length;
 
         // If stock filter wiped everything, try a bounded same-category fallback before
@@ -10836,9 +11166,7 @@ app.post("/search", async (req, res) => {
             const stockAlternatives = rawStockAlternatives
               .filter(p => {
                 const id = p._id.toString();
-                return !existingIds.has(id) &&
-                  (!p.stockStatus || p.stockStatus === 'instock') &&
-                  (!p.stock_status || p.stock_status === 'instock');
+                return !existingIds.has(id) && isProductInStock(p);
               })
               .slice(0, searchLimit)
               .map(product => {
@@ -10972,6 +11300,47 @@ app.post("/search", async (req, res) => {
     // Falling back to full search
   } catch (err) {
     console.error(`[${requestId}] ⚠️ Simple search phase error:`, err.message);
+    if (isAtlasSearchIndexUnavailable(err)) {
+      try {
+        const client = await getMongoClient();
+        const db = client.db(dbName);
+        const collection = db.collection(collectionName);
+        const fallbackProducts = await directNameFallbackProducts(collection, query, searchLimit, 700);
+        const products = fallbackProducts.map(product =>
+          formatFallbackProduct(product, query, 'simple-phase-direct-name-fallback')
+        );
+        const executionTime = Date.now() - searchStartTime;
+
+        console.warn(`[${requestId}] Simple search unavailable; returned ${products.length} direct-name fallback products in ${executionTime}ms`);
+
+        return res.json(isModernMode ? {
+          products,
+          metadata: {
+            query,
+            requestId,
+            executionTime,
+            searchMode: 'simple-phase-direct-name-fallback',
+            degraded: true,
+            reason: 'Atlas Search unavailable or timed out'
+          }
+        } : products);
+      } catch (fallbackErr) {
+        console.error(`[${requestId}] Simple phase direct-name fallback failed:`, fallbackErr.message);
+        if (phase === 'text-matches-only' || isFastSearchMode) {
+          return res.json(isModernMode ? {
+            products: [],
+            metadata: {
+              query,
+              requestId,
+              executionTime: Date.now() - searchStartTime,
+              searchMode: 'simple-phase-fallback-empty',
+              degraded: true,
+              reason: 'Atlas Search unavailable and direct fallback failed'
+            }
+          } : []);
+        }
+      }
+    }
   }
 
   // ⚡ QUICK ENGLISH SEARCH FALLBACK
@@ -11018,7 +11387,7 @@ app.post("/search", async (req, res) => {
         const quickEngResults = await _engCollection.aggregate(engSearchPipeline).toArray();
         if (quickEngResults.length > 0) {
           console.log(`[${requestId}] ⚡ QUICK ENGLISH SEARCH: found ${quickEngResults.length} products for "${precomputedTranslation}" — returning without full search`);
-          const formatted = quickEngResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map((p, i) => ({
+          const formatted = quickEngResults.filter(isProductInStock).map((p, i) => ({
             _id: p._id.toString(),
             id: p.id,
             name: p.name,
@@ -11077,7 +11446,7 @@ app.post("/search", async (req, res) => {
       const skuResults = await executeSKUSearch(collection, query.trim());
       
       // Format SKU results for response
-      const formattedSKUResults = skuResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock')).map((product) => ({
+      const formattedSKUResults = skuResults.filter(isProductInStock).map((product) => ({
         _id: product._id.toString(),
         id: product.id, // Keep for backward compatibility if needed, but _id is primary
         name: product.name,
@@ -13349,7 +13718,7 @@ app.post("/search", async (req, res) => {
     // vector index, letting outofstock products slip through any pipeline.
     // Checks both camelCase (stockStatus) and snake_case (stock_status) field names.
     const beforeStockGate = finalResults.length;
-    finalResults = finalResults.filter(p => (!p.stockStatus || p.stockStatus === 'instock') && (!p.stock_status || p.stock_status === 'instock'));
+    finalResults = finalResults.filter(isProductInStock);
     if (beforeStockGate !== finalResults.length) {
       console.log(`[${requestId}] 🛡️ [STOCK GATE] Removed ${beforeStockGate - finalResults.length} out-of-stock products`);
     }
@@ -13825,6 +14194,37 @@ app.post("/search", async (req, res) => {
         const missingField = fieldMatch[1];
         markFieldAsMissing(missingField);
         logSearchIndexUpdateInstructions();
+      }
+    }
+
+    if (isAtlasSearchIndexUnavailable(error) && !res.headersSent) {
+      try {
+        const client = await getMongoClient();
+        const db = client.db(dbName);
+        const collection = db.collection(collectionName);
+        const fallbackProducts = await directNameFallbackProducts(collection, query, searchLimit, 900);
+        const products = fallbackProducts.map(product =>
+          formatFallbackProduct(product, query, 'atlas-index-direct-name-fallback')
+        );
+        const executionTime = Date.now() - searchStartTime;
+
+        console.warn(`[${requestId}] Atlas Search index unavailable; returned ${products.length} direct-name fallback products in ${executionTime}ms`);
+
+        const fallbackResponse = {
+          products,
+          metadata: {
+            query,
+            requestId,
+            executionTime,
+            searchMode: 'atlas-index-direct-name-fallback',
+            degraded: true,
+            reason: 'Atlas Search index unavailable'
+          }
+        };
+
+        return res.json(isModernMode ? fallbackResponse : products);
+      } catch (fallbackError) {
+        console.error(`[${requestId}] Direct-name fallback after Atlas outage failed:`, fallbackError.message);
       }
     }
     
