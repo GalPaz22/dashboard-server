@@ -288,12 +288,44 @@ async function findDirectExactNameMatches(collection, query, limit = 10) {
 }
 
 function isNumericModelQuery(query) {
-  return /^\d{2,6}$/.test(String(query || '').trim());
+  return !!getNumericModelToken(query);
+}
+
+function getNumericModelToken(query) {
+  const words = String(query || '').toLowerCase().trim().split(/\s+/).filter(Boolean);
+  const numericWords = words.filter(word => /^\d{1,6}$/.test(word));
+  if (numericWords.length !== 1) return null;
+
+  const priceWords = new Set(['עד', 'מ', 'מ-', 'עד-', 'בין', 'ל', 'ל-', 'שקל', 'שקלים', 'שח', '₪', 'nis', 'ils', 'maximum', 'max', 'minimum', 'min', 'to', 'from']);
+  const numericIndex = words.findIndex(word => word === numericWords[0]);
+  const prev = words[numericIndex - 1];
+  const next = words[numericIndex + 1];
+  if (priceWords.has(prev) || priceWords.has(next)) return null;
+
+  return numericWords[0];
+}
+
+function getModelBrandHints(query) {
+  const normalized = normalizeQuoteCharacters(String(query || '').toLowerCase());
+  const hints = [];
+  if (/\b(fenix|fēnix)\b/.test(normalized) || normalized.includes('פניקס')) hints.push('fenix');
+  if (normalized.includes('forerunner') || normalized.includes('פורראנר')) hints.push('forerunner');
+  if (normalized.includes('venu') || normalized.includes('ונו')) hints.push('venu');
+  if (normalized.includes('epix') || normalized.includes('אפיקס')) hints.push('epix');
+  if (normalized.includes('instinct') || normalized.includes('אינסטינקט')) hints.push('instinct');
+  return hints;
+}
+
+function productNameMatchesModelBrand(productName, brandHint) {
+  const name = normalizeQuoteCharacters(String(productName || '').toLowerCase());
+  if (brandHint === 'fenix') return name.includes('fenix') || name.includes('fēnix');
+  return name.includes(brandHint);
 }
 
 function productNameHasNumericToken(productName, query) {
-  if (!productName || !isNumericModelQuery(query)) return false;
-  const escaped = escapeRegExp(String(query).trim());
+  const numeric = getNumericModelToken(query);
+  if (!productName || !numeric) return false;
+  const escaped = escapeRegExp(numeric);
   return new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'u')
     .test(String(productName));
 }
@@ -306,6 +338,10 @@ function scoreNumericModelProduct(product, query) {
   let score = 0;
 
   if (productNameHasNumericToken(name, query)) score += 100;
+  for (const brandHint of getModelBrandHints(query)) {
+    if (productNameMatchesModelBrand(name, brandHint)) score += 120;
+  }
+  if (name.includes('fēnix') || name.includes('fenix')) score += 35;
   if (name.includes('forerunner')) score += 40;
   if (name.includes('שעון')) score += 60;
   if (categories.includes('שעוני')) score += 30;
@@ -316,10 +352,49 @@ function scoreNumericModelProduct(product, query) {
 }
 
 async function findDirectNumericModelMatches(collection, query, limit = 10) {
-  if (!isNumericModelQuery(query)) return [];
+  const numeric = getNumericModelToken(query);
+  if (!numeric) return [];
 
-  const numeric = String(query).trim();
   const numericTokenRegex = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(numeric)}([^\\p{L}\\p{N}]|$)`, 'iu');
+  const brandHints = getModelBrandHints(query);
+  const filterAndRank = (docs) => {
+    let filtered = docs.filter(product => productNameHasNumericToken(product.name, numeric));
+    if (brandHints.length > 0) {
+      const brandMatches = filtered.filter(product =>
+        brandHints.some(brandHint => productNameMatchesModelBrand(product.name, brandHint))
+      );
+      if (brandMatches.length > 0) filtered = brandMatches;
+    }
+
+    return filtered
+      .sort((a, b) => scoreNumericModelProduct(b, query) - scoreNumericModelProduct(a, query))
+      .slice(0, limit);
+  };
+
+  try {
+    const atlasResults = await collection.aggregate([
+      {
+        $search: {
+          index: "default",
+          compound: {
+            should: [
+              { text: { query: numeric, path: "name", score: { boost: { value: 4 } } } },
+              { autocomplete: { query: numeric, path: "name", tokenOrder: "any", score: { boost: { value: 5 } } } }
+            ],
+            minimumShouldMatch: 1
+          }
+        }
+      },
+      { $limit: Math.max(limit * 3, 20) }
+    ], { maxTimeMS: 800 }).toArray();
+
+    const rankedAtlasResults = filterAndRank(atlasResults);
+    if (rankedAtlasResults.length > 0) return rankedAtlasResults;
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[NUMERIC MODEL] Atlas lookup failed for "${query}":`, error.message);
+    }
+  }
 
   try {
     const nameMatches = await collection.find({ name: numericTokenRegex })
@@ -328,10 +403,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
       .toArray();
 
     if (nameMatches.length > 0) {
-      return nameMatches
-        .filter(product => productNameHasNumericToken(product.name, numeric))
-        .sort((a, b) => scoreNumericModelProduct(b, numeric) - scoreNumericModelProduct(a, numeric))
-        .slice(0, limit);
+      return filterAndRank(nameMatches);
     }
   } catch (error) {
     if (!isAtlasSearchIndexUnavailable(error)) {
@@ -9351,7 +9423,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10, sil
 }
 
 async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false) {
-  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2);
+  const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
 
   // 🎯 MEMORY PROTECTION: Limit query complexity to prevent OOM
   if (queryWords.length > 8) {
@@ -10402,7 +10474,7 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   const queryWords = query.toLowerCase().trim()
     .replace(/[.,/#!$%^&*;:{}=\-_`~()]/g, "") // Remove punctuation but NOT geresh/apostrophe
     .split(/\s+/)
-    .filter(w => w.length >= 2);
+    .filter(w => w.length >= 2 || /^\d+$/.test(w));
     
   if (queryWords.length === 0) {
     return { isPerfectMatch: false, unmatchedWords: [] };
