@@ -331,6 +331,101 @@ function productNameMatchesModelBrand(productName, brandHint) {
   return name.includes(brandHint);
 }
 
+/* =========================================================== *\
+   CONFIG-DRIVEN ACCESSORY DISAMBIGUATION
+   When a query targets a product LINE (a non-accessory soft category
+   defined in the store config, e.g. "שעון מולטי-ספורט Fenix"), we
+   should not return accessory products (straps, chargers, ...) that
+   merely mention the model name. Both the product lines AND the
+   accessory categories come from the store's own config — nothing is
+   hard-coded per store.
+\* =========================================================== */
+
+// Generic, language-level accessory keywords (NOT store-specific).
+// Used only to classify which of the store's OWN categories / soft
+// categories represent accessories.
+const ACCESSORY_KEYWORDS = [
+  'רצוע', 'אביזר', 'מטען', 'כבל', 'מתאם', 'מגן', 'כיסוי', 'עגינה',
+  'strap', 'band', 'charger', 'charging', 'cable', 'adapter', 'case',
+  'cover', 'mount', 'dock', 'quickfit'
+];
+
+function labelLooksLikeAccessory(label) {
+  const s = String(label || '').toLowerCase();
+  return ACCESSORY_KEYWORDS.some(term => s.includes(term));
+}
+
+// Normalize a store config list field that may be an array or a comma-separated string.
+function normalizeConfigList(value) {
+  if (Array.isArray(value)) return value.filter(v => typeof v === 'string' && v.trim());
+  if (typeof value === 'string') return value.split(',').map(v => v.trim()).filter(Boolean);
+  return [];
+}
+
+function tokenizeLabel(label) {
+  return normalizeQuoteCharacters(String(label || '').toLowerCase())
+    .split(/[\s\-/,]+/)
+    .filter(Boolean);
+}
+
+// Accessory categories taken from the STORE'S OWN category list (e.g. "רצועות", "רצועת דופק").
+function getStoreAccessoryCategories(store = {}) {
+  return normalizeConfigList(store.categories)
+    .filter(labelLooksLikeAccessory)
+    .map(c => c.toLowerCase().trim());
+}
+
+// Device/product-line soft categories from the store config (the non-accessory ones,
+// e.g. "שעון מולטי-ספורט Fenix", "שעון ריצה Forerunner").
+function getStoreDeviceSoftCategories(store = {}) {
+  return normalizeConfigList(store.softCategories).filter(sc => !labelLooksLikeAccessory(sc));
+}
+
+// Does the query reference one of the store's device product-lines?
+// e.g. "fenix" matches the soft category "שעון מולטי-ספורט Fenix" via the shared token "fenix".
+function queryMatchesDeviceSoftCategory(query, store) {
+  const queryWords = tokenizeLabel(query).filter(w => w.length >= 3 || /^\d+$/.test(w));
+  if (queryWords.length === 0) return false;
+
+  const deviceSoftCategories = getStoreDeviceSoftCategories(store);
+  return deviceSoftCategories.some(sc => {
+    const scWords = tokenizeLabel(sc);
+    return queryWords.some(qw => qw.length >= 3 && scWords.includes(qw));
+  });
+}
+
+// Is the product an accessory according to the store's accessory categories?
+function productIsAccessory(product = {}, accessoryCategories = []) {
+  const productCats = (Array.isArray(product.category) ? product.category : [product.category])
+    .filter(Boolean)
+    .map(c => String(c).toLowerCase().trim());
+
+  if (productCats.some(c => accessoryCategories.includes(c))) return true;
+  // Safety net: category label itself reads like an accessory (handles unlisted variants).
+  return productCats.some(labelLooksLikeAccessory);
+}
+
+// Drop accessory products when the query targets a device product-line.
+// Skipped entirely when the user explicitly asked for an accessory.
+function filterAccessoriesForDeviceQuery(products, query, store, silent = false) {
+  if (!Array.isArray(products) || products.length === 0) return products;
+
+  // Respect explicit accessory intent — don't strip straps when the user asked for one.
+  if (labelLooksLikeAccessory(query)) return products;
+
+  // Only act when the query maps to a device product-line in the store config.
+  if (!queryMatchesDeviceSoftCategory(query, store)) return products;
+
+  const accessoryCategories = getStoreAccessoryCategories(store);
+  if (accessoryCategories.length === 0) return products;
+
+  const filtered = products.filter(product => !productIsAccessory(product, accessoryCategories));
+  if (!silent && filtered.length !== products.length) {
+    console.log(`[DEVICE QUERY] Filtered ${products.length - filtered.length}/${products.length} accessory results for "${query}" (accessory categories: ${accessoryCategories.join(', ')})`);
+  }
+  return filtered;
+}
+
 function productNameHasNumericToken(productName, query) {
   const numeric = getNumericModelToken(query);
   if (!productName || !numeric) return false;
@@ -1744,6 +1839,7 @@ async function getStoreConfigByApiKey(apiKey) {
     }
 
     return {
+      apiKey: userDoc.apiKey,
       dbName: userDoc.dbName,
       products: userDoc.collections?.products || "products",
       queries: userDoc.collections?.queries || "queries",
@@ -9465,10 +9561,11 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
   if (queryWords.length > 0) {
     if (!isPerfectFilterMatch) {
       const exactNameMatches = await findDirectExactNameMatches(collection, query, limit);
-      if (exactNameMatches.length > 0) {
-        if (!silent) console.log(`[SIMPLE-SEARCH] Direct exact name match: ${exactNameMatches.length} results for "${query}"`);
+      const filteredExactNameMatches = filterAccessoriesForDeviceQuery(exactNameMatches, query, store, silent);
+      if (filteredExactNameMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Direct exact name match: ${filteredExactNameMatches.length} results for "${query}"`);
         return {
-          results: exactNameMatches,
+          results: filteredExactNameMatches,
           isPerfectFilterMatch: false,
           isExactTextMatch: true,
           filterCheck,
@@ -9477,10 +9574,11 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       }
 
       const numericModelMatches = await findDirectNumericModelMatches(collection, query, limit);
-      if (numericModelMatches.length > 0) {
-        if (!silent) console.log(`[SIMPLE-SEARCH] Direct numeric model match: ${numericModelMatches.length} results for "${query}"`);
+      const filteredNumericModelMatches = filterAccessoriesForDeviceQuery(numericModelMatches, query, store, silent);
+      if (filteredNumericModelMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Direct numeric model match: ${filteredNumericModelMatches.length} results for "${query}"`);
         return {
-          results: numericModelMatches,
+          results: filteredNumericModelMatches,
           isPerfectFilterMatch: false,
           isModelNumberMatch: true,
           filterCheck,
@@ -9747,6 +9845,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         results = await directNameFallbackProducts(collection, query, searchLimit > 0 ? searchLimit : 10, 700);
       }
       if (!silent) console.log(`[SIMPLE-SEARCH] Atlas/Search fallback: ${results.length} results for "${query}"`);
+      results = filterAccessoriesForDeviceQuery(results, query, store, silent);
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     }
   }
@@ -10151,7 +10250,125 @@ app.post("/fast-search", async (req, res) => {
         }
       }
     } else {
-      console.log(`[${requestId}] 📋 No simple results found - trying relaxed fast text alternatives`);
+      console.log(`[${requestId}] 📋 No simple results found - trying quick LLM + vector fallback`);
+
+      // ⚡ QUICK VECTOR FALLBACK: 0 textual results → extract filters + embed in parallel,
+      // run a bounded vector search, then a fast LLM rerank. Mirrors the full /search vector
+      // path but capped for low latency. Falls back to relaxed text alternatives if empty.
+      let vectorFallbackProducts = [];
+      try {
+        const fallbackStart = Date.now();
+        const FALLBACK_VECTOR_LIMIT = 30;
+        const colorsForExtraction = Array.isArray(req.store?.colors)
+          ? req.store.colors.join(', ')
+          : (req.store?.colors || '');
+        const fallbackContext = req.store?.context || 'wine shop';
+
+        const [extracted, queryEmbedding] = await Promise.all([
+          extractFiltersBrief(query, req.store.categories || '', req.store.types || '', req.store.softCategories || '', fallbackContext, colorsForExtraction).catch(() => ({})),
+          getQueryEmbedding(query).catch(() => null)
+        ]);
+
+        if (queryEmbedding) {
+          const fb = extracted || {};
+          const fbHardFilters = {};
+          if (fb.category) fbHardFilters.category = Array.isArray(fb.category) ? fb.category : [fb.category];
+          if (fb.type) fbHardFilters.type = Array.isArray(fb.type) ? fb.type : [fb.type];
+          if (fb.minPrice !== undefined && fb.minPrice !== null) fbHardFilters.minPrice = fb.minPrice;
+          if (fb.maxPrice !== undefined && fb.maxPrice !== null) fbHardFilters.maxPrice = fb.maxPrice;
+          if (fb.price !== undefined && fb.price !== null) fbHardFilters.price = fb.price;
+
+          const fbSoftFilters = {};
+          if (fb.softCategory) fbSoftFilters.softCategory = Array.isArray(fb.softCategory) ? fb.softCategory : [fb.softCategory];
+          if (fb.color) fbSoftFilters.color = Array.isArray(fb.color) ? fb.color : [fb.color];
+
+          const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
+          let vectorResults = await collection.aggregate(vectorPipeline).toArray();
+          vectorResults = vectorResults.filter(isProductInStock);
+          // Config-driven guard: drop accessories (straps/chargers/etc.) for device-line queries
+          vectorResults = filterAccessoriesForDeviceQuery(vectorResults, query, req.store);
+          console.log(`[${requestId}] ⚡ Vector fallback: ${vectorResults.length} candidates (filters: ${JSON.stringify(fbHardFilters)})`);
+
+          if (vectorResults.length > 0) {
+            let orderedResults = vectorResults;
+            try {
+              const reranked = await reorderResultsWithGPT(
+                vectorResults,
+                query,
+                query,
+                [],
+                false,
+                fallbackContext,
+                (fbSoftFilters.softCategory || fbSoftFilters.color) ? fbSoftFilters : null,
+                FAST_LIMIT,
+                true // useFastLLM
+              );
+              if (Array.isArray(reranked) && reranked.length > 0) {
+                const byId = new Map(vectorResults.map(p => [p._id.toString(), p]));
+                const rerankedProducts = reranked.map(r => byId.get(r._id)).filter(Boolean);
+                if (rerankedProducts.length > 0) orderedResults = rerankedProducts;
+              }
+            } catch (rerankErr) {
+              console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal): ${rerankErr.message}`);
+            }
+
+            let userProfile = null;
+            if (session_id) {
+              userProfile = await getUserProfileForBoosting(db, session_id);
+            }
+
+            vectorFallbackProducts = orderedResults.slice(0, FAST_LIMIT).map(product => {
+              const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+              return {
+                _id: product._id.toString(),
+                id: product.id,
+                name: product.name,
+                description: product.description,
+                price: product.price,
+                image: product.image,
+                url: product.url,
+                type: product.type,
+                category: product.category,
+                softCategory: product.softCategory,
+                specialSales: product.specialSales,
+                onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+                ItemID: product.ItemID,
+                profileBoost,
+                highlight: false,
+                fastSearchMode: 'fast-vector-fallback'
+              };
+            });
+            console.log(`[${requestId}] ⚡ Vector fallback produced ${vectorFallbackProducts.length} products in ${Date.now() - fallbackStart}ms`);
+          }
+        }
+      } catch (fallbackErr) {
+        console.warn(`[${requestId}] ⚡ Quick vector fallback failed (non-fatal): ${fallbackErr.message}`);
+      }
+
+      if (vectorFallbackProducts.length > 0) {
+        const executionTime = Date.now() - searchStartTime;
+        logQuery(querycollection, query, {}, vectorFallbackProducts, false, { session_id }).catch(err =>
+          console.error(`[${requestId}] Failed to log fast vector fallback query:`, err.message)
+        );
+
+        return res.json({
+          products: vectorFallbackProducts,
+          metadata: {
+            query,
+            requestId,
+            executionTime,
+            isFastSearch: true,
+            searchMode: 'fast-vector-fallback',
+            isPerfectFilterMatch: false,
+            personalizedResults: vectorFallbackProducts.some(p => (p.profileBoost || 0) > 0),
+            personalizedCount: vectorFallbackProducts.filter(p => (p.profileBoost || 0) > 0).length,
+            softCategoryExpansionCount: 0,
+            aiRecommendationsCount: 0
+          }
+        });
+      }
+
+      console.log(`[${requestId}] 📋 Vector fallback empty - trying relaxed fast text alternatives`);
 
       const executionTime = Date.now() - searchStartTime;
       const relaxedAlternatives = await findRelaxedTextAlternatives(collection, query, [], FAST_LIMIT);
