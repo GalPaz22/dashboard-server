@@ -135,6 +135,15 @@ function includesWholeWord(text, word) {
   return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(text);
 }
 
+function normalizeSessionId(...values) {
+  for (const value of values) {
+    if (value !== undefined && value !== null && String(value).trim()) {
+      return String(value).trim();
+    }
+  }
+  return null;
+}
+
 function escapeRegExp(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
@@ -1593,9 +1602,10 @@ app.post("/queries", async (req, res) => {
 
 // POST /add-to-cart endpoint
 app.post("/add-to-cart", async (req, res) => {
-  const { dbName, productId, quantity, price, sessionId, query } = req.body;
+  const { dbName, productId, quantity, price, sessionId, session_id, query } = req.body;
+  const normalizedSessionId = normalizeSessionId(session_id, sessionId);
 
-  if (!dbName || !productId || !quantity || !price || !sessionId) {
+  if (!dbName || !productId || !quantity || !price || !normalizedSessionId) {
     return res.status(400).json({ error: "dbName, productId, quantity, price, and sessionId parameters are required" });
   }
 
@@ -1608,7 +1618,8 @@ app.post("/add-to-cart", async (req, res) => {
       productId: productId,
       quantity: quantity,
       price: price,
-      sessionId: sessionId,
+      sessionId: normalizedSessionId,
+      session_id: normalizedSessionId,
       query: query || null, // Capture query if available
       timestamp: new Date(),
     };
@@ -1625,9 +1636,10 @@ app.post("/add-to-cart", async (req, res) => {
 
 // POST /log-product-click endpoint
 app.post("/log-product-click", async (req, res) => {
-  const { dbName, productId, sessionId, query } = req.body;
+  const { dbName, productId, sessionId, session_id, query } = req.body;
+  const normalizedSessionId = normalizeSessionId(session_id, sessionId);
 
-  if (!dbName || !productId || !sessionId) {
+  if (!dbName || !productId || !normalizedSessionId) {
     return res.status(400).json({ error: "dbName, productId, and sessionId parameters are required" });
   }
 
@@ -1638,7 +1650,8 @@ app.post("/log-product-click", async (req, res) => {
 
     const clickEvent = {
       productId: productId,
-      sessionId: sessionId,
+      sessionId: normalizedSessionId,
+      session_id: normalizedSessionId,
       query: query || null, // Capture search query if available
       timestamp: new Date(),
     };
@@ -1668,7 +1681,7 @@ app.get("/get-session-clicks", async (req, res) => {
 
     // 🎯 MEMORY OPTIMIZATION: Limit to 1000 most recent clicks to prevent OOM on old sessions
     const sessionClicks = await clickEventsCollection
-      .find({ sessionId: sessionId })
+      .find({ $or: [{ sessionId: sessionId }, { session_id: sessionId }] })
       .sort({ timestamp: 1 })
       .limit(1000)
       .toArray();
@@ -5152,9 +5165,10 @@ function levenshteinDistance(str1, str2) {
   return prevRow[len2];
 }
 
-async function logQuery(queryCollection, query, filters, products = [], isComplex = false) {
+async function logQuery(queryCollection, query, filters, products = [], isComplex = false, options = {}) {
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
+  const sessionId = normalizeSessionId(options.session_id, options.sessionId);
   
   const deliveredProducts = products.map(p => p.name).filter(Boolean).slice(0, 20);
   
@@ -5171,6 +5185,11 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
     deliveredProducts: deliveredProducts,
     isComplex: isComplex
   };
+
+  if (sessionId) {
+    queryDocument.session_id = sessionId;
+    queryDocument.sessionId = sessionId; // legacy/camelCase compatibility
+  }
   
   // Log every query without duplicate detection
   console.log(`[QUERY LOG] Inserting query log for: "${query}"`);
@@ -8538,7 +8557,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
               logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
 
               // Log query (fire-and-forget — does not block response)
-              logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+              logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
                 console.error(`[${requestId}] Failed to log query:`, err.message)
               );
 
@@ -8619,7 +8638,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         }));
 
         // Log simple query (vector fallback path — fire-and-forget)
-        logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+        logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
           console.error(`[${requestId}] Failed to log query:`, err.message)
         );
 
@@ -8838,7 +8857,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     }
 
     // Log simple query (text matches path — fire-and-forget)
-    logQuery(querycollection, query, extractedFilters, response, false).catch(err =>
+    logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -9055,7 +9074,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     })).toString('base64') : null;
 
     // Log simple query (category-filtered path — fire-and-forget)
-    logQuery(querycollection, query, categoryFilteredHardFilters, response, false).catch(err =>
+    logQuery(querycollection, query, categoryFilteredHardFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -9422,6 +9441,8 @@ async function performSimpleSearch(db, collection, query, store, limit = 10, sil
   return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent), 60);
 }
 
+const MAX_FILTER_MATCH_RESULTS = 500;
+
 async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
 
@@ -9442,32 +9463,34 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
   
   let results = [];
   if (queryWords.length > 0) {
-    const exactNameMatches = await findDirectExactNameMatches(collection, query, limit);
-    if (exactNameMatches.length > 0) {
-      if (!silent) console.log(`[SIMPLE-SEARCH] Direct exact name match: ${exactNameMatches.length} results for "${query}"`);
-      return {
-        results: exactNameMatches,
-        isPerfectFilterMatch: false,
-        isExactTextMatch: true,
-        filterCheck,
-        queryWords
-      };
-    }
+    if (!isPerfectFilterMatch) {
+      const exactNameMatches = await findDirectExactNameMatches(collection, query, limit);
+      if (exactNameMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Direct exact name match: ${exactNameMatches.length} results for "${query}"`);
+        return {
+          results: exactNameMatches,
+          isPerfectFilterMatch: false,
+          isExactTextMatch: true,
+          filterCheck,
+          queryWords
+        };
+      }
 
-    const numericModelMatches = await findDirectNumericModelMatches(collection, query, limit);
-    if (numericModelMatches.length > 0) {
-      if (!silent) console.log(`[SIMPLE-SEARCH] Direct numeric model match: ${numericModelMatches.length} results for "${query}"`);
-      return {
-        results: numericModelMatches,
-        isPerfectFilterMatch: false,
-        isModelNumberMatch: true,
-        filterCheck,
-        queryWords
-      };
+      const numericModelMatches = await findDirectNumericModelMatches(collection, query, limit);
+      if (numericModelMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Direct numeric model match: ${numericModelMatches.length} results for "${query}"`);
+        return {
+          results: numericModelMatches,
+          isPerfectFilterMatch: false,
+          isModelNumberMatch: true,
+          filterCheck,
+          queryWords
+        };
+      }
     }
 
     // If PERFECT MATCH → use caller limit for fast paths; else small limit for validation
-    const searchLimit = isPerfectFilterMatch ? Math.min(Math.max(limit, 10), 50) : 15;
+    const searchLimit = isPerfectFilterMatch ? Math.min(Math.max(limit, 10), MAX_FILTER_MATCH_RESULTS) : 15;
     
     let searchQuery;
     
@@ -9479,7 +9502,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         colors: filterCheck.matchedColors
       });
 
-      const perfectMatchLimit = searchLimit > 0 ? Math.min(Math.max(searchLimit, 10), 50) : 50;
+      const perfectMatchLimit = searchLimit > 0 ? Math.min(Math.max(searchLimit, 10), MAX_FILTER_MATCH_RESULTS) : MAX_FILTER_MATCH_RESULTS;
 
       const mustClauses = [
         // Stock status filter
@@ -9880,6 +9903,7 @@ app.post("/fast-search", async (req, res) => {
 
   try {
     let { query, session_id } = req.body;
+    session_id = normalizeSessionId(session_id, req.body?.sessionId);
     const FAST_LIMIT = 10;
 
     if (!query || query.trim() === "") {
@@ -9947,7 +9971,7 @@ app.post("/fast-search", async (req, res) => {
         }));
 
         const executionTime = Date.now() - searchStartTime;
-        logQuery(querycollection, query, {}, formattedAlternatives, false).catch(err =>
+        logQuery(querycollection, query, {}, formattedAlternatives, false, { session_id }).catch(err =>
           console.error(`[${requestId}] Failed to log fast stock relaxed query:`, err.message)
         );
 
@@ -10007,7 +10031,7 @@ app.post("/fast-search", async (req, res) => {
         const exactSearchMode = isModelNumberMatch ? 'model-number-match' : 'exact-text-match';
         console.log(`[${requestId}] ⚡ FAST ${exactSearchMode.toUpperCase()} completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
 
-        logQuery(querycollection, query, {}, exactProducts, false).catch(err =>
+        logQuery(querycollection, query, {}, exactProducts, false, { session_id }).catch(err =>
           console.error(`[${requestId}] Failed to log fast exact text query:`, err.message)
         );
 
@@ -10150,7 +10174,7 @@ app.post("/fast-search", async (req, res) => {
         fastSearchMode: 'relaxed-text-alternatives'
       }));
 
-      logQuery(querycollection, query, {}, formattedAlternatives, false).catch(err =>
+      logQuery(querycollection, query, {}, formattedAlternatives, false, { session_id }).catch(err =>
         console.error(`[${requestId}] Failed to log fast-search empty query:`, err.message)
       );
 
@@ -10285,7 +10309,7 @@ app.post("/fast-search", async (req, res) => {
         const executionTime = Date.now() - searchStartTime;
         console.log(`[${requestId}] ⚡ FAST STOCK RELAXED: ${formattedAlternatives.length} alternatives in ${executionTime}ms`);
 
-        logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false).catch(err =>
+        logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false, { session_id }).catch(err =>
           console.error(`[${requestId}] Failed to log fast-search relaxed alternatives:`, err.message)
         );
 
@@ -10337,7 +10361,7 @@ app.post("/fast-search", async (req, res) => {
           minPrice: llmExtractedFilters?.minPrice,
           maxPrice: llmExtractedFilters?.maxPrice
         };
-        logQuery(querycollection, query, filters, allProducts, false).catch(err =>
+        logQuery(querycollection, query, filters, allProducts, false, { session_id }).catch(err =>
           console.error(`[${requestId}] Failed to log fast-search query:`, err.message)
         );
       } catch (err) {
@@ -10387,7 +10411,7 @@ app.post("/fast-search", async (req, res) => {
     }));
 
     const executionTime = Date.now() - searchStartTime;
-    logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false).catch(err =>
+    logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false, { session_id }).catch(err =>
       console.error(`[${requestId}] Failed to log fast-search relaxed fallback:`, err.message)
     );
 
@@ -10480,16 +10504,24 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     return { isPerfectMatch: false, unmatchedWords: [] };
   }
   
+  const normalizeFilterList = (value) => {
+    if (Array.isArray(value)) return value;
+    if (typeof value === 'string') {
+      return value.split(',').map(item => item.trim()).filter(Boolean);
+    }
+    return [];
+  };
+
   // Normalize categories to lowercase for comparison, ensuring we only process strings
-  const normalizedHardCategories = (hardCategories || [])
+  const normalizedHardCategories = normalizeFilterList(hardCategories)
     .filter(c => typeof c === 'string')
     .map(c => c.toLowerCase().trim());
     
-  const normalizedSoftCategories = (softCategories || [])
+  const normalizedSoftCategories = normalizeFilterList(softCategories)
     .filter(c => typeof c === 'string')
     .map(c => c.toLowerCase().trim());
     
-  const normalizedColors = (colors || [])
+  const normalizedColors = normalizeFilterList(colors)
     .filter(c => typeof c === 'string')
     .map(c => c.toLowerCase().trim());
 
@@ -10928,6 +10960,7 @@ app.post("/search", async (req, res) => {
   console.log(`[${requestId}] SEARCH "${req.body.query}" | db:${req.store?.dbName}`);
 
   let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM, fastSearchMode, session_id } = req.body;
+  session_id = normalizeSessionId(session_id, req.body?.sessionId);
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
   
   // Fast LLM mode for /fast-search - use lighter model
@@ -11002,7 +11035,7 @@ app.post("/search", async (req, res) => {
       if (isPerfectFilterMatch) {
         // 🎯 PERFECT MATCH: Return matching products (category-based search)
         // 🎯 MEMORY PROTECTION: Limit even perfect matches to prevent OOM
-        const MAX_PERFECT_MATCH_RESULTS = 100;
+        const MAX_PERFECT_MATCH_RESULTS = MAX_FILTER_MATCH_RESULTS;
         approvedProducts = simpleResults.slice(0, MAX_PERFECT_MATCH_RESULTS);
         searchMode = 'perfect-filter-match';
 
@@ -11379,7 +11412,7 @@ app.post("/search", async (req, res) => {
                 category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
                 softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
                 color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
-              }, stockAlternatives, false).catch(err =>
+              }, stockAlternatives, false, { session_id }).catch(err =>
                 console.error(`[${requestId}] Failed to log stock fallback query:`, err.message)
               );
 
@@ -11420,7 +11453,7 @@ app.post("/search", async (req, res) => {
           category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
           softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
           color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
-        }, allProducts, false).catch(err =>
+        }, allProducts, false, { session_id }).catch(err =>
           console.error(`[${requestId}] Failed to log Phase 0 query:`, err.message)
         );
 
@@ -11444,7 +11477,7 @@ app.post("/search", async (req, res) => {
         console.log(`[${requestId}] 📭 No Atlas results - returning empty ${fastEmptyMode} response`);
 
         const emptyResponse = [];
-        logQuery(db.collection("queries"), query, {}, emptyResponse, false).catch(err =>
+        logQuery(db.collection("queries"), query, {}, emptyResponse, false, { session_id }).catch(err =>
           console.error(`[${requestId}] Failed to log empty ${fastEmptyMode} query:`, err.message)
         );
 
@@ -11656,7 +11689,7 @@ app.post("/search", async (req, res) => {
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
 
       // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
-      logQuery(db.collection("queries"), query, {}, formattedSKUResults, false).catch(err =>
+      logQuery(db.collection("queries"), query, {}, formattedSKUResults, false, { session_id }).catch(err =>
         console.error(`[${requestId}] Failed to log SKU query:`, err.message)
       );
 
@@ -13913,7 +13946,7 @@ app.post("/search", async (req, res) => {
     const limitedResults = finalResults.slice(0, searchLimit);
 
     // Log all queries (fire-and-forget — does not block response)
-    logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult).catch(err =>
+    logQuery(querycollection, query, enhancedFilters, limitedResults, isComplexQueryResult, { session_id }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -14682,11 +14715,14 @@ app.post("/search-to-cart", async (req, res) => {
     if (!document.timestamp) {
       document.timestamp = new Date().toISOString();
     }
+
+    const normalizedSessionId = normalizeSessionId(document.session_id, document.sessionId, document.session_id_wc, document.session);
     
     // Enhanced document with event-specific metadata
     const enhancedDocument = {
       ...document,
-      session_id: document.session_id || null,
+      session_id: normalizedSessionId,
+      sessionId: normalizedSessionId,
       user_agent: req.get('user-agent') || null,
       ip_address: req.ip || req.connection.remoteAddress,
       created_at: new Date()
@@ -14869,6 +14905,8 @@ app.post("/search-to-cart", async (req, res) => {
           // Store query complexity feedback
           const complexityFeedback = {
             query: document.search_query,
+            session_id: normalizedSessionId,
+            sessionId: normalizedSessionId,
             original_classification: classification,
             conversion_outcome: document.event_type === 'checkout_completed' ? 'purchase_completed' : 'checkout_initiated',
             event_type: document.event_type,
@@ -14915,6 +14953,8 @@ app.post("/search-to-cart", async (req, res) => {
         if (hasClassification) {
           const complexityFeedback = {
             query: document.search_query,
+            session_id: normalizedSessionId,
+            sessionId: normalizedSessionId,
             original_classification: classification,
             conversion_outcome: 'successful_purchase',
             product_id: document.product_id,
@@ -14940,7 +14980,7 @@ app.post("/search-to-cart", async (req, res) => {
     let profileUpdated = false;
     let categoriesLearned = [];
 
-    if (document.event_type === 'add_to_cart' && document.product_id && document.session_id) {
+    if (document.event_type === 'add_to_cart' && document.product_id && normalizedSessionId) {
       try {
         const productsCollection = db.collection('products');
         const profilesCollection = db.collection('profiles');
@@ -14962,12 +15002,12 @@ app.post("/search-to-cart", async (req, res) => {
 
           // Update profile stats (cart weight = 3)
           await profilesCollection.updateOne(
-            { session_id: document.session_id },
+            { session_id: normalizedSessionId },
             {
               $set: { updated_at: new Date() },
               $inc: { 'stats.totalCarts': 1 },
               $setOnInsert: {
-                session_id: document.session_id,
+                session_id: normalizedSessionId,
                 created_at: new Date(),
                 preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } }
               }
@@ -14979,7 +15019,7 @@ app.post("/search-to-cart", async (req, res) => {
           for (const category of softCategories) {
             if (category && category.trim()) {
               await profilesCollection.updateOne(
-                { session_id: document.session_id },
+                { session_id: normalizedSessionId },
                 { $inc: { [`preferences.softCategories.${category}.carts`]: 1 } }
               );
               categoriesLearned.push(category);
@@ -14993,7 +15033,7 @@ app.post("/search-to-cart", async (req, res) => {
           for (const category of hardCategories) {
             if (category && category.trim()) {
               await profilesCollection.updateOne(
-                { session_id: document.session_id },
+                { session_id: normalizedSessionId },
                 { $inc: { [`preferences.hardCategories.${category}.carts`]: 1 } }
               );
             }
@@ -15007,7 +15047,7 @@ app.post("/search-to-cart", async (req, res) => {
               addedAt: new Date()
             };
             await profilesCollection.updateOne(
-              { session_id: document.session_id },
+              { session_id: normalizedSessionId },
               {
                 $push: {
                   'preferences.cartItems': {
@@ -15021,7 +15061,7 @@ app.post("/search-to-cart", async (req, res) => {
 
           // Update price range
           if (price > 0) {
-            const profile = await profilesCollection.findOne({ session_id: document.session_id });
+            const profile = await profilesCollection.findOne({ session_id: normalizedSessionId });
             const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
 
             const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
@@ -15030,7 +15070,7 @@ app.post("/search-to-cart", async (req, res) => {
             const newCount = (priceRange.count || 0) + 1;
 
             await profilesCollection.updateOne(
-              { session_id: document.session_id },
+              { session_id: normalizedSessionId },
               {
                 $set: {
                   'preferences.priceRange.min': newMin,
@@ -17209,22 +17249,33 @@ const server = app.listen(PORT, async () => {
         ],
         queries: [
           [{ timestamp: -1 }, {}],
+          [{ session_id: 1, timestamp: -1 }, {}],
+          [{ sessionId: 1, timestamp: -1 }, {}],
           [{ search_query: 1, timestamp: -1 }, {}],
         ],
         product_click_events: [
           [{ sessionId: 1, timestamp: 1 }, {}],
+          [{ session_id: 1, timestamp: 1 }, {}],
           [{ timestamp: -1 }, {}],
         ],
         add_to_cart_events: [
           [{ sessionId: 1, timestamp: 1 }, {}],
+          [{ session_id: 1, timestamp: 1 }, {}],
           [{ timestamp: -1 }, {}],
+        ],
+        product_clicks: [
+          [{ session_id: 1, timestamp: -1 }, {}],
+          [{ sessionId: 1, timestamp: -1 }, {}],
+          [{ search_query: 1, timestamp: -1 }, {}],
         ],
         cart: [
           [{ session_id: 1 }, {}],
+          [{ sessionId: 1 }, {}],
           [{ timestamp: -1 }, {}],
         ],
         checkout_events: [
           [{ session_id: 1 }, {}],
+          [{ sessionId: 1 }, {}],
           [{ timestamp: -1 }, {}],
         ],
         tracking_events: [
@@ -17572,7 +17623,8 @@ app.post("/product-click", async (req, res) => {
       product_id, 
       product_name, 
       search_query, 
-      session_id, 
+      session_id,
+      sessionId,
       interaction_type,
       product_url,
       source,
@@ -17580,12 +17632,13 @@ app.post("/product-click", async (req, res) => {
       zero_recovery,
       timestamp: clientTimestamp
     } = req.body;
+    const normalizedSessionId = normalizeSessionId(session_id, sessionId);
     
     // Default to 'click' if not provided
     const interactionType = interaction_type || 'click';
 
     // Validate required fields
-    if (!product_id || !session_id) {
+    if (!product_id || !normalizedSessionId) {
       return res.status(400).json({
         error: "Missing required fields: product_id and session_id are required"
       });
@@ -17601,7 +17654,8 @@ app.post("/product-click", async (req, res) => {
       product_id: String(product_id),
       product_name: product_name || null,
       search_query: search_query || null,
-      session_id: session_id,
+      session_id: normalizedSessionId,
+      sessionId: normalizedSessionId,
       interaction_type: interactionType,
       timestamp: clientTimestamp ? new Date(clientTimestamp) : new Date(),
       product_url: product_url || null,
@@ -17645,11 +17699,8 @@ app.post("/product-click", async (req, res) => {
         const queriesCollection = db.collection('queries');
 
         const recentQuery = await queriesCollection.findOne(
-
-          {},
-
+          { $or: [{ session_id: normalizedSessionId }, { sessionId: normalizedSessionId }] },
           { sort: { timestamp: -1 } }
-
         );
 
  
@@ -17679,7 +17730,7 @@ app.post("/product-click", async (req, res) => {
     // Insert the click
     const insertResult = await clicksCollection.insertOne(clickDocument);
 
-    console.log(`[PRODUCT CLICK] Tracked: event_id=${clickDocument.event_id}, session=${session_id}, product=${product_id}, type=${interactionType}, source=${source || 'unknown'}, zero_recovery=${zero_recovery}, query="${clickDocument.search_query || 'none'}"`);
+    console.log(`[PRODUCT CLICK] Tracked: event_id=${clickDocument.event_id}, session=${normalizedSessionId}, product=${product_id}, type=${interactionType}, source=${source || 'unknown'}, zero_recovery=${zero_recovery}, query="${clickDocument.search_query || 'none'}"`);
 
 
     res.status(201).json({
@@ -18117,6 +18168,7 @@ if (payload.note_attributes && Array.isArray(payload.note_attributes)) {
       order_id: orderId,
       order_number: orderNumber,
       session_id: sessionId,
+      sessionId: sessionId,
       created_at: payload.created_at || new Date().toISOString(),
       total_price: parseFloat(payload.total_price) || 0,
       subtotal_price: parseFloat(payload.subtotal_price) || 0,
@@ -18412,6 +18464,7 @@ app.post("/webhooks/woocommerce/order-created", express.json({ limit: '10mb' }),
       order_id: orderId,
       order_number: orderNumber,
       session_id: sessionId,
+      sessionId: sessionId,
       platform: 'woocommerce',
       created_at: payload.date_created || new Date().toISOString(),
       total_price: parseFloat(payload.total) || 0,
