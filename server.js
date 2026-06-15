@@ -11509,14 +11509,25 @@ app.post("/search", async (req, res) => {
               console.log(`[${requestId}] 🔍 [SEARCH] Filtering expansion by unmatched words: [${unmatchedWordsLower.join(', ')}]`);
 
               const beforeFilterCount = newProducts.length;
-              newProducts = newProducts.filter(product => {
+              const strictMatches = newProducts.filter(product => {
                 const productName = (product.name || '').toLowerCase();
-                // Product must contain at least one of the unmatched words
+                // Product name contains at least one of the unmatched words
                 return unmatchedWordsLower.some(word => productName.includes(word));
               });
 
-              if (beforeFilterCount !== newProducts.length) {
-                console.log(`[${requestId}] 🔍 [SEARCH] Filtered expansion: ${beforeFilterCount} → ${newProducts.length} products (removed ${beforeFilterCount - newProducts.length} that don't match unmatched words)`);
+              if (strictMatches.length > 0) {
+                // We have products matching the unmatched words — prefer those.
+                newProducts = strictMatches;
+                if (beforeFilterCount !== newProducts.length) {
+                  console.log(`[${requestId}] 🔍 [SEARCH] Filtered expansion: ${beforeFilterCount} → ${newProducts.length} products (removed ${beforeFilterCount - newProducts.length} that don't match unmatched words)`);
+                }
+              } else {
+                // Strict filter removed EVERYTHING — the unmatched word is likely a
+                // winery/brand/qualifier with no dedicated products in the catalog
+                // (e.g. "גולן" in "גולן רוזה"). Keep the soft-category matches so we
+                // still surface relevant products (all rosé wines) instead of dropping
+                // the whole expansion and falling back to nothing.
+                console.log(`[${requestId}] 🔍 [SEARCH] Unmatched words [${unmatchedWordsLower.join(', ')}] matched 0 expansion products — keeping ${beforeFilterCount} soft-category matches as fallback`);
               }
             }
 
