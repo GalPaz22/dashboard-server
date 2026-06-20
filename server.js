@@ -2441,7 +2441,7 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
         }
       }
     },
-    { $limit: 5 },
+    { $limit: 20 },
     { $project: projectFields }
   ];
 };
