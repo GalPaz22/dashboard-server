@@ -2230,26 +2230,18 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
 
   // Add hard filters
   if (hardFilters && Object.keys(hardFilters).length > 0) {
-    if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
+    if (hardFilters.category) {
+      const categoriesToMatch = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
       matchConditions.push({
-        type: Array.isArray(hardFilters.type) 
-          ? { $in: hardFilters.type } 
-          : { $eq: hardFilters.type }
+        category: { $in: categoriesToMatch } // Changed to $in for OR logic
       });
     }
     
-    if (hardFilters.category) {
-      if (Array.isArray(hardFilters.category) && useOrLogic) {
-        matchConditions.push({
-          category: { $in: hardFilters.category }
-        });
-      } else {
-        matchConditions.push({
-          category: Array.isArray(hardFilters.category) 
-            ? { $all: hardFilters.category } 
-            : { $eq: hardFilters.category }
-        });
-      }
+    if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
+      const typesToMatch = Array.isArray(hardFilters.type) ? hardFilters.type : [hardFilters.type];
+      matchConditions.push({
+        type: { $in: typesToMatch } // Changed to $in for OR logic
+      });
     }
     
     // Price filters
@@ -2285,17 +2277,9 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   // - AND logic ($all): Require ALL soft categories (e.g., "יין שרדונה ישראלי" → BOTH שרדונה AND ישראלי)
   // - OR logic ($in): Match ANY soft category (e.g., expansion to get more results)
   if (softFilters && softFilters.softCategory && Array.isArray(softFilters.softCategory) && softFilters.softCategory.length > 0) {
-    if (useOrLogic) {
-      // OR logic: match ANY of the soft categories
-      matchConditions.push({
-        softCategory: { $in: softFilters.softCategory }
-      });
-    } else {
-      // AND logic: require ALL soft categories
-      matchConditions.push({
-        softCategory: { $all: softFilters.softCategory }
-      });
-    }
+    matchConditions.push({
+      softCategory: { $in: softFilters.softCategory } // Changed to $in for OR logic
+    });
   }
 
   // Add color filter for filter-only queries (same behavior as soft categories)
@@ -2893,96 +2877,52 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 
   // Category filter with proper logic handling
   if (hardFilters.category) {
-    if (Array.isArray(hardFilters.category)) {
-      // Only add filter if array is not empty
-      if (hardFilters.category.length > 0) {
-        // Always use $in for Atlas Search vector filter compatibility
-        conditions.push({ category: { $in: hardFilters.category } });
-      }
-    } else if (typeof hardFilters.category === 'string' && hardFilters.category.trim() !== '') {
-      // Only add filter if it's a non-empty string - use simple equality for Atlas Search compatibility
-      conditions.push({ category: hardFilters.category });
-    } else if (typeof hardFilters.category === 'object' && hardFilters.category !== null) {
-      // If it's an object (like a MongoDB query operator), add it directly
-      conditions.push({ category: hardFilters.category });
+    const categoriesToMatch = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
+    if (categoriesToMatch.length > 0) {
+      conditions.push({ category: { $in: categoriesToMatch } });
     }
   }
 
   // Type filter
-  if (hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
-    if (Array.isArray(hardFilters.type)) {
-      conditions.push({ type: { $in: hardFilters.type } });
-    } else {
-      // Use simple equality for Atlas Search compatibility
-      conditions.push({ type: hardFilters.type });
+  if (hardFilters.type) {
+    const typesToMatch = Array.isArray(hardFilters.type) ? hardFilters.type : [hardFilters.type];
+    if (typesToMatch.length > 0) {
+      conditions.push({ type: { $in: typesToMatch } });
     }
   }
 
   // Price filters
+  const priceFilter = {};
   if (hardFilters.minPrice && hardFilters.maxPrice) {
-    conditions.push({ price: { $gte: hardFilters.minPrice, $lte: hardFilters.maxPrice } });
+    priceFilter.$gte = hardFilters.minPrice;
+    priceFilter.$lte = hardFilters.maxPrice;
   } else if (hardFilters.minPrice) {
-    conditions.push({ price: { $gte: hardFilters.minPrice } });
+    priceFilter.$gte = hardFilters.minPrice;
   } else if (hardFilters.maxPrice) {
-    conditions.push({ price: { $lte: hardFilters.maxPrice } });
+    priceFilter.$lte = hardFilters.maxPrice;
   }
-
-  if (hardFilters.price) {
-    const price = hardFilters.price;
-    const priceRange = price * 0.15;
-    conditions.push({ price: { $gte: price - priceRange, $lte: price + priceRange } });
+  if (Object.keys(priceFilter).length > 0) {
+    conditions.push({ price: priceFilter });
   }
 
   // Soft category filtering for vector search
-  // NOTE: Soft categories can be used as BOOSTS (default) or HARD FILTERS (enforceSoftCategoryFilter=true)
   if (softFilters && softFilters.softCategory) {
-    const softCats = Array.isArray(softFilters.softCategory) ? softFilters.softCategory.filter(Boolean) : [softFilters.softCategory].filter(Boolean);
-    
-    // Only process if we have valid soft categories
-    if (softCats.length > 0) {
-      if (!invertSoftFilter) {
-        // FOR SOFT-CATEGORY SEARCH
-        if (enforceSoftCategoryFilter) {
-          // STRICT MODE (Simple Query Tier 2): Require products to have AT LEAST ONE matching soft category
-          conditions.push({ softCategory: { $in: softCats } });
-        } else {
-          // BOOST MODE: boosting happens in post-processing
-        }
+    const softCatsToMatch = Array.isArray(softFilters.softCategory) ? softFilters.softCategory.filter(Boolean) : [softFilters.softCategory].filter(Boolean);
+    if (softCatsToMatch.length > 0) {
+      if (invertSoftFilter) {
+        conditions.push({ softCategory: { $nin: softCatsToMatch } });
       } else {
-        // FOR NON-SOFT-CATEGORY SEARCH: Exclude products with these soft categories
-        conditions.push({
-          softCategory: { $nin: softCats }
-        });
+        conditions.push({ softCategory: { $in: softCatsToMatch } });
       }
     }
   }
 
-  // 🎯 Color filtering for vector search (similar to soft categories)
-  // IMPORTANT: Only add color filters if the field is indexed
-  // Enhanced: Expand to similar colors for flexible matching (e.g., "לבן" also matches "קרם", "בז'")
-  if (softFilters && softFilters.color && isFieldIndexed('colors')) {
-    const colors = Array.isArray(softFilters.color) ? softFilters.color.filter(Boolean) : [softFilters.color].filter(Boolean);
-
-    // Only process if we have valid colors
-    if (colors.length > 0) {
-      // Expand colors to include similar shades
-      const expandedColors = getSimilarColors(colors);
-      if (!invertSoftFilter) {
-        // FOR COLOR SEARCH
-        if (enforceSoftCategoryFilter) {
-          // STRICT MODE: Require products to have AT LEAST ONE matching color (with similar shades)
-          conditions.push({ colors: { $in: expandedColors } });
-        } else {
-          // BOOST MODE: boosting happens in post-processing
-        }
-      } else {
-        // FOR NON-COLOR SEARCH: Exclude products with these colors (and similar shades)
-        conditions.push({
-          colors: { $nin: expandedColors }
-        });
-      }
+  // Color filtering for vector search
+  if (softFilters && softFilters.color) {
+    const colorsToMatch = Array.isArray(softFilters.color) ? softFilters.color.filter(Boolean) : [softFilters.color].filter(Boolean);
+    if (colorsToMatch.length > 0) {
+      conditions.push({ colors: { $in: colorsToMatch } });
     }
-  } else if (softFilters && softFilters.color && !isFieldIndexed('colors')) {
   }
 
   // Build final filter - use $and only if multiple conditions
@@ -10785,7 +10725,11 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   }
   
   const normalizeFilterList = (value) => {
-    if (Array.isArray(value)) return value;
+    if (Array.isArray(value)) {
+      // Flatten array if it contains nested arrays
+      const flattened = value.flat(Infinity);
+      return flattened.map(item => String(item).trim()).filter(Boolean);
+    }
     if (typeof value === 'string') {
       return value.split(',').map(item => item.trim()).filter(Boolean);
     }
@@ -10824,39 +10768,33 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   };
 
   // Hebrew Variations Map (Common roots and their variations)
+  const hebrewPrepositions = ['ה', 'ו', 'ב', 'ל', 'מ', 'כ', 'ש'];
+
   const isVariationMatch = (word, cat) => {
-    // Normalize final letters for both word and category
     const wordNorm = normalizeFinalLetters(word);
     const catNorm = normalizeFinalLetters(cat);
 
-    // Try exact match first (after normalization)
     if (wordNorm === catNorm) return true;
-    
-    // 🎯 FIX 2: Handle geresh/apostrophe variations (ג'ין vs גין)
-    // Try matching with normalized quotes removed (also normalize final letters)
+
     const wordQuotesNorm = normalizeQuotes(wordNorm);
     const catQuotesNorm = normalizeQuotes(catNorm);
     if (wordQuotesNorm === catQuotesNorm) return true;
 
-    // Check if word is category with common Hebrew suffixes (י, ית, ים, ות, ה)
-    // CRITICAL: Use normalized versions for comparison (יפני vs יפן)
     if (wordNorm.startsWith(catNorm) && wordNorm.length <= catNorm.length + 2) return true;
     if (wordQuotesNorm.startsWith(catQuotesNorm) && wordQuotesNorm.length <= catQuotesNorm.length + 2) return true;
 
-    // Check if category is word with suffix (e.g., cat="ספרד", word="ספרדי")
     if (catNorm.startsWith(wordNorm) && catNorm.length <= wordNorm.length + 2) return true;
     if (catQuotesNorm.startsWith(wordQuotesNorm) && catQuotesNorm.length <= wordQuotesNorm.length + 2) return true;
-    
-    // Check if word has common Hebrew prefixes (ה, ו, ב, ל)
-    const prefixes = ['ה', 'ו', 'ב', 'ל'];
-    for (const p of prefixes) {
-      if (wordNorm.startsWith(p) && wordNorm.substring(1) === catNorm) return true;
-      if (wordNorm.startsWith(p) && wordNorm.substring(1).startsWith(catNorm) && wordNorm.length <= catNorm.length + 3) return true;
-      if (wordQuotesNorm.startsWith(p) && wordQuotesNorm.substring(1) === catQuotesNorm) return true;
-      if (wordQuotesNorm.startsWith(p) && wordQuotesNorm.substring(1).startsWith(catQuotesNorm) && wordQuotesNorm.length <= catQuotesNorm.length + 3) return true;
+
+    for (const p of hebrewPrepositions) {
+      // Check for prefix preposition match (e.g., "במבצע" starts with "ב", and "מבצע" matches "מבצעים")
+      const strippedWordNorm = wordNorm.startsWith(p) ? wordNorm.substring(p.length) : wordNorm;
+      const strippedWordQuotesNorm = wordQuotesNorm.startsWith(p) ? wordQuotesNorm.substring(p.length) : wordQuotesNorm;
+
+      if (strippedWordNorm === catNorm || strippedWordNorm.startsWith(catNorm) || catNorm.startsWith(strippedWordNorm)) return true;
+      if (strippedWordQuotesNorm === catQuotesNorm || strippedWordQuotesNorm.startsWith(catQuotesNorm) || catQuotesNorm.startsWith(strippedWordQuotesNorm)) return true;
     }
 
-    // Support bidirectional "contains" for multi-word categories (whole-word match only)
     if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
     if (catNorm.length >= 3 && includesWholeWord(wordNorm, catNorm)) return true;
     if (wordQuotesNorm.length >= 3 && includesWholeWord(catQuotesNorm, wordQuotesNorm)) return true;
@@ -11801,7 +11739,7 @@ app.post("/search", async (req, res) => {
             const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
             let vectorResults = await collection.aggregate(vectorPipeline).toArray();
             vectorResults = vectorResults.filter(isProductInStock);
-            vectorResults = filterAccessoriesForDeviceQuery(vectorResults, query, req.store);
+//          vectorResults = filterAccessoriesForDeviceQuery(vectorResults, query, req.store);
             console.log(`[${requestId}] ⚡ Vector fallback: ${vectorResults.length} candidates (filters: ${JSON.stringify(fbHardFilters)})`);
 
             if (vectorResults.length > 0) {
