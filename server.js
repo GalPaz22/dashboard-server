@@ -1932,6 +1932,69 @@ app.use((req, res, next) => {
   return authenticate(req, res, next);
 });
 
+// ───────────────────────────────────────────────────────────────────────────
+// Special-label stamping
+// Merchants flag products in Mongo with `specialLabel: true`. We tag every
+// product returned by the /search endpoints with that boolean — looked up once
+// per store and cached — so the storefront widget can render a merchant-defined
+// label, regardless of which internal search path built the response.
+// ───────────────────────────────────────────────────────────────────────────
+const SPECIAL_LABEL_SEARCH_PATHS = new Set(['/search', '/search/load-more', '/search/auto-load-more']);
+const SPECIAL_LABEL_TTL_MS = 60 * 1000;
+const specialLabelCache = new Map(); // `${dbName}.${collection}` -> { ids:Set, at:number }
+
+async function getSpecialLabelIds(dbName, collectionName) {
+  const key = `${dbName}.${collectionName}`;
+  const cached = specialLabelCache.get(key);
+  if (cached && Date.now() - cached.at < SPECIAL_LABEL_TTL_MS) return cached.ids;
+
+  const client = await connectToMongoDB(mongodbUri);
+  const docs = await client.db(dbName).collection(collectionName)
+    .find({ specialLabel: true }, { projection: { id: 1, _id: 0 } })
+    .toArray();
+  const ids = new Set(docs.map(d => d.id).filter(v => v !== undefined && v !== null));
+  specialLabelCache.set(key, { ids, at: Date.now() });
+  return ids;
+}
+
+function stampSpecialLabelArray(arr, ids) {
+  if (!Array.isArray(arr)) return;
+  for (const p of arr) {
+    if (p && typeof p === 'object') p.specialLabel = ids.has(p.id);
+  }
+}
+
+function stampSpecialLabelPayload(payload, ids) {
+  if (!payload || typeof payload !== 'object') return payload;
+  if (Array.isArray(payload)) { stampSpecialLabelArray(payload, ids); return payload; }
+  stampSpecialLabelArray(payload.products, ids);
+  stampSpecialLabelArray(payload.results, ids);
+  stampSpecialLabelArray(payload.items, ids);
+  stampSpecialLabelArray(payload.hits, ids);
+  if (payload.data) stampSpecialLabelArray(payload.data.products, ids);
+  if (Array.isArray(payload.tiers)) {
+    payload.tiers.forEach(t => stampSpecialLabelArray(t && t.products, ids));
+  }
+  return payload;
+}
+
+// Wrap res.json on the search routes so every outgoing product carries the flag,
+// no matter which of the ~15 internal response builders produced it.
+app.use(async (req, res, next) => {
+  if (!SPECIAL_LABEL_SEARCH_PATHS.has(req.path) || !req.store || !req.store.dbName) return next();
+
+  let ids = new Set();
+  try {
+    ids = await getSpecialLabelIds(req.store.dbName, req.store.products);
+  } catch (err) {
+    console.warn('[SPECIAL-LABEL] lookup failed:', err.message);
+  }
+
+  const sendJson = res.json.bind(res);
+  res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, ids));
+  next();
+});
+
 async function connectToMongoDB(mongodbUri) {
   return await getMongoClient();
 }
@@ -11702,7 +11765,115 @@ app.post("/search", async (req, res) => {
     } else {
       if (phase === 'text-matches-only' || isFastSearchMode) {
         const fastEmptyMode = phase === 'text-matches-only' ? 'text-matches-only-empty' : 'fast-no-simple-results';
-        console.log(`[${requestId}] 📭 No Atlas results - returning empty ${fastEmptyMode} response`);
+        console.log(`[${requestId}] 📭 No text matches - trying quick LLM + vector fallback (${fastEmptyMode})`);
+
+        // ⚡ QUICK VECTOR FALLBACK: 0 textual results → extract filters + embed in parallel,
+        // run a bounded vector search, then a fast LLM rerank. Mirrors the /fast-search
+        // fallback so the instant-search path also surfaces semantically-relevant products
+        // (e.g. "silver ring pet") instead of returning empty.
+        let vectorFallbackProducts = [];
+        try {
+          const fallbackStart = Date.now();
+          const FALLBACK_VECTOR_LIMIT = 30;
+          const colorsForExtraction = Array.isArray(req.store?.colors)
+            ? req.store.colors.join(', ')
+            : (req.store?.colors || '');
+          const fallbackContext = req.store?.context || context || 'wine shop';
+
+          const [extracted, queryEmbedding] = await Promise.all([
+            extractFiltersBrief(query, categories, types, finalSoftCategories, fallbackContext, colorsForExtraction).catch(() => ({})),
+            withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)).catch(() => null)
+          ]);
+
+          if (queryEmbedding) {
+            const fb = extracted || {};
+            const fbHardFilters = {};
+            if (fb.category) fbHardFilters.category = Array.isArray(fb.category) ? fb.category : [fb.category];
+            if (fb.type) fbHardFilters.type = Array.isArray(fb.type) ? fb.type : [fb.type];
+            if (fb.minPrice !== undefined && fb.minPrice !== null) fbHardFilters.minPrice = fb.minPrice;
+            if (fb.maxPrice !== undefined && fb.maxPrice !== null) fbHardFilters.maxPrice = fb.maxPrice;
+            if (fb.price !== undefined && fb.price !== null) fbHardFilters.price = fb.price;
+
+            const fbSoftFilters = {};
+            if (fb.softCategory) fbSoftFilters.softCategory = Array.isArray(fb.softCategory) ? fb.softCategory : [fb.softCategory];
+            if (fb.color) fbSoftFilters.color = Array.isArray(fb.color) ? fb.color : [fb.color];
+
+            const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
+            let vectorResults = await collection.aggregate(vectorPipeline).toArray();
+            vectorResults = vectorResults.filter(isProductInStock);
+            vectorResults = filterAccessoriesForDeviceQuery(vectorResults, query, req.store);
+            console.log(`[${requestId}] ⚡ Vector fallback: ${vectorResults.length} candidates (filters: ${JSON.stringify(fbHardFilters)})`);
+
+            if (vectorResults.length > 0) {
+              let orderedResults = vectorResults;
+              try {
+                const reranked = await reorderResultsWithGPT(
+                  vectorResults, query, query, [], false, fallbackContext,
+                  (fbSoftFilters.softCategory || fbSoftFilters.color) ? fbSoftFilters : null,
+                  searchLimit, true // useFastLLM
+                );
+                if (Array.isArray(reranked) && reranked.length > 0) {
+                  const byId = new Map(vectorResults.map(p => [p._id.toString(), p]));
+                  const rerankedProducts = reranked.map(r => byId.get(r._id)).filter(Boolean);
+                  if (rerankedProducts.length > 0) orderedResults = rerankedProducts;
+                }
+              } catch (rerankErr) {
+                console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal): ${rerankErr.message}`);
+              }
+
+              let fbUserProfile = null;
+              if (session_id) {
+                fbUserProfile = await getUserProfileForBoosting(db, session_id).catch(() => null);
+              }
+
+              vectorFallbackProducts = orderedResults.slice(0, searchLimit).map(product => {
+                const profileBoost = fbUserProfile ? calculateProfileBoost(product, fbUserProfile) : 0;
+                return {
+                  _id: product._id.toString(),
+                  id: product.id,
+                  name: product.name,
+                  description: product.description,
+                  price: product.price,
+                  image: product.image,
+                  url: product.url,
+                  type: product.type,
+                  category: product.category,
+                  softCategory: product.softCategory,
+                  specialSales: product.specialSales,
+                  onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+                  ItemID: product.ItemID,
+                  profileBoost,
+                  highlight: false,
+                  searchMode: 'fast-vector-fallback'
+                };
+              });
+              console.log(`[${requestId}] ⚡ Vector fallback produced ${vectorFallbackProducts.length} products in ${Date.now() - fallbackStart}ms`);
+            }
+          }
+        } catch (fallbackErr) {
+          console.warn(`[${requestId}] ⚡ Quick vector fallback failed (non-fatal): ${fallbackErr.message}`);
+        }
+
+        if (vectorFallbackProducts.length > 0) {
+          logQuery(db.collection("queries"), query, {}, vectorFallbackProducts, false, { session_id }).catch(err =>
+            console.error(`[${requestId}] Failed to log vector fallback query:`, err.message)
+          );
+
+          return res.json(isModernMode ? {
+            products: vectorFallbackProducts,
+            metadata: {
+              query,
+              requestId,
+              executionTime: Date.now() - searchStartTime,
+              searchMode: 'fast-vector-fallback',
+              isPerfectFilterMatch: false,
+              personalizedResults: vectorFallbackProducts.some(p => (p.profileBoost || 0) > 0),
+              personalizedCount: vectorFallbackProducts.filter(p => (p.profileBoost || 0) > 0).length
+            }
+          } : vectorFallbackProducts);
+        }
+
+        console.log(`[${requestId}] 📭 Vector fallback empty - returning empty ${fastEmptyMode} response`);
 
         const emptyResponse = [];
         logQuery(db.collection("queries"), query, {}, emptyResponse, false, { session_id }).catch(err =>
