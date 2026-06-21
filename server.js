@@ -203,7 +203,8 @@ async function directNameFallbackProducts(collection, query, limit = 10, maxTime
         ItemID: 1,
         id: 1,
         stockStatus: 1,
-        stock_status: 1
+        stock_status: 1,
+        boost: 1
       })
       .limit(Math.max(limit * 2, limit))
       .maxTimeMS(maxTimeMS)
@@ -2421,6 +2422,7 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
     image: 1,
     price: 1,
     id: 1,
+    boost: 1, // Merchant boost (1-3) so autocomplete can surface boosted products
   };
 
   if (includePersonalizationFields) {
@@ -6007,10 +6009,12 @@ async function reorderResultsWithGPT(
     }
 
     const limitedResults = filtered.slice(0, effectiveMax);
+  console.log(`DEBUG: reorderResultsWithGPT - effectiveMax: ${effectiveMax}, limitedResults.length (before LLM): ${limitedResults.length}`);
   const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
   const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
     
   return withCache(cacheKey, async () => {
+    console.time(`Rerank LLM call for ${query} (${limitedResults.length} products)`);
     try {
       // 🎯 FORCE FAST MODEL: gemini-2.5-flash-lite is optimized for low-latency JSON tasks
       const modelName = "gemini-2.5-flash";
@@ -6203,6 +6207,7 @@ ${JSON.stringify(productData, null, 2)}`;
     const response = await Promise.race([llmPromise, rerankerTimeoutPromise]);
 
     let text = response.text ? response.text.trim() : null;
+    console.timeEnd(`Rerank LLM call for ${query} (${limitedResults.length} products)`);
     
     // If response.text is not available, try to extract from response structure
     if (!text && response.candidates && response.candidates[0]) {
@@ -6264,7 +6269,7 @@ async function reorderImagesWithGPT(
    const productsWithImages = limitedResults.filter(product => product.image && product.image.trim() !== '');
 
    if (productsWithImages.length === 0) {
-     return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults, useFastLLM, userProfile);
+     return await reorderResultsWithGPT(combinedResults.slice(0, 20), translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults, useFastLLM, userProfile);
    }
 
    // Sort products with images to prioritize QUERY-EXTRACTED soft category matches
@@ -6548,12 +6553,12 @@ PRIORITIZE query-matching products STRONGLY.`;
      } catch (error) {
        console.error("Error reordering results with Gemini image analysis:", error);
        // Fallback to the non-image reordering function on error
-       return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
+       return await reorderResultsWithGPT(combinedResults.slice(0, 20), translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
      }
    });
  } catch (error) {
    console.error("Error reordering results with Gemini image analysis:", error);
-   return await reorderResultsWithGPT(combinedResults, translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
+   return await reorderResultsWithGPT(combinedResults.slice(0, 20), translatedQuery, query, alreadyDelivered, explain, context, softFilters, maxResults);
  }
 }
 
@@ -8353,7 +8358,8 @@ app.get("/autocomplete", async (req, res) => {
           image: product.image,
           price: product.price,
           softCategory: product.softCategory,
-          colors: product.colors
+          colors: product.colors,
+          boost: product.boost || 0
         }));
       }),
       // Isolate pipeline2: if "default2" index missing on this store, return [] instead of crashing
@@ -8380,6 +8386,7 @@ app.get("/autocomplete", async (req, res) => {
       score: 95, // High score for regex matches
       boostedScore: 95,
       profileBoost: 0,
+      boost: item.boost || 0, // Merchant boost (1-3)
       source: "products-regex",
       url: item.url,
       price: item.price,
@@ -8398,6 +8405,7 @@ app.get("/autocomplete", async (req, res) => {
       score: item.score,
         boostedScore: item.score + profileBoost, // Combined score for sorting
         profileBoost: profileBoost,
+        boost: item.boost || 0, // Merchant boost (1-3)
       source: "products",
       url: item.url,
       price: item.price,
@@ -8414,16 +8422,23 @@ app.get("/autocomplete", async (req, res) => {
       url: item.url
     }));
 
-    // Sort by priority: 
-    // 1. Filter Match (Category Search)
-    // 2. Query Suggestions (Previous successful searches)
-    // 3. Regex Fuzzy matches (Product names)
-    // 4. Atlas Search matches
-    const combinedSuggestions = [
-      ...filterSuggestions, 
-      ...labeledSuggestions2, 
-      ...labeledRegexSuggestions, 
+    // Base priority order:
+    // 1. Query Suggestions (Previous successful searches)
+    // 2. Regex Fuzzy matches (Product names)
+    // 3. Atlas Search matches
+    // Then a STABLE boost-first sort floats merchant-boosted products (boost 1-3) to
+    // the top of the suggestions, consistent with /search. Array.sort is stable, so when
+    // nothing is boosted this preserves the original priority order exactly.
+    const rankedSuggestions = [
+      ...labeledSuggestions2,
+      ...labeledRegexSuggestions,
       ...labeledSuggestions1
+    ].sort((a, b) => (b.boost || 0) - (a.boost || 0));
+
+    // Filter Match (Category Search) stays pinned above product/query suggestions.
+    const combinedSuggestions = [
+      ...filterSuggestions,
+      ...rankedSuggestions
     ]
       .filter((item, index, self) =>
         index === self.findIndex((t) => t.suggestion === item.suggestion)
@@ -10296,7 +10311,7 @@ app.post("/fast-search", async (req, res) => {
             let orderedResults = vectorResults;
             try {
               const reranked = await reorderResultsWithGPT(
-                vectorResults,
+                vectorResults.slice(0, 20),
                 query,
                 query,
                 [],
@@ -11745,8 +11760,8 @@ app.post("/search", async (req, res) => {
             if (vectorResults.length > 0) {
               let orderedResults = vectorResults;
               try {
-                const reranked = await reorderResultsWithGPT(
-                  vectorResults, query, query, [], false, fallbackContext,
+              const reranked = await reorderResultsWithGPT(
+                vectorResults.slice(0, 20), query, query, [], false, fallbackContext,
                   (fbSoftFilters.softCategory || fbSoftFilters.color) ? fbSoftFilters : null,
                   searchLimit, true // useFastLLM
                 );
