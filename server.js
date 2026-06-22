@@ -229,6 +229,52 @@ async function directNameFallbackProducts(collection, query, limit = 10, maxTime
     .slice(0, limit);
 }
 
+// Always-on fetch of merchant-boosted products (boost 1-3) whose NAME matches the query.
+// Relevance-ranked retrieval (Atlas/regex) can clip boosted products out of the small
+// autocomplete candidate window when a query matches many items; this guarantees boosted
+// matches are present so the boost-first sort can surface them.
+async function boostedProductsMatchingQuery(collection, query, limit = 5, maxTimeMS = 500) {
+  const terms = String(query || '')
+    .toLowerCase()
+    .trim()
+    .split(/\s+/)
+    .filter(term => term.length >= 2)
+    .slice(0, 5);
+
+  if (terms.length === 0) return [];
+
+  const termConditions = terms.map(term => {
+    const variants = typeof getSimpleSearchWordVariants === 'function'
+      ? getSimpleSearchWordVariants(term)
+      : [term];
+
+    return {
+      $or: variants.map(variant => ({
+        name: { $regex: escapeRegExp(variant), $options: 'i' }
+      }))
+    };
+  });
+
+  try {
+    return await collection.find({
+      boost: { $in: [1, 2, 3] },
+      $and: [
+        ...termConditions,
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+      ]
+    })
+      .project({ name: 1, price: 1, image: 1, url: 1, id: 1, boost: 1 })
+      .sort({ boost: -1 })
+      .limit(limit)
+      .maxTimeMS(maxTimeMS)
+      .toArray();
+  } catch (error) {
+    // Never let the boosted-product lookup break autocomplete.
+    console.warn(`[AUTOCOMPLETE] boosted-product lookup failed for "${query}": ${error.message}`);
+    return [];
+  }
+}
+
 function formatFallbackProduct(product, query, mode = 'direct-name-fallback') {
   return {
     _id: product._id?.toString(),
@@ -2399,7 +2445,7 @@ async function executeOptimizedFilterOnlySearch(
    EXISTING PIPELINE FUNCTIONS (UNCHANGED)
 \* =========================================================== */
 
-const buildAutocompletePipeline = (query, indexName, path, includePersonalizationFields = false) => {
+const buildAutocompletePipeline = (query, indexName, path, includePersonalizationFields = false, limit = 20) => {
   // Stock status filter lives INSIDE $search so Atlas can apply it before returning docs.
   // This avoids a post-search $match full-scan and lets the $limit early-termination work.
   const filterClauses = [
@@ -2443,7 +2489,7 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
         }
       }
     },
-    { $limit: 20 },
+    { $limit: limit },
     { $project: projectFields }
   ];
 };
@@ -8328,19 +8374,20 @@ app.get("/autocomplete", async (req, res) => {
 
     // Include softCategory in pipeline if personalization is active (for products only)
     const includePersonalizationFields = !!userProfile;
-    const pipeline1 = buildAutocompletePipeline(query, "default", "name", includePersonalizationFields);
+    const pipeline1 = buildAutocompletePipeline(query, "default", "name", includePersonalizationFields, 30);
     const pipeline2 = buildAutocompletePipeline(query, "default2", "query", false); // queries don't have softCategory
 
-    // 🚀 Run all three searches in parallel (they're fully independent)
+    // 🚀 Run all searches in parallel (they're fully independent)
     const [
       { results: regexResults, isPerfectFilterMatch, filterCheck },
       suggestions1,
-      suggestions2Raw
+      suggestions2Raw,
+      boostedMatches
     ] = await Promise.all([
-      performSimpleSearch(db, collection1, query, req.store, 5, true).catch(async (err) => {
+      performSimpleSearch(db, collection1, query, req.store, 25, true).catch(async (err) => {
         if (!isAtlasSearchIndexUnavailable(err)) throw err;
         console.warn(`[AUTOCOMPLETE] Product Atlas index unavailable for ${dbName}; using direct name fallback`);
-        const fallbackProducts = await directNameFallbackProducts(collection1, query, 5, 600);
+        const fallbackProducts = await directNameFallbackProducts(collection1, query, 25, 600);
         return {
           results: fallbackProducts,
           isPerfectFilterMatch: false,
@@ -8350,7 +8397,7 @@ app.get("/autocomplete", async (req, res) => {
       collection1.aggregate(pipeline1, { maxTimeMS: 800 }).toArray().catch(async (err) => {
         if (!isAtlasSearchIndexUnavailable(err)) throw err;
         console.warn(`[AUTOCOMPLETE] Product suggestions Atlas index unavailable for ${dbName}; using direct name fallback`);
-        const fallbackProducts = await directNameFallbackProducts(collection1, query, 5, 600);
+        const fallbackProducts = await directNameFallbackProducts(collection1, query, 25, 600);
         return fallbackProducts.map(product => ({
           suggestion: product.name,
           score: 80,
@@ -8363,7 +8410,9 @@ app.get("/autocomplete", async (req, res) => {
         }));
       }),
       // Isolate pipeline2: if "default2" index missing on this store, return [] instead of crashing
-      collection2.aggregate(pipeline2, { maxTimeMS: 500 }).toArray().catch(() => [])
+      collection2.aggregate(pipeline2, { maxTimeMS: 500 }).toArray().catch(() => []),
+      // Always-on boosted-product lookup so merchant boosts can't be clipped by the candidate window
+      boostedProductsMatchingQuery(collection1, query, 25, 500)
     ]);
     const suggestions2 = suggestions2Raw;
 
@@ -8379,6 +8428,19 @@ app.get("/autocomplete", async (req, res) => {
         type: "category-search"
       });
     }
+
+    // Label boosted-product suggestions (guaranteed-present merchant boosts)
+    const labeledBoostedSuggestions = (boostedMatches || []).map(item => ({
+      suggestion: item.name,
+      score: 95,
+      boostedScore: 95,
+      profileBoost: 0,
+      boost: item.boost || 0, // Merchant boost (1-3)
+      source: "products-boosted",
+      url: item.url,
+      price: item.price,
+      image: item.image
+    }));
 
     // Label regex suggestions
     const labeledRegexSuggestions = regexResults.map(item => ({
@@ -8422,17 +8484,18 @@ app.get("/autocomplete", async (req, res) => {
       url: item.url
     }));
 
-    // Base priority order:
-    // 1. Query Suggestions (Previous successful searches)
-    // 2. Regex Fuzzy matches (Product names)
-    // 3. Atlas Search matches
+    // Base priority order (products rank above query suggestions):
+    // 1. Regex Fuzzy matches (Product names)
+    // 2. Atlas Search matches (Product names)
+    // 3. Query Suggestions (Previous successful searches)
     // Then a STABLE boost-first sort floats merchant-boosted products (boost 1-3) to
     // the top of the suggestions, consistent with /search. Array.sort is stable, so when
-    // nothing is boosted this preserves the original priority order exactly.
+    // nothing is boosted this preserves the priority order above exactly.
     const rankedSuggestions = [
-      ...labeledSuggestions2,
+      ...labeledBoostedSuggestions,
       ...labeledRegexSuggestions,
-      ...labeledSuggestions1
+      ...labeledSuggestions1,
+      ...labeledSuggestions2
     ].sort((a, b) => (b.boost || 0) - (a.boost || 0));
 
     // Filter Match (Category Search) stays pinned above product/query suggestions.
@@ -8443,7 +8506,7 @@ app.get("/autocomplete", async (req, res) => {
       .filter((item, index, self) =>
         index === self.findIndex((t) => t.suggestion === item.suggestion)
       )
-      .slice(0, 10); // Keep it fast
+      .slice(0, 25); // Return up to 25 suggestions
 
     // Log personalization summary
     if (userProfile) {
@@ -12357,7 +12420,7 @@ app.post("/search", async (req, res) => {
         if (typeof cat === 'string' && cat.includes(',')) {
           return cat.split(',').map(c => c.trim()).filter(c => c);
         }
-        return cat;
+        return String(cat).trim();
       });
     }
 
@@ -17718,6 +17781,9 @@ const server = app.listen(PORT, async () => {
         [{ softCategory: 1, stockStatus: 1, price: 1 }, {}],
         [{ type: 1, stockStatus: 1 }, {}],
         [{ stockStatus: 1 }, {}],
+        // Partial index: only the few merchant-boosted products. Powers the always-on
+        // boosted-product lookup in /autocomplete without scanning the full catalog.
+        [{ boost: -1 }, { name: "idx_boost", partialFilterExpression: { boost: { $gt: 0 } } }],
       ];
 
       const keyToString = (keySpec) => Object.entries(keySpec).map(([k, v]) => `${k}_${v}`).join('_');
