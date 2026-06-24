@@ -12103,16 +12103,21 @@ app.post("/search", async (req, res) => {
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
 
-      // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
-      logQuery(db.collection("queries"), query, {}, formattedSKUResults, false, { session_id }).catch(err =>
-        console.error(`[${requestId}] Failed to log SKU query:`, err.message)
-      );
+      if (formattedSKUResults.length > 0) {
+        // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
+        logQuery(db.collection("queries"), query, {}, formattedSKUResults, false, { session_id }).catch(err =>
+          console.error(`[${requestId}] Failed to log SKU query:`, err.message)
+        );
 
-      return res.json(formattedSKUResults);
+        return res.json(formattedSKUResults);
+      } else {
+        console.log(`[${requestId}] No SKU results found for "${query}", falling back to normal search.`);
+      }
       
     } catch (error) {
       console.error(`[${requestId}] SKU search failed:`, error);
-      return res.status(500).json({ error: "SKU search error" });
+      // If SKU search fails, log and fall back to normal search instead of returning 500
+      console.log(`[${requestId}] SKU search error for "${query}", falling back to normal search.`);
     }
   }
 
@@ -17905,7 +17910,7 @@ process.on('uncaughtException', (error) => {
 function isDigitsOnlyQuery(query) {
   if (!query || typeof query !== 'string') return false;
   const trimmed = query.trim();
-  return /^\d+$/.test(trimmed) && trimmed.length > 0;
+  return /^[\d-]+$/.test(trimmed) && trimmed.length > 0;
 }
 // SKU search pipeline - OPTIMIZED for exact digit matches
 function buildSKUSearchPipeline(skuQuery, limit = 65) {
