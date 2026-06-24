@@ -8363,6 +8363,41 @@ app.get("/autocomplete", async (req, res) => {
     const collection1 = db.collection("products");
     const collection2 = db.collection("queries");
 
+    // 🔢 SKU AUTOCOMPLETE: phrases with numbers and dashes (e.g. "123-456",
+    // "AB-1234") are treated as a SKU pointing at one specific product.
+    // Run an exact SKU lookup first; only fall back to classic autocomplete
+    // when nothing matches.
+    if (looksLikeSkuQuery(query)) {
+      try {
+        const skuResults = await executeSKUSearch(collection1, query.trim());
+        const skuSuggestions = skuResults
+          .filter(isProductInStock)
+          .slice(0, 10)
+          .map((product) => ({
+            suggestion: product.name,
+            score: 1000,
+            boostedScore: 1000,
+            profileBoost: 0,
+            boost: product.boost || 0,
+            source: "sku",
+            skuSearch: true,
+            highlight: true,
+            url: product.url,
+            price: product.price,
+            image: product.image
+          }));
+
+        if (skuSuggestions.length > 0) {
+          console.log(`[AUTOCOMPLETE] SKU match for "${query}": ${skuSuggestions.length} product(s)`);
+          return res.json(skuSuggestions);
+        }
+        console.log(`[AUTOCOMPLETE] No SKU match for "${query}", falling back to classic autocomplete.`);
+      } catch (skuError) {
+        // Never let a SKU lookup failure break autocomplete — fall through.
+        console.warn(`[AUTOCOMPLETE] SKU lookup failed for "${query}": ${skuError.message}`);
+      }
+    }
+
     // 👤 PERSONALIZATION: Load user profile if session_id is provided
     let userProfile = null;
     if (session_id) {
@@ -17911,6 +17946,19 @@ function isDigitsOnlyQuery(query) {
   if (!query || typeof query !== 'string') return false;
   const trimmed = query.trim();
   return /^[\d-]+$/.test(trimmed) && trimmed.length > 0;
+}
+
+// Function to detect a SKU-like query (numbers + dashes, no spaces).
+// Treats single tokens such as "123-456", "AB-1234", "WV-2024-XL" as a SKU
+// referring to one specific product. Requires at least one digit and one dash.
+function looksLikeSkuQuery(query) {
+  if (!query || typeof query !== 'string') return false;
+  const trimmed = query.trim();
+  if (/\s/.test(trimmed)) return false; // SKUs are single tokens, no spaces
+  // Pure digits (with optional dashes) is already a SKU
+  if (isDigitsOnlyQuery(trimmed)) return true;
+  // Alphanumeric groups joined by dashes, containing at least one digit
+  return /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(trimmed) && /\d/.test(trimmed);
 }
 // SKU search pipeline - OPTIMIZED for exact digit matches
 function buildSKUSearchPipeline(skuQuery, limit = 65) {
