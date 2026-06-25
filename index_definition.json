@@ -64,6 +64,9 @@
       },
       "price": {
         "type": "number"
+      },
+      "hidden": {
+        "type": "boolean"
       }
     }
   }

@@ -148,6 +148,16 @@ function escapeRegExp(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Products flagged `hidden:true` in the DB are excluded from every result surface
+// (autocomplete, search, fast-search). Two equivalent forms:
+//  - HIDDEN_SEARCH_FILTER → drop into an Atlas $search `compound.filter` (or `must`)
+//    array. Requires `hidden` mapped as a boolean in the Atlas Search index.
+//  - HIDDEN_MONGO_FILTER → a plain MongoDB predicate for $vectorSearch filters and
+//    direct collection.find() fallbacks. (find() needs no index change; for
+//    $vectorSearch, `hidden` must be a filter field in the vector index.)
+const HIDDEN_SEARCH_FILTER = { compound: { mustNot: [{ equals: { path: "hidden", value: true } }] } };
+const HIDDEN_MONGO_FILTER = { hidden: { $ne: true } };
+
 function isAtlasSearchIndexUnavailable(error) {
   const message = String(error?.message || error?.errmsg || '');
   const codeName = String(error?.codeName || error?.errorResponse?.codeName || '');
@@ -187,7 +197,8 @@ async function directNameFallbackProducts(collection, query, limit = 10, maxTime
     docs = await collection.find({
       $and: [
         ...termConditions,
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        HIDDEN_MONGO_FILTER
       ]
     })
       .project({
@@ -260,7 +271,8 @@ async function boostedProductsMatchingQuery(collection, query, limit = 5, maxTim
       boost: { $in: [1, 2, 3] },
       $and: [
         ...termConditions,
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        HIDDEN_MONGO_FILTER
       ]
     })
       .project({ name: 1, price: 1, image: 1, url: 1, id: 1, boost: 1 })
@@ -328,7 +340,7 @@ async function findDirectExactNameMatches(collection, query, limit = 10) {
   if (variants.length === 0) return [];
 
   try {
-    const exactMatches = await collection.find({ name: { $in: variants } })
+    const exactMatches = await collection.find({ name: { $in: variants }, ...HIDDEN_MONGO_FILTER })
       .limit(limit)
       .maxTimeMS(100)
       .toArray();
@@ -532,6 +544,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
               { text: { query: numeric, path: "name", score: { boost: { value: 4 } } } },
               { autocomplete: { query: numeric, path: "name", tokenOrder: "any", score: { boost: { value: 5 } } } }
             ],
+            filter: [HIDDEN_SEARCH_FILTER],
             minimumShouldMatch: 1
           }
         }
@@ -548,7 +561,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
   }
 
   try {
-    const nameMatches = await collection.find({ name: numericTokenRegex })
+    const nameMatches = await collection.find({ name: numericTokenRegex, ...HIDDEN_MONGO_FILTER })
       .limit(limit * 2)
       .maxTimeMS(350)
       .toArray();
@@ -569,7 +582,8 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
         { ItemID: numeric },
         { id: numeric },
         { barcode: numeric }
-      ]
+      ],
+      ...HIDDEN_MONGO_FILTER
     })
       .limit(limit)
       .maxTimeMS(200)
@@ -2457,7 +2471,8 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
         ],
         minimumShouldMatch: 1
       }
-    }
+    },
+    HIDDEN_SEARCH_FILTER
   ];
 
   const projectFields = {
@@ -2476,14 +2491,23 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
     projectFields.colors = 1;
   }
 
+  // Primary match is on the suggestion path (product `name` / search-history `query`).
+  // For the products index we ALSO match soft categories so typing a soft-category
+  // term (e.g. "vegan", "gift") surfaces relevant products — with a lower boost so
+  // direct name matches still rank first.
+  const shouldClauses = [
+    { text: { query, path, score: { boost: { value: 100.0 } } } }
+  ];
+  if (path === "name") {
+    shouldClauses.push({ text: { query, path: "softCategory", score: { boost: { value: 30.0 } } } });
+  }
+
   return [
     {
       $search: {
         index: indexName,
         compound: {
-          should: [
-            { text: { query, path, score: { boost: { value: 100.0 } } } }
-          ],
+          should: shouldClauses,
           filter: filterClauses,
           minimumShouldMatch: 1
         }
@@ -2526,6 +2550,9 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
         minimumShouldMatch: 1
       }
     });
+
+    // Exclude products flagged hidden:true
+    filterClauses.push(HIDDEN_SEARCH_FILTER);
 
     // Type filter
     if (hardFilters && hardFilters.type && (!Array.isArray(hardFilters.type) || hardFilters.type.length > 0)) {
@@ -2922,6 +2949,9 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
   // Stock status filter - OPTIMIZED: moved into $vectorSearch filter
   // Simplified for Atlas Search compatibility - just check for instock
   conditions.push({ stockStatus: "instock" });
+
+  // Exclude products flagged hidden:true (requires `hidden` as a filter field in the vector index)
+  conditions.push(HIDDEN_MONGO_FILTER);
 
   // Category filter with proper logic handling
   if (hardFilters.category) {
@@ -9728,7 +9758,9 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
             ],
             minimumShouldMatch: 1
           }
-        }
+        },
+        // Exclude products flagged hidden:true
+        HIDDEN_SEARCH_FILTER
       ];
 
       // Hard categories: each must EXACTLY match category OR type.
@@ -9945,7 +9977,8 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
                     ],
                     minimumShouldMatch: 1
                   }
-                }
+                },
+                HIDDEN_SEARCH_FILTER
               ]
             }
           }
@@ -12035,7 +12068,8 @@ app.post("/search", async (req, res) => {
               ],
               minimumShouldMatch: 1
             }
-          }
+          },
+          HIDDEN_SEARCH_FILTER
         ];
         // Apply extracted filters (category + color) so we don't return wrong-category results
         if (extractedFilters?.category) {
@@ -12805,7 +12839,8 @@ app.post("/search", async (req, res) => {
               ],
               minimumShouldMatch: 1
             }
-          }
+          },
+          HIDDEN_SEARCH_FILTER
         ];
         if (hardFilters.category) {
           const cats = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
@@ -18043,7 +18078,8 @@ function buildSKUSearchPipeline(skuQuery, limit = 65) {
                 ],
                 minimumShouldMatch: 1
               }
-            }
+            },
+            HIDDEN_SEARCH_FILTER
           ]
         }
       }
