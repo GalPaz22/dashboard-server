@@ -12102,9 +12102,9 @@ app.post("/search", async (req, res) => {
   // TODO: Only extract filters if query contains filter keywords (price, "until", "for", etc.)
   let earlySoftFilters = null;
 
-  // Check if this is a digits-only query for SKU search
-  if (isDigitsOnlyQuery(query)) {
-    console.log(`[${requestId}] Digits-only query detected: "${query}" - activating SKU search`);
+  // Check if this is a SKU-like query (digits, or numbers + dashes) for SKU search
+  if (looksLikeSkuQuery(query)) {
+    console.log(`[${requestId}] SKU-like query detected: "${query}" - activating SKU search`);
     
     try {
       const client = await connectToMongoDB(mongodbUri);
@@ -12137,6 +12137,16 @@ app.post("/search", async (req, res) => {
       }));
       
       console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
+
+      // 🔁 Single perfect SKU match → signal an immediate redirect to the product page.
+      // The result still carries the full product payload, so a front-end that ignores
+      // these flags keeps rendering it normally; one that checks `redirect` can navigate
+      // straight to `redirectUrl` without any other change.
+      if (formattedSKUResults.length === 1 && formattedSKUResults[0].url) {
+        formattedSKUResults[0].redirect = true;
+        formattedSKUResults[0].redirectUrl = formattedSKUResults[0].url;
+        console.log(`[${requestId}] Single SKU match for "${query}" → redirect to ${formattedSKUResults[0].url}`);
+      }
 
       if (formattedSKUResults.length > 0) {
         // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
@@ -12313,7 +12323,7 @@ app.post("/search", async (req, res) => {
           // Run classification and filter extraction in parallel
           const [isSimple, filters] = await Promise.all([
             isSimpleProductNameQuery(query, initialFilters, categories, types, finalSoftCategories, context, dbName, hasHighTextMatch, preliminaryTextSearchResults),
-            isDigitsOnlyQuery(query) ? {} : extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context, null, req.store?.colors || '')
+            looksLikeSkuQuery(query) ? {} : extractFiltersFromQueryEnhanced(query, categories, types, finalSoftCategories, example, context, null, req.store?.colors || '')
           ]);
           return { isSimple, filters };
         }),
