@@ -6671,7 +6671,7 @@ async function getProductsByIds(ids, dbName, collectionName) {
       return [];
     }
 
-    const products = await collection.find({ _id: { $in: objectIdArray } }).toArray();
+    const products = await collection.find({ _id: { $in: objectIdArray }, ...HIDDEN_MONGO_FILTER }).toArray();
     
     // Create a map for quick lookups
     const productMap = new Map(products.map(p => [p._id.toString(), p]));
