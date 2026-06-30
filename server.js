@@ -2289,6 +2289,8 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     ]
   });
 
+  matchConditions.push(HIDDEN_MONGO_FILTER);
+
   // Add hard filters
   if (hardFilters && Object.keys(hardFilters).length > 0) {
     if (hardFilters.category) {
