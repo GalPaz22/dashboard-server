@@ -9626,7 +9626,8 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
                 ],
                 minimumShouldMatch: 1
               }
-            }
+            },
+            HIDDEN_SEARCH_FILTER
           ]
         }
       }
@@ -9651,7 +9652,8 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
     const regexResults = await collection.find({
       $and: [
         ...regexConditions,
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        HIDDEN_MONGO_FILTER
       ]
     })
       .limit(Math.max(limit * 3, 15))
@@ -15069,7 +15071,7 @@ app.get("/products", async (req, res) => {
 
     // Optimized: Use projection to fetch only needed fields, add pagination with skip
     const products = await collection
-      .find({}, {
+      .find(HIDDEN_MONGO_FILTER, {
         projection: {
           _id: 1,
           id: 1,
@@ -15152,6 +15154,7 @@ app.post("/recommend", async (req, res) => {
       {
         $match: {
           price: { $gte: minPrice, $lte: maxPrice },
+          ...HIDDEN_MONGO_FILTER,
         },
       },
     ];
