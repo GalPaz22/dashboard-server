@@ -1139,7 +1139,8 @@ function getRecommendedSearchIndexDefinition() {
         { "type": "filter", "path": "category" },
         { "type": "filter", "path": "softCategory" },
         { "type": "filter", "path": "type" },
-        { "type": "filter", "path": "colors" }
+        { "type": "filter", "path": "colors" },
+        { "type": "filter", "path": "hidden" }
       ]
     },
     // default2 on queries collection — used by autocomplete on search history
@@ -10059,6 +10060,8 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
   // Build query: same hard category + in stock
   const query = {
     _id: { $nin: excludeIds },
+    // Exclude products flagged hidden:true (recommendations must respect hidden too)
+    ...HIDDEN_MONGO_FILTER,
     $or: [
       { stockStatus: "instock" },
       { stockStatus: { $exists: false } }
@@ -11357,7 +11360,7 @@ app.post("/search", async (req, res) => {
 
   // ⚡ USE ONLY API KEY CONFIG: No default fallback, only use what the store provides
   const rawSoftCategories = softCategories || [];
-  const finalSoftCategories = Array.isArray(rawSoftCategories) ? rawSoftCategories : (typeof rawSoftCategories === 'string' ? rawSoftCategories.split(',').map(s => s.trim()).filter(Boolean) : []);
+  const finalSoftCategories = (Array.isArray(rawSoftCategories) ? rawSoftCategories : (typeof rawSoftCategories === 'string' ? rawSoftCategories.split(',') : [])).map(s => String(s).trim()).filter(Boolean);
 
   // 🔍 DEBUG: Log soft categories to verify they're loaded
   if (finalSoftCategories) {
