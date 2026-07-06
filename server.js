@@ -7815,7 +7815,8 @@ app.get("/search/load-more", async (req, res) => {
               // Build filter for ANN search - include ALL hard filters
               const annFilter = {
                 $and: [
-                  { stockStatus: "instock" }
+                  { stockStatus: "instock" },
+                  HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
                 ]
               };
               
@@ -8081,7 +8082,8 @@ app.get("/search/load-more", async (req, res) => {
               // Build filter for ANN search - include ALL hard filters
               const annFilter = {
                 $and: [
-                  { stockStatus: "instock" }
+                  { stockStatus: "instock" },
+                  HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
                 ]
               };
               
@@ -9836,7 +9838,8 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       if (results.length === 0) {
         try {
           const directAndConditions = [
-            { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] }
+            { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] },
+            HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
           ];
 
           if (filterCheck.matchedHardCategories?.length > 0) {
@@ -13263,7 +13266,8 @@ app.post("/search", async (req, res) => {
                     const similaritySearches = topProductEmbeddings.map(async (productEmbed) => {
                       const annFilter = {
                         $and: [
-                          { stockStatus: "instock" }  // Changed from $ne to positive filter to avoid index requirements
+                          { stockStatus: "instock" },  // Changed from $ne to positive filter to avoid index requirements
+                          HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
                           // Exclude the seed product itself - handled after results to avoid index requirements
                         ]
                       };
