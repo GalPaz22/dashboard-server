@@ -610,6 +610,69 @@ function getMoreSpecificSoftCategoryMatches(matchedSoftCategories = [], availabl
   });
 }
 
+function getSpecificSoftCategoryTokenSets(matchedSoftCategories = [], specificSoftCategories = []) {
+  const baseTokens = new Set(
+    normalizeConfigList(matchedSoftCategories)
+      .flatMap(category => tokenizeLabel(category))
+      .filter(token => token.length >= 2)
+  );
+
+  const differentiatorTokens = new Set(
+    normalizeConfigList(specificSoftCategories)
+      .flatMap(category => tokenizeLabel(category))
+      .filter(token => token.length >= 3 && !baseTokens.has(token))
+  );
+
+  return {
+    baseTokens: [...baseTokens],
+    differentiatorTokens: [...differentiatorTokens]
+  };
+}
+
+function productNameMatchesSpecificSoftCategory(product, matchedSoftCategories = [], specificSoftCategories = []) {
+  const nameTokens = tokenizeLabel(product?.name || '');
+  if (nameTokens.length === 0) return false;
+
+  const { baseTokens, differentiatorTokens } = getSpecificSoftCategoryTokenSets(
+    matchedSoftCategories,
+    specificSoftCategories
+  );
+
+  return baseTokens.some(token => nameTokens.includes(token)) &&
+    differentiatorTokens.some(token => nameTokens.includes(token));
+}
+
+async function findDirectSpecificSoftCategoryNameMatches(collection, matchedSoftCategories = [], specificSoftCategories = [], existingIds = [], limit = 20) {
+  const { baseTokens, differentiatorTokens } = getSpecificSoftCategoryTokenSets(
+    matchedSoftCategories,
+    specificSoftCategories
+  );
+  if (baseTokens.length === 0 || differentiatorTokens.length === 0) return [];
+
+  const stockFilter = {
+    $or: [
+      { stockStatus: 'instock' },
+      { stock_status: 'instock' },
+      { stockStatus: { $exists: false }, stock_status: { $exists: false } }
+    ]
+  };
+
+  const query = {
+    $and: [
+      HIDDEN_MONGO_FILTER,
+      stockFilter,
+      ...(existingIds.length > 0 ? [{ _id: { $nin: existingIds } }] : []),
+      { $or: baseTokens.map(token => ({ name: { $regex: escapeRegExp(token), $options: 'i' } })) },
+      { $or: differentiatorTokens.map(token => ({ name: { $regex: escapeRegExp(token), $options: 'i' } })) }
+    ]
+  };
+
+  return collection.find(query)
+    .limit(limit)
+    .maxTimeMS(600)
+    .toArray();
+}
+
 // Stable re-rank: literal name matches first, original (Atlas) order preserved on ties.
 function rankByNameTextRelevance(products, terms) {
   if (!Array.isArray(products) || products.length < 2) return products;
@@ -10078,8 +10141,30 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
           store.softCategories || []
         );
         if (specificSoftCategories.length > 0) {
+          try {
+            const existingIds = results.map(product => product._id);
+            const directSpecificNameMatches = await findDirectSpecificSoftCategoryNameMatches(
+              collection,
+              filterCheck.matchedSoftCategories,
+              specificSoftCategories,
+              existingIds,
+              perfectMatchLimit
+            );
+            if (directSpecificNameMatches.length > 0) {
+              results = [...directSpecificNameMatches, ...results];
+              if (!silent) {
+                console.log(`[SIMPLE-SEARCH] 🎯 Specific soft-category direct-name supplement: +${directSpecificNameMatches.length} matches for [${specificSoftCategories.join(', ')}]`);
+              }
+            }
+          } catch (specificNameErr) {
+            if (!silent) {
+              console.warn(`[SIMPLE-SEARCH] Specific soft-category direct-name supplement failed: ${specificNameErr.message}`);
+            }
+          }
+
           const specificMatches = results.filter(product =>
-            productMatchesAnySoftCategory(product, specificSoftCategories)
+            productMatchesAnySoftCategory(product, specificSoftCategories) ||
+            productNameMatchesSpecificSoftCategory(product, filterCheck.matchedSoftCategories, specificSoftCategories)
           );
           if (specificMatches.length > 0) {
             if (!silent && specificMatches.length !== results.length) {
