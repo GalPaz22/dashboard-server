@@ -158,6 +158,15 @@ function escapeRegExp(value = '') {
 const HIDDEN_SEARCH_FILTER = { compound: { mustNot: [{ equals: { path: "hidden", value: true } }] } };
 const HIDDEN_MONGO_FILTER = { hidden: { $ne: true } };
 
+function isProductHidden(product = {}) {
+  const hidden = product.hidden;
+  return hidden === true || hidden === 1 || String(hidden).toLowerCase().trim() === 'true';
+}
+
+function isProductVisible(product = {}) {
+  return !isProductHidden(product);
+}
+
 function isAtlasSearchIndexUnavailable(error) {
   const message = String(error?.message || error?.errmsg || '');
   const codeName = String(error?.codeName || error?.errorResponse?.codeName || '');
@@ -476,7 +485,6 @@ function filterAccessoriesForDeviceQuery(products, query, store, silent = false)
   if (!queryMatchesDeviceSoftCategory(query, store)) return products;
 
   const accessoryCategories = getStoreAccessoryCategories(store);
-  if (accessoryCategories.length === 0) return products;
 
   const filtered = products.filter(product => !productIsAccessory(product, accessoryCategories));
   if (!silent && filtered.length !== products.length) {
@@ -526,6 +534,23 @@ function rankByNameTextRelevance(products, terms) {
   return scored.map(x => x.product);
 }
 
+function scoreProductLineResult(product, terms) {
+  const nameScore = scoreNameTextRelevance(product, terms);
+  const price = Number(product?.price);
+  const priceScore = Number.isFinite(price) && price > 0 ? Math.log10(price + 1) * 15 : 0;
+  const boostScore = (Number(product?.boost) || 0) * 10;
+
+  // Name match is the strongest signal. Price helps separate main devices from
+  // low-cost parts without relying on store-specific accessory-name keywords.
+  return (nameScore * 10) + priceScore + boostScore;
+}
+
+function compareProductLineResults(a, b, terms, fallbackComparator = () => 0) {
+  const scoreDiff = scoreProductLineResult(b, terms) - scoreProductLineResult(a, terms);
+  if (scoreDiff !== 0) return scoreDiff;
+  return fallbackComparator(a, b);
+}
+
 function productNameHasNumericToken(productName, query) {
   const numeric = getNumericModelToken(query);
   if (!productName || !numeric) return false;
@@ -562,7 +587,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
   const numericTokenRegex = new RegExp(`(^|[^\\p{L}\\p{N}])${escapeRegExp(numeric)}([^\\p{L}\\p{N}]|$)`, 'iu');
   const brandHints = getModelBrandHints(query);
   const filterAndRank = (docs) => {
-    let filtered = docs.filter(product => productNameHasNumericToken(product.name, numeric));
+    let filtered = docs.filter(product => isProductVisible(product) && productNameHasNumericToken(product.name, numeric));
     if (brandHints.length > 0) {
       const brandMatches = filtered.filter(product =>
         brandHints.some(brandHint => productNameMatchesModelBrand(product.name, brandHint))
@@ -8490,7 +8515,7 @@ app.get("/autocomplete", async (req, res) => {
       try {
         const skuResults = await executeSKUSearch(collection1, query.trim());
         const skuSuggestions = skuResults
-          .filter(isProductInStock)
+          .filter(product => isProductVisible(product) && isProductInStock(product))
           .slice(0, 10)
           .map((product) => ({
             suggestion: product.name,
@@ -9957,6 +9982,10 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
           if (!silent) console.warn(`[SIMPLE-SEARCH] Direct Mongo perfect match fallback failed:`, directErr.message);
         }
       }
+
+      // Device-line soft categories (for example "טריינר") can also tag parts and
+      // accessories. For a bare device query, keep the actual devices first.
+      results = filterAccessoriesForDeviceQuery(results, query, store, silent);
 
       // 🛡️ Hard category safety net: even with `phrase`, Atlas Search can occasionally
       // surface products whose category only partially overlaps (e.g. multi-value arrays).
@@ -11737,8 +11766,20 @@ app.post("/search", async (req, res) => {
 
         // 🎯 Skip sorting if emergency expansion already handled it
         if (!approvedProducts[0]?.isEmergencyResult) {
-          // Sort by boost FIRST (3 > 2 > 1 > 0), then by profileBoost as tiebreaker
-          finalProducts.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
+          if (isPerfectFilterMatch && queryMatchesDeviceSoftCategory(query, req.store)) {
+            // Product-line searches (e.g. "טריינר") often return both the device and
+            // its parts via the same softCategory. Rank by universal product signals:
+            // name-position relevance, product price, then merchant/profile boost.
+            finalProducts.sort((a, b) => compareProductLineResults(
+              a,
+              b,
+              queryWords,
+              (x, y) => compareWithBoost(x, y, (left, right) => (right.profileBoost || 0) - (left.profileBoost || 0))
+            ));
+          } else {
+            // Sort by boost FIRST (3 > 2 > 1 > 0), then by profileBoost as tiebreaker
+            finalProducts.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
+          }
         }
 
         // ============================================================
@@ -11874,7 +11915,7 @@ app.post("/search", async (req, res) => {
         // 🛡️ STOCK SAFETY NET (Phase 0)
         const preStockTotal = finalProducts.length + softCategoryExpansion.length + aiRecommendations.length;
         const allProducts = [...finalProducts, ...softCategoryExpansion, ...aiRecommendations]
-          .filter(isProductInStock);
+          .filter(product => isProductVisible(product) && isProductInStock(product));
         const stockFiltered = preStockTotal - allProducts.length;
 
         // If stock filter wiped everything, try a bounded same-category fallback before
@@ -12311,7 +12352,9 @@ app.post("/search", async (req, res) => {
       const skuResults = await executeSKUSearch(collection, query.trim());
       
       // Format SKU results for response
-      const formattedSKUResults = skuResults.filter(isProductInStock).map((product) => ({
+      const formattedSKUResults = skuResults
+        .filter(product => isProductVisible(product) && isProductInStock(product))
+        .map((product) => ({
         _id: product._id.toString(),
         id: product.id, // Keep for backward compatibility if needed, but _id is primary
         name: product.name,
@@ -18260,9 +18303,10 @@ async function executeSKUSearch(collection, skuQuery) {
   
   try {
     const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 65)).toArray();
+    const visibleSkuResults = skuResults.filter(isProductVisible);
     
     // Add SKU-specific scoring and metadata
-    const processedResults = skuResults.map((product, index) => ({
+    const processedResults = visibleSkuResults.map((product, index) => ({
       ...product,
       rrf_score: 2000 - index, // High base scores for SKU matches, decreasing by rank
       softFilterMatch: false,
