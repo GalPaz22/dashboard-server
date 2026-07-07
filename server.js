@@ -485,6 +485,47 @@ function filterAccessoriesForDeviceQuery(products, query, store, silent = false)
   return filtered;
 }
 
+// Hebrew one/two-letter proclitics. "לטריינר" = ל + טריינר ("for the trainer"), which
+// signals a PART/accessory for a device rather than the device itself.
+const HEBREW_PROCLITICS = ['ל', 'ה', 'ב', 'כ', 'מ', 'ש', 'ו', 'לה', 'שה', 'מה', 'וה', 'כש'];
+
+// Score how strongly a product NAME matches the query terms.
+// Used to re-rank soft-category (perfect-filter-match) results so the device whose name
+// IS the query term (e.g. "טריינר חכם") leads over parts merely tagged with that soft
+// category (e.g. "ציר גלגל אחורי לטריינר").
+function scoreNameTextRelevance(product, terms) {
+  const name = normalizeQuoteCharacters(String(product?.name || '').toLowerCase()).trim();
+  if (!name || !Array.isArray(terms) || terms.length === 0) return 0;
+  const tokens = name.split(/[\s\-/,()]+/).filter(Boolean);
+  let score = 0;
+  for (const raw of terms) {
+    const term = String(raw || '').toLowerCase().trim();
+    if (term.length < 2) continue;
+    const idx = tokens.indexOf(term);
+    if (idx !== -1) {
+      // Standalone token → the product IS the thing (not "for" the thing)
+      score += 100;
+      if (idx === 0) score += 40; // leading head noun
+    } else if (tokens.some(t => HEBREW_PROCLITICS.some(p => t === p + term))) {
+      // "לטריינר" etc. → a part/accessory FOR the thing; demote below neutral items
+      score -= 15;
+    } else if (name.includes(term)) {
+      score += 25; // partial / substring match
+    }
+  }
+  // Demote non-product service/support listings that share the soft category.
+  if (/שירות|הדרכה|תיקון|התקנה|מנוי|קליניקה|מסובסד/.test(name)) score -= 60;
+  return score;
+}
+
+// Stable re-rank: literal name matches first, original (Atlas) order preserved on ties.
+function rankByNameTextRelevance(products, terms) {
+  if (!Array.isArray(products) || products.length < 2) return products;
+  const scored = products.map((product, i) => ({ product, i, s: scoreNameTextRelevance(product, terms) }));
+  scored.sort((a, b) => (b.s - a.s) || (a.i - b.i));
+  return scored.map(x => x.product);
+}
+
 function productNameHasNumericToken(productName, query) {
   const numeric = getNumericModelToken(query);
   if (!productName || !numeric) return false;
@@ -6055,7 +6096,11 @@ async function reorderResultsWithGPT(
   useFastLLM = true, // 🎯 DEFAULT TO TRUE: Always use the fast model for reranking
   userProfile = null, // 👤 PERSONALIZATION: User profile for personalized ranking
   isEmergencyMode = false, // 🎯 NEW: Bypass 4-item limit for emergency expansion
-  isFilterHeavy = false // ⚡ LIGHTWEIGHT: Both hard+soft filters extracted → minimal LLM nudge only
+  isFilterHeavy = false, // ⚡ LIGHTWEIGHT: Both hard+soft filters extracted → minimal LLM nudge only
+  withExpansionDecision = false // 🎯 EXPANSION GATE: also ask the model whether the query is
+                                // fully answered by the returned set (narrow, e.g. "satellite phone")
+                                // or would benefit from more related products (broad, e.g. "red wine
+                                // for dinner"). Result exposed as `.comprehensive` on the returned array.
 ) {
     const filtered = combinedResults.filter(
       (p) => !alreadyDelivered.includes(p._id.toString())
@@ -6090,7 +6135,8 @@ async function reorderResultsWithGPT(
     const limitedResults = filtered.slice(0, effectiveMax);
   console.log(`DEBUG: reorderResultsWithGPT - effectiveMax: ${effectiveMax}, limitedResults.length (before LLM): ${limitedResults.length}`);
   const productIds = limitedResults.map(p => p._id.toString()).sort().join(',');
-  const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context);
+  const cacheKey = generateCacheKey('reorder', productIds, query, translatedQuery, explain, context)
+    + (withExpansionDecision ? ':xd' : '');
     
   return withCache(cacheKey, async () => {
     console.time(`Rerank LLM call for ${query} (${limitedResults.length} products)`);
@@ -6266,17 +6312,41 @@ ${JSON.stringify(productData, null, 2)}`;
     // Use fast model if requested (for /fast-search)
     // 🎯 We already declared modelName above to be gemini-2.5-flash-lite for speed
 
+    // 🎯 EXPANSION GATE: wrap the ranked list in an object so the model ALSO tells us whether the
+    // query is fully satisfied by these products (narrow) or would benefit from more related ones
+    // (broad). Only for the plain (non-explain, non-filter-heavy) path used by fallback/expansion.
+    const useExpansionDecision = withExpansionDecision && !explain && !isFilterHeavy;
+    let effectiveSystemInstruction = systemInstruction;
+    let effectiveSchema = responseSchema;
+    if (useExpansionDecision) {
+      effectiveSystemInstruction = `${systemInstruction}
+
+ADDITIONALLY, decide 'comprehensive':
+- true  → the relevant products you returned FULLY answer this specific query; there is no value in padding with more loosely-related items (e.g. a very specific product request that only one or few products satisfy).
+- false → the query is broad/exploratory and additional related products (other good options) would genuinely help the shopper (e.g. "red wine for dinner", "a gift for a runner").
+If NONE of the products are relevant, return an empty 'relevant' array and comprehensive=true.
+Return a JSON OBJECT: { "relevant": [ {"_id": "..."} ], "comprehensive": boolean }.`;
+      effectiveSchema = {
+        type: Type.OBJECT,
+        properties: {
+          relevant: responseSchema, // reuse the array-of-{_id} schema
+          comprehensive: { type: Type.BOOLEAN, description: "True if the returned products fully answer the query; false if more related products would help." },
+        },
+        required: ["relevant", "comprehensive"],
+      };
+    }
+
     const llmPromise = genAI.models.generateContent({
       model: modelName,
       contents: userContent,
       config: {
-        systemInstruction,
+        systemInstruction: effectiveSystemInstruction,
         thinkingConfig: {
           thinkingBudget: 0,
         },
         temperature: 0.1,
         responseMimeType: "application/json",
-        responseSchema: responseSchema,
+        responseSchema: effectiveSchema,
       },
     });
     const rerankerTimeout = isFilterHeavy ? 5000 : 8000;
@@ -6304,12 +6374,26 @@ ${JSON.stringify(productData, null, 2)}`;
     // Clean up the text - remove any leading/trailing characters that aren't part of JSON
     text = text.replace(/^[^[\{]+/, '').replace(/[^\]\}]+$/, '');
     
-    const reorderedData = JSON.parse(text);
+    const parsed = JSON.parse(text);
+
+    // 🎯 EXPANSION GATE: object shape { relevant: [...], comprehensive: bool }
+    if (useExpansionDecision) {
+      const relevant = Array.isArray(parsed?.relevant) ? parsed.relevant : [];
+      const out = relevant.map(item => ({ _id: item._id, explanation: null }));
+      // Attach the model's decision as properties on the array (survives caching, ignored by
+      // existing callers that only read .length / iterate). Default to "comprehensive" when the
+      // set is empty so we don't pad an empty answer with unrelated noise.
+      out.comprehensive = parsed?.comprehensive !== false || out.length === 0;
+      out.strongCount = out.length;
+      return out;
+    }
+
+    const reorderedData = parsed;
     if (!Array.isArray(reorderedData)) throw new Error("Unexpected format");
-    
+
     // Trusting the LLM's response length, guided by the `maxItems: 4` schema constraint.
     // No more forced slicing or padding.
-    
+
     return reorderedData.map(item => ({
       _id: item._id,
       explanation: explain ? (item.explanation || null) : null
@@ -9897,6 +9981,18 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         }
       }
 
+      // 🎯 Prioritise textual name matches. A soft-category match (e.g. "טריינר") returns
+      // every product tagged with that category — the device model, its parts, services —
+      // with roughly flat Atlas scoring. Re-rank so the product whose NAME is the query
+      // term leads over "..לטריינר" parts and unrelated same-category items.
+      if (results.length > 1) {
+        const topBefore = results[0]?.name;
+        results = rankByNameTextRelevance(results, queryWords);
+        if (!silent && results[0]?.name !== topBefore) {
+          console.log(`[SIMPLE-SEARCH] 🎯 Re-ranked by name relevance for "${query}": top → "${results[0]?.name}"`);
+        }
+      }
+
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     } else {
       // 🎯 REGULAR SEARCH: Atlas Search autocomplete — no regex, no multiplanner timeout
@@ -10448,7 +10544,33 @@ app.post("/fast-search", async (req, res) => {
           vectorResults = filterAccessoriesForDeviceQuery(vectorResults, query, req.store);
           console.log(`[${requestId}] ⚡ Vector fallback: ${vectorResults.length} candidates (filters: ${JSON.stringify(fbHardFilters)})`);
 
+          // 🎯 SEMANTIC SOFT-CATEGORY RETRIEVAL: the LLM already mapped the query to a soft category
+          // (e.g. "טלפון לוויני" → "תקשורת לווינית inReach"). Retrieve products tagged with it and
+          // merge into the candidate pool — vector similarity alone can miss them when the product
+          // has an English name / empty description. The reranker then keeps only the relevant ones.
+          if (fbSoftFilters.softCategory && fbSoftFilters.softCategory.length > 0) {
+            try {
+              const softMatches = await collection.find({
+                softCategory: { $in: fbSoftFilters.softCategory },
+                ...HIDDEN_MONGO_FILTER,
+                $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }]
+              }).limit(20).toArray();
+              const seen = new Set(vectorResults.map(p => p._id.toString()));
+              const newSoft = softMatches.filter(p => isProductInStock(p) && !seen.has(p._id.toString()));
+              if (newSoft.length > 0) {
+                vectorResults = [...newSoft, ...vectorResults]; // prepend: explicit soft-category intent
+                console.log(`[${requestId}] 🎯 Soft-category retrieval added ${newSoft.length} product(s) for [${fbSoftFilters.softCategory.join(', ')}]`);
+              }
+            } catch (softErr) {
+              console.warn(`[${requestId}] Soft-category retrieval failed (non-fatal): ${softErr.message}`);
+            }
+          }
+
           if (vectorResults.length > 0) {
+            // 🎯 RELEVANCE GATE: trust the model. On a successful rerank we return ONLY the products
+            // it judged relevant — never pad with the raw vector "nearest neighbours" (which for a
+            // narrow query like "satellite phone" are just unrelated watches). Only if the rerank
+            // itself errors do we fall back to the raw vector order.
             let orderedResults = vectorResults;
             try {
               const reranked = await reorderResultsWithGPT(
@@ -10460,15 +10582,21 @@ app.post("/fast-search", async (req, res) => {
                 fallbackContext,
                 (fbSoftFilters.softCategory || fbSoftFilters.color) ? fbSoftFilters : null,
                 FAST_LIMIT,
-                true // useFastLLM
+                true, // useFastLLM
+                null, // userProfile
+                false, // isEmergencyMode
+                false, // isFilterHeavy
+                true  // withExpansionDecision
               );
-              if (Array.isArray(reranked) && reranked.length > 0) {
-                const byId = new Map(vectorResults.map(p => [p._id.toString(), p]));
-                const rerankedProducts = reranked.map(r => byId.get(r._id)).filter(Boolean);
-                if (rerankedProducts.length > 0) orderedResults = rerankedProducts;
-              }
+              // Rerank succeeded (no throw): its output is authoritative, even when empty.
+              const byId = new Map(vectorResults.map(p => [p._id.toString(), p]));
+              const rerankedProducts = Array.isArray(reranked)
+                ? reranked.map(r => byId.get(r._id)).filter(Boolean)
+                : [];
+              orderedResults = rerankedProducts; // [] when nothing is truly relevant → no noise
+              console.log(`[${requestId}] 🎯 Vector fallback rerank kept ${rerankedProducts.length}/${vectorResults.length} (comprehensive=${reranked?.comprehensive ?? 'n/a'})`);
             } catch (rerankErr) {
-              console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal): ${rerankErr.message}`);
+              console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal), keeping raw vector order: ${rerankErr.message}`);
             }
 
             let userProfile = null;
@@ -11898,21 +12026,45 @@ app.post("/search", async (req, res) => {
 //          vectorResults = filterAccessoriesForDeviceQuery(vectorResults, query, req.store);
             console.log(`[${requestId}] ⚡ Vector fallback: ${vectorResults.length} candidates (filters: ${JSON.stringify(fbHardFilters)})`);
 
+            // 🎯 SEMANTIC SOFT-CATEGORY RETRIEVAL: merge products tagged with the soft category the
+            // LLM mapped from the query (vector similarity can miss English-named / thin-description
+            // products). The reranker then keeps only the relevant ones.
+            if (fbSoftFilters.softCategory && fbSoftFilters.softCategory.length > 0) {
+              try {
+                const softMatches = await collection.find({
+                  softCategory: { $in: fbSoftFilters.softCategory },
+                  ...HIDDEN_MONGO_FILTER,
+                  $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }]
+                }).limit(20).toArray();
+                const seen = new Set(vectorResults.map(p => p._id.toString()));
+                const newSoft = softMatches.filter(p => isProductInStock(p) && !seen.has(p._id.toString()));
+                if (newSoft.length > 0) {
+                  vectorResults = [...newSoft, ...vectorResults];
+                  console.log(`[${requestId}] 🎯 Soft-category retrieval added ${newSoft.length} product(s) for [${fbSoftFilters.softCategory.join(', ')}]`);
+                }
+              } catch (softErr) {
+                console.warn(`[${requestId}] Soft-category retrieval failed (non-fatal): ${softErr.message}`);
+              }
+            }
+
             if (vectorResults.length > 0) {
+              // 🎯 RELEVANCE GATE: trust the model — return only products it judged relevant,
+              // never pad with raw vector nearest-neighbours. Empty rerank → no results (not noise).
               let orderedResults = vectorResults;
               try {
               const reranked = await reorderResultsWithGPT(
                 vectorResults.slice(0, 20), query, query, [], false, fallbackContext,
                   (fbSoftFilters.softCategory || fbSoftFilters.color) ? fbSoftFilters : null,
-                  searchLimit, true // useFastLLM
+                  searchLimit, true, // useFastLLM
+                  null, false, false, true // userProfile, isEmergencyMode, isFilterHeavy, withExpansionDecision
                 );
-                if (Array.isArray(reranked) && reranked.length > 0) {
-                  const byId = new Map(vectorResults.map(p => [p._id.toString(), p]));
-                  const rerankedProducts = reranked.map(r => byId.get(r._id)).filter(Boolean);
-                  if (rerankedProducts.length > 0) orderedResults = rerankedProducts;
-                }
+                const byId = new Map(vectorResults.map(p => [p._id.toString(), p]));
+                orderedResults = Array.isArray(reranked)
+                  ? reranked.map(r => byId.get(r._id)).filter(Boolean)
+                  : [];
+                console.log(`[${requestId}] 🎯 Vector fallback rerank kept ${orderedResults.length}/${vectorResults.length} (comprehensive=${reranked?.comprehensive ?? 'n/a'})`);
               } catch (rerankErr) {
-                console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal): ${rerankErr.message}`);
+                console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal), keeping raw vector order: ${rerankErr.message}`);
               }
 
               let fbUserProfile = null;
