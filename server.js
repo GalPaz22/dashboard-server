@@ -430,6 +430,26 @@ function normalizeConfigList(value) {
   return [];
 }
 
+function expandSoftCategoryTerms(softCategories = [], availableSoftCategories = []) {
+  const requested = normalizeConfigList(softCategories);
+  const available = normalizeConfigList(availableSoftCategories);
+  const expanded = new Set(requested);
+
+  for (const requestedCategory of requested) {
+    const requestedLower = requestedCategory.toLowerCase().trim();
+    if (!requestedLower) continue;
+    for (const availableCategory of available) {
+      const availableLower = availableCategory.toLowerCase().trim();
+      if (!availableLower) continue;
+      if (availableLower.includes(requestedLower) || requestedLower.includes(availableLower)) {
+        expanded.add(availableCategory);
+      }
+    }
+  }
+
+  return [...expanded].filter(Boolean);
+}
+
 function tokenizeLabel(label) {
   return normalizeQuoteCharacters(String(label || '').toLowerCase())
     .split(/[\s\-/,]+/)
@@ -526,6 +546,70 @@ function scoreNameTextRelevance(product, terms) {
   return score;
 }
 
+function scoreSoftCategoryIntent(product, terms) {
+  if (!Array.isArray(terms) || terms.length === 0) return 0;
+  const softCategories = (Array.isArray(product?.softCategory) ? product.softCategory : [product?.softCategory])
+    .filter(Boolean)
+    .map(cat => normalizeQuoteCharacters(String(cat).toLowerCase()).trim())
+    .filter(Boolean);
+  if (softCategories.length === 0) return 0;
+
+  const normalizedTerms = terms
+    .map(term => normalizeQuoteCharacters(String(term || '').toLowerCase()).trim())
+    .filter(term => term.length >= 2);
+  const queryPhrase = normalizedTerms.join(' ');
+  let score = 0;
+
+  for (const softCategory of softCategories) {
+    const softTokens = tokenizeLabel(softCategory);
+
+    if (queryPhrase && softCategory === queryPhrase) score = Math.max(score, 45);
+    if (queryPhrase && softCategory.startsWith(`${queryPhrase} `)) score = Math.max(score, 140);
+
+    for (const term of normalizedTerms) {
+      if (softCategory === term) score = Math.max(score, 20);
+      if (softCategory.startsWith(`${term} `)) score = Math.max(score, 120);
+      if (softTokens.includes(term)) {
+        const idx = softTokens.indexOf(term);
+        score = Math.max(score, idx === 0 ? 90 : 8);
+      }
+    }
+  }
+
+  return score;
+}
+
+function productMatchesAnySoftCategory(product, softCategories = []) {
+  const requested = normalizeConfigList(softCategories)
+    .map(cat => normalizeQuoteCharacters(cat.toLowerCase()).trim())
+    .filter(Boolean);
+  if (requested.length === 0) return false;
+
+  const productSoftCategories = (Array.isArray(product?.softCategory) ? product.softCategory : [product?.softCategory])
+    .filter(Boolean)
+    .map(cat => normalizeQuoteCharacters(String(cat).toLowerCase()).trim())
+    .filter(Boolean);
+
+  return productSoftCategories.some(productCategory =>
+    requested.some(requestedCategory => productCategory === requestedCategory)
+  );
+}
+
+function getMoreSpecificSoftCategoryMatches(matchedSoftCategories = [], availableSoftCategories = []) {
+  const matched = normalizeConfigList(matchedSoftCategories);
+  const expanded = expandSoftCategoryTerms(matched, availableSoftCategories);
+  const matchedLower = new Set(matched.map(cat => normalizeQuoteCharacters(cat.toLowerCase()).trim()));
+
+  return expanded.filter(category => {
+    const normalized = normalizeQuoteCharacters(category.toLowerCase()).trim();
+    if (!normalized || matchedLower.has(normalized)) return false;
+    return matched.some(base => {
+      const baseNormalized = normalizeQuoteCharacters(base.toLowerCase()).trim();
+      return normalized.includes(baseNormalized);
+    });
+  });
+}
+
 // Stable re-rank: literal name matches first, original (Atlas) order preserved on ties.
 function rankByNameTextRelevance(products, terms) {
   if (!Array.isArray(products) || products.length < 2) return products;
@@ -536,13 +620,14 @@ function rankByNameTextRelevance(products, terms) {
 
 function scoreProductLineResult(product, terms) {
   const nameScore = scoreNameTextRelevance(product, terms);
+  const softIntentScore = scoreSoftCategoryIntent(product, terms);
   const price = Number(product?.price);
   const priceScore = Number.isFinite(price) && price > 0 ? Math.log10(price + 1) * 15 : 0;
   const boostScore = (Number(product?.boost) || 0) * 10;
 
   // Name match is the strongest signal. Price helps separate main devices from
   // low-cost parts without relying on store-specific accessory-name keywords.
-  return (nameScore * 10) + priceScore + boostScore;
+  return (nameScore * 10) + (softIntentScore * 8) + priceScore + boostScore;
 }
 
 function compareProductLineResults(a, b, terms, fallbackComparator = () => 0) {
@@ -9987,6 +10072,37 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       // accessories. For a bare device query, keep the actual devices first.
       results = filterAccessoriesForDeviceQuery(results, query, store, silent);
 
+      if (results.length > 0 && filterCheck.matchedSoftCategories?.length > 0) {
+        const specificSoftCategories = getMoreSpecificSoftCategoryMatches(
+          filterCheck.matchedSoftCategories,
+          store.softCategories || []
+        );
+        if (specificSoftCategories.length > 0) {
+          const specificMatches = results.filter(product =>
+            productMatchesAnySoftCategory(product, specificSoftCategories)
+          );
+          if (specificMatches.length > 0) {
+            if (!silent && specificMatches.length !== results.length) {
+              console.log(`[SIMPLE-SEARCH] 🎯 Specific soft-category preference: ${results.length} → ${specificMatches.length} matches for [${specificSoftCategories.join(', ')}]`);
+            }
+            results = specificMatches;
+          }
+        }
+      }
+
+      if (results.length > 0 && filterCheck.matchedSoftCategories?.length > 0) {
+        const strongIntentMatches = results.filter(product =>
+          scoreNameTextRelevance(product, queryWords) > 0 ||
+          scoreSoftCategoryIntent(product, queryWords) >= 100
+        );
+        if (strongIntentMatches.length > 0 && strongIntentMatches.length < results.length) {
+          if (!silent) {
+            console.log(`[SIMPLE-SEARCH] 🎯 Soft intent gate: ${results.length} → ${strongIntentMatches.length} strong matches for "${query}"`);
+          }
+          results = strongIntentMatches;
+        }
+      }
+
       // 🛡️ Hard category safety net: even with `phrase`, Atlas Search can occasionally
       // surface products whose category only partially overlaps (e.g. multi-value arrays).
       // JS post-filter guarantees hard categories are honoured as deal-breakers.
@@ -10565,6 +10681,14 @@ app.post("/fast-search", async (req, res) => {
           const fbSoftFilters = {};
           if (fb.softCategory) fbSoftFilters.softCategory = Array.isArray(fb.softCategory) ? fb.softCategory : [fb.softCategory];
           if (fb.color) fbSoftFilters.color = Array.isArray(fb.color) ? fb.color : [fb.color];
+          fbSoftFilters.softCategory = expandSoftCategoryTerms(
+            [
+              ...(fbSoftFilters.softCategory || []),
+              ...(filterCheck?.matchedSoftCategories || [])
+            ],
+            req.store?.softCategories || []
+          );
+          let explicitSoftMatches = [];
 
           const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
           let vectorResults = await collection.aggregate(vectorPipeline).toArray();
@@ -10585,7 +10709,8 @@ app.post("/fast-search", async (req, res) => {
                 $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }]
               }).limit(20).toArray();
               const seen = new Set(vectorResults.map(p => p._id.toString()));
-              const newSoft = softMatches.filter(p => isProductInStock(p) && !seen.has(p._id.toString()));
+              explicitSoftMatches = softMatches.filter(p => isProductVisible(p) && isProductInStock(p));
+              const newSoft = explicitSoftMatches.filter(p => !seen.has(p._id.toString()));
               if (newSoft.length > 0) {
                 vectorResults = [...newSoft, ...vectorResults]; // prepend: explicit soft-category intent
                 console.log(`[${requestId}] 🎯 Soft-category retrieval added ${newSoft.length} product(s) for [${fbSoftFilters.softCategory.join(', ')}]`);
@@ -10623,6 +10748,10 @@ app.post("/fast-search", async (req, res) => {
                 ? reranked.map(r => byId.get(r._id)).filter(Boolean)
                 : [];
               orderedResults = rerankedProducts; // [] when nothing is truly relevant → no noise
+              if (orderedResults.length === 0 && explicitSoftMatches.length > 0) {
+                orderedResults = explicitSoftMatches;
+                console.log(`[${requestId}] 🎯 Vector fallback rerank returned empty; keeping ${explicitSoftMatches.length} explicit soft-category match(es)`);
+              }
               console.log(`[${requestId}] 🎯 Vector fallback rerank kept ${rerankedProducts.length}/${vectorResults.length} (comprehensive=${reranked?.comprehensive ?? 'n/a'})`);
             } catch (rerankErr) {
               console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal), keeping raw vector order: ${rerankErr.message}`);
@@ -12060,6 +12189,14 @@ app.post("/search", async (req, res) => {
             const fbSoftFilters = {};
             if (fb.softCategory) fbSoftFilters.softCategory = Array.isArray(fb.softCategory) ? fb.softCategory : [fb.softCategory];
             if (fb.color) fbSoftFilters.color = Array.isArray(fb.color) ? fb.color : [fb.color];
+            fbSoftFilters.softCategory = expandSoftCategoryTerms(
+              [
+                ...(fbSoftFilters.softCategory || []),
+                ...(filterCheck?.matchedSoftCategories || [])
+              ],
+              finalSoftCategories
+            );
+            let explicitSoftMatches = [];
 
             const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
             let vectorResults = await collection.aggregate(vectorPipeline).toArray();
@@ -12078,7 +12215,8 @@ app.post("/search", async (req, res) => {
                   $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }]
                 }).limit(20).toArray();
                 const seen = new Set(vectorResults.map(p => p._id.toString()));
-                const newSoft = softMatches.filter(p => isProductInStock(p) && !seen.has(p._id.toString()));
+                explicitSoftMatches = softMatches.filter(p => isProductVisible(p) && isProductInStock(p));
+                const newSoft = explicitSoftMatches.filter(p => !seen.has(p._id.toString()));
                 if (newSoft.length > 0) {
                   vectorResults = [...newSoft, ...vectorResults];
                   console.log(`[${requestId}] 🎯 Soft-category retrieval added ${newSoft.length} product(s) for [${fbSoftFilters.softCategory.join(', ')}]`);
@@ -12103,6 +12241,10 @@ app.post("/search", async (req, res) => {
                 orderedResults = Array.isArray(reranked)
                   ? reranked.map(r => byId.get(r._id)).filter(Boolean)
                   : [];
+                if (orderedResults.length === 0 && explicitSoftMatches.length > 0) {
+                  orderedResults = explicitSoftMatches;
+                  console.log(`[${requestId}] 🎯 Vector fallback rerank returned empty; keeping ${explicitSoftMatches.length} explicit soft-category match(es)`);
+                }
                 console.log(`[${requestId}] 🎯 Vector fallback rerank kept ${orderedResults.length}/${vectorResults.length} (comprehensive=${reranked?.comprehensive ?? 'n/a'})`);
               } catch (rerankErr) {
                 console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal), keeping raw vector order: ${rerankErr.message}`);
