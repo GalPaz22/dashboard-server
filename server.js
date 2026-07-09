@@ -2151,6 +2151,7 @@ async function getStoreConfigByApiKey(apiKey) {
       enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
       firstMatchCategory: userDoc.credentials?.firstMatchCategory || false, // Toggle for category extraction on simple queries (default: false)
       colors: userDoc.credentials?.colors || "",
+      pinnedResults: Array.isArray(userDoc.credentials?.pinnedResults) ? userDoc.credentials.pinnedResults : [], // Merchandising: [{ query, productIds: [] }] — promoted products pinned to the top for matching queries
     };
   }, 300); // 5-minute TTL — short enough to pick up config changes
 }
@@ -6965,6 +6966,85 @@ async function getProductsByIds(ids, dbName, collectionName) {
  }
 }
 
+/* =========================================================== *\
+   PINNED / PROMOTED RESULTS (merchandising)
+   Store owners can pin specific products to the top of results
+   for chosen search phrases via the admin panel.
+\* =========================================================== */
+
+// Normalize a phrase for consistent matching: trim, unify quote chars, lowercase.
+function normalizePinnedText(str) {
+  if (!str || typeof str !== 'string') return '';
+  return normalizeQuoteCharacters(str.trim()).toLowerCase();
+}
+
+// Find the pinned rule whose (normalized) phrase is CONTAINED in the (normalized)
+// query. When several rules match, the longest phrase wins (most specific).
+// Returns the matching rule object or null.
+function findPinnedRuleForQuery(query, store) {
+  const rules = store?.pinnedResults;
+  if (!Array.isArray(rules) || rules.length === 0) return null;
+
+  const normQuery = normalizePinnedText(query);
+  if (!normQuery) return null;
+
+  let best = null;
+  let bestLen = -1;
+  for (const rule of rules) {
+    if (!rule || rule.enabled === false) continue;
+    const phrase = normalizePinnedText(rule.query);
+    if (!phrase || !Array.isArray(rule.productIds) || rule.productIds.length === 0) continue;
+    if (normQuery.includes(phrase) && phrase.length > bestLen) {
+      best = rule;
+      bestLen = phrase.length;
+    }
+  }
+  return best;
+}
+
+// Resolve the pinned products for a query: find the matching rule, fetch the
+// products (order-preserving, hidden ones filtered), and strip the heavy
+// `embedding` field. Returns { rule, products } or null. Never throws.
+async function getPinnedProductsForQuery(query, store) {
+  try {
+    const rule = findPinnedRuleForQuery(query, store);
+    if (!rule?.productIds?.length) return null;
+    const products = await getProductsByIds(rule.productIds, store.dbName, store.products);
+    if (!products.length) return null;
+    products.forEach(p => { if (p) delete p.embedding; });
+    return { rule, products };
+  } catch (err) {
+    console.warn('⚠️ Pinned results skipped:', err.message);
+    return null;
+  }
+}
+
+// Prepend pinned products to a search response payload, de-duplicating any that
+// already appear in the regular results. Handles both response shapes:
+//   - legacy: an array of products
+//   - modern: { products: [...], metadata: {...} }
+function mergePinnedProducts(payload, pinnedProducts) {
+  if (!Array.isArray(pinnedProducts) || pinnedProducts.length === 0) return payload;
+
+  const pinnedIds = new Set(pinnedProducts.map(p => p?._id?.toString()).filter(Boolean));
+
+  if (Array.isArray(payload)) {
+    const rest = payload.filter(p => !pinnedIds.has(p?._id?.toString()));
+    return [...pinnedProducts, ...rest];
+  }
+
+  if (payload && Array.isArray(payload.products)) {
+    const rest = payload.products.filter(p => !pinnedIds.has(p?._id?.toString()));
+    return {
+      ...payload,
+      products: [...pinnedProducts, ...rest],
+      metadata: { ...(payload.metadata || {}), pinnedCount: pinnedProducts.length }
+    };
+  }
+
+  return payload;
+}
+
 function isComplexQuery(query, filters, cleanedHebrewText) {
   if (Object.keys(filters).length > 0 && (!cleanedHebrewText || cleanedHebrewText.trim() === '')) {
       return false;
@@ -10571,6 +10651,16 @@ app.post("/fast-search", async (req, res) => {
 
     console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (limit: ${FAST_LIMIT})${session_id ? ` 👤 [personalized]` : ''}`);
 
+    // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
+    {
+      const pinned = await getPinnedProductsForQuery(query, req.store);
+      if (pinned) {
+        console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned.rule.query}") → prepending ${pinned.products.length} product(s)`);
+        const _json = res.json.bind(res);
+        res.json = (payload) => _json(mergePinnedProducts(payload, pinned.products));
+      }
+    }
+
     // ============================================================
     // STEP 1: Try simple-search (fast FUZZY regex-based search)
     // ============================================================
@@ -11705,6 +11795,16 @@ app.post("/simple-search", async (req, res) => {
 
   console.log(`[${requestId}] 🔍 Simple keyword search: "${query}"${session_id ? ` 👤 [personalized]` : ''}`);
 
+  // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
+  {
+    const pinned = await getPinnedProductsForQuery(query, req.store);
+    if (pinned) {
+      console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned.rule.query}") → prepending ${pinned.products.length} product(s)`);
+      const _json = res.json.bind(res);
+      res.json = (payload) => _json(mergePinnedProducts(payload, pinned.products));
+    }
+  }
+
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
@@ -11860,7 +11960,19 @@ app.post("/search", async (req, res) => {
   // Only use modern format (with pagination) if explicitly requested
   const isModernMode = modern === true || modern === 'true';
   const isLegacyMode = !isModernMode;
-  
+
+  // 📌 PINNED / PROMOTED RESULTS: if this query matches a merchandising rule,
+  // pre-fetch the pinned products and wrap res.json so they're prepended to the
+  // response, regardless of which of the many return branches below fires.
+  {
+    const pinned = await getPinnedProductsForQuery(query, req.store);
+    if (pinned) {
+      console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned.rule.query}") → prepending ${pinned.products.length} product(s)`);
+      const _json = res.json.bind(res);
+      res.json = (payload) => _json(mergePinnedProducts(payload, pinned.products));
+    }
+  }
+
   // Use limit from user config (via API key), fallback to 5 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
