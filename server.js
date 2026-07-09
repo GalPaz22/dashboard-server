@@ -681,6 +681,19 @@ function rankByNameTextRelevance(products, terms) {
   return scored.map(x => x.product);
 }
 
+function getSpecificNameRankTerms(terms) {
+  if (!Array.isArray(terms) || terms.length === 0) return [];
+  const genericProductTerms = new Set([
+    'שעון', 'שעונים', 'watch', 'watches', 'smartwatch', 'smartwatches',
+    'חכם', 'חכמה', 'ספורט', 'sport', 'sports'
+  ]);
+  const normalized = terms
+    .map(term => normalizeQuoteCharacters(String(term || '').toLowerCase()).trim())
+    .filter(term => term.length > 1);
+  const specific = normalized.filter(term => !genericProductTerms.has(term));
+  return specific.length > 0 ? specific : normalized;
+}
+
 function scoreProductLineResult(product, terms) {
   const nameScore = scoreNameTextRelevance(product, terms);
   const softIntentScore = scoreSoftCategoryIntent(product, terms);
@@ -12257,9 +12270,10 @@ app.post("/search", async (req, res) => {
             : (req.store?.colors || '');
           const fallbackContext = req.store?.context || context || 'wine shop';
 
-          const [extracted, queryEmbedding] = await Promise.all([
+          const [extracted, queryEmbedding, fallbackTranslation] = await Promise.all([
             extractFiltersBrief(query, categories, types, finalSoftCategories, fallbackContext, colorsForExtraction).catch(() => ({})),
-            withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)).catch(() => null)
+            withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)).catch(() => null),
+            translateQuery(query, fallbackContext).catch(() => null)
           ]);
 
           if (queryEmbedding) {
@@ -12317,7 +12331,7 @@ app.post("/search", async (req, res) => {
               let orderedResults = vectorResults;
               try {
               const reranked = await reorderResultsWithGPT(
-                vectorResults.slice(0, 20), query, query, [], false, fallbackContext,
+                vectorResults.slice(0, 20), fallbackTranslation || query, query, [], false, fallbackContext,
                   (fbSoftFilters.softCategory || fbSoftFilters.color) ? fbSoftFilters : null,
                   searchLimit, true, // useFastLLM
                   null, false, false, true // userProfile, isEmergencyMode, isFilterHeavy, withExpansionDecision
@@ -12334,6 +12348,12 @@ app.post("/search", async (req, res) => {
               } catch (rerankErr) {
                 console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal), keeping raw vector order: ${rerankErr.message}`);
               }
+
+              const translatedTerms = fallbackTranslation && fallbackTranslation !== query
+                ? fallbackTranslation.split(/\s+/).filter(term => term.length > 1)
+                : [];
+              const rankTerms = getSpecificNameRankTerms([...query.split(/\s+/), ...translatedTerms]);
+              orderedResults = rankByNameTextRelevance(orderedResults, rankTerms);
 
               let fbUserProfile = null;
               if (session_id) {
