@@ -7050,11 +7050,15 @@ function findPinnedRuleForQuery(query, store) {
   let bestLen = -1;
   for (const rule of rules) {
     if (!rule || rule.enabled === false) continue;
-    const phrase = normalizePinnedText(rule.query);
-    if (!phrase || !Array.isArray(rule.productIds) || rule.productIds.length === 0) continue;
-    if (phrase.length > bestLen && pinnedPhraseMatchesQuery(phrase, queryWords)) {
-      best = rule;
-      bestLen = phrase.length;
+    if (!Array.isArray(rule.productIds) || rule.productIds.length === 0) continue;
+    // A rule may hold several comma-separated terms — any of them can trigger it.
+    for (const rawPhrase of String(rule.query || '').split(',')) {
+      const phrase = normalizePinnedText(rawPhrase);
+      if (!phrase) continue;
+      if (phrase.length > bestLen && pinnedPhraseMatchesQuery(phrase, queryWords)) {
+        best = rule;
+        bestLen = phrase.length;
+      }
     }
   }
   return best;
