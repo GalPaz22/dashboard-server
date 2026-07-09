@@ -438,10 +438,14 @@ function expandSoftCategoryTerms(softCategories = [], availableSoftCategories = 
   for (const requestedCategory of requested) {
     const requestedLower = requestedCategory.toLowerCase().trim();
     if (!requestedLower) continue;
+    const requestedTokens = tokenizeLabel(requestedLower);
     for (const availableCategory of available) {
       const availableLower = availableCategory.toLowerCase().trim();
       if (!availableLower) continue;
-      if (availableLower.includes(requestedLower) || requestedLower.includes(availableLower)) {
+      const availableTokens = new Set(tokenizeLabel(availableLower));
+      const allRequestedTokensMatch = requestedTokens.length > 0 &&
+        requestedTokens.every(token => availableTokens.has(token));
+      if (availableLower.includes(requestedLower) || requestedLower.includes(availableLower) || allRequestedTokensMatch) {
         expanded.add(availableCategory);
       }
     }
@@ -605,7 +609,11 @@ function getMoreSpecificSoftCategoryMatches(matchedSoftCategories = [], availabl
     if (!normalized || matchedLower.has(normalized)) return false;
     return matched.some(base => {
       const baseNormalized = normalizeQuoteCharacters(base.toLowerCase()).trim();
-      return normalized.includes(baseNormalized);
+      if (normalized.includes(baseNormalized)) return true;
+
+      const baseTokens = tokenizeLabel(baseNormalized);
+      const categoryTokens = new Set(tokenizeLabel(normalized));
+      return baseTokens.length > 0 && baseTokens.every(token => categoryTokens.has(token));
     });
   });
 }
@@ -10148,11 +10156,65 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       // accessories. For a bare device query, keep the actual devices first.
       results = filterAccessoriesForDeviceQuery(results, query, store, silent);
 
+      let specificSoftCategories = [];
       if (results.length > 0 && filterCheck.matchedSoftCategories?.length > 0) {
-        const specificSoftCategories = getMoreSpecificSoftCategoryMatches(
+        specificSoftCategories = getMoreSpecificSoftCategoryMatches(
           filterCheck.matchedSoftCategories,
           store.softCategories || []
         );
+
+        const strictSoftCategories = [
+          ...new Set([
+            ...filterCheck.matchedSoftCategories,
+            ...specificSoftCategories
+          ])
+        ];
+        const strictSoftMatches = results.filter(product =>
+          productMatchesAnySoftCategory(product, strictSoftCategories)
+        );
+        if (strictSoftMatches.length !== results.length) {
+          if (!silent) {
+            console.log(`[SIMPLE-SEARCH] 🛡️ Soft cat JS filter: ${results.length} → ${strictSoftMatches.length} exact soft-category matches`);
+          }
+        }
+
+        try {
+          const existingIds = new Set(strictSoftMatches.map(product => product._id.toString()));
+          const strictSoftCategoryConditions = strictSoftCategories.map(category => ({
+            softCategory: {
+              $elemMatch: {
+                $regex: `^${escapeRegExp(category)}$`,
+                $options: 'i'
+              }
+            }
+          }));
+          const directSoftMatches = await collection.find({
+            $and: [
+              { $or: strictSoftCategoryConditions },
+              HIDDEN_MONGO_FILTER,
+              { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] }
+            ]
+          })
+            .limit(perfectMatchLimit)
+            .maxTimeMS(1000)
+            .toArray();
+          const newDirectSoftMatches = directSoftMatches.filter(product =>
+            !existingIds.has(product._id.toString()) &&
+            isProductVisible(product) &&
+            isProductInStock(product)
+          );
+          results = [...strictSoftMatches, ...newDirectSoftMatches];
+          results = filterAccessoriesForDeviceQuery(results, query, store, silent);
+          if (!silent && newDirectSoftMatches.length > 0) {
+            console.log(`[SIMPLE-SEARCH] 🎯 Direct soft-category supplement: +${newDirectSoftMatches.length} exact matches`);
+          }
+        } catch (directSoftErr) {
+          if (!silent) {
+            console.warn(`[SIMPLE-SEARCH] Direct soft-category supplement failed: ${directSoftErr.message}`);
+          }
+          results = strictSoftMatches;
+        }
+
         if (specificSoftCategories.length > 0) {
           try {
             const existingIds = results.map(product => product._id);
@@ -11330,9 +11392,13 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       // Check for prefix preposition match (e.g., "במבצע" starts with "ב", and "מבצע" matches "מבצעים")
       const strippedWordNorm = wordNorm.startsWith(p) ? wordNorm.substring(p.length) : wordNorm;
       const strippedWordQuotesNorm = wordQuotesNorm.startsWith(p) ? wordQuotesNorm.substring(p.length) : wordQuotesNorm;
+      const strippedCatNorm = catNorm.startsWith(p) ? catNorm.substring(p.length) : catNorm;
+      const strippedCatQuotesNorm = catQuotesNorm.startsWith(p) ? catQuotesNorm.substring(p.length) : catQuotesNorm;
 
       if (strippedWordNorm === catNorm || strippedWordNorm.startsWith(catNorm) || catNorm.startsWith(strippedWordNorm)) return true;
       if (strippedWordQuotesNorm === catQuotesNorm || strippedWordQuotesNorm.startsWith(catQuotesNorm) || catQuotesNorm.startsWith(strippedWordQuotesNorm)) return true;
+      if (wordNorm === strippedCatNorm || wordNorm.startsWith(strippedCatNorm) || strippedCatNorm.startsWith(wordNorm)) return true;
+      if (wordQuotesNorm === strippedCatQuotesNorm || wordQuotesNorm.startsWith(strippedCatQuotesNorm) || strippedCatQuotesNorm.startsWith(wordQuotesNorm)) return true;
     }
 
     if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
@@ -11341,6 +11407,14 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     if (catQuotesNorm.length >= 3 && includesWholeWord(wordQuotesNorm, catQuotesNorm)) return true;
 
     return false;
+  };
+
+  const isGenericProductIntentWord = (word) => {
+    const genericProductIntentWords = new Set(
+      ['שעון', 'שעונים', 'watch', 'watches', 'smartwatch', 'smartwatches']
+        .map(item => normalizeQuotes(normalizeFinalLetters(item)))
+    );
+    return genericProductIntentWords.has(normalizeQuotes(normalizeFinalLetters(word)));
   };
   
   // 🎯 FIX 1: Greedy multi-word category matching
@@ -11476,6 +11550,7 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   const softMatchedIndices = new Set();
   for (const cat of sortedSoftCategories) {
     const catWords = cat.split(/\s+/);
+    let matchedThisCategory = false;
 
     for (let i = 0; i <= queryWords.length - catWords.length; i++) {
       const querySlice = queryWords.slice(i, i + catWords.length);
@@ -11495,9 +11570,52 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
             matchedWordIndices.add(idx);
             softMatchedIndices.add(idx);
           });
+          matchedThisCategory = true;
           break;
         }
       }
+    }
+
+    // Allow a shorter user query to match a longer soft category when every
+    // meaningful query word appears in it: "שעון צלילה" → "שעון צלילה Descent".
+    if (!matchedThisCategory && catWords.length > queryWords.length) {
+      const matchingQueryIndices = [];
+      const allQueryWordsInCategory = queryWords.every((queryWord, idx) => {
+        const matches = catWords.some(catWord => isVariationMatch(queryWord, catWord));
+        if (matches) matchingQueryIndices.push(idx);
+        return matches;
+      });
+      const hasSpecificQueryWord = matchingQueryIndices.some(idx => !isGenericProductIntentWord(queryWords[idx]));
+      const alreadyMatchedByNonSoft = matchingQueryIndices.some(idx =>
+        matchedWordIndices.has(idx) && !softMatchedIndices.has(idx)
+      );
+
+      if (allQueryWordsInCategory && hasSpecificQueryWord && !alreadyMatchedByNonSoft) {
+        matchedSoftCategories.push(cat);
+        matchingQueryIndices.forEach(idx => {
+          matchedWordIndices.add(idx);
+          softMatchedIndices.add(idx);
+        });
+      }
+    }
+  }
+
+  if (matchedSoftCategories.length > 1 && queryWords.some(isGenericProductIntentWord)) {
+    const matchedCategoryTokenSets = matchedSoftCategories.map(category => ({
+      category,
+      tokens: tokenizeLabel(category)
+    }));
+    const narrowedSoftCategories = matchedCategoryTokenSets.filter(({ category, tokens }) => {
+      if (tokens.length !== 1) return true;
+      return !matchedCategoryTokenSets.some(other =>
+        other.category !== category &&
+        other.tokens.length > tokens.length &&
+        tokens.every(token => other.tokens.includes(token))
+      );
+    }).map(({ category }) => category);
+
+    if (narrowedSoftCategories.length > 0) {
+      matchedSoftCategories.splice(0, matchedSoftCategories.length, ...narrowedSoftCategories);
     }
   }
 
@@ -11553,8 +11671,13 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     }
   }
 
-  // Collect unmatched words
-  const unmatchedWords = queryWords.filter((_, idx) => !matchedWordIndices.has(idx));
+  const hasCategoryIntent = matchedHardCategories.length > 0 || matchedSoftCategories.length > 0;
+  // Collect unmatched words. If a specific category intent was already found,
+  // generic product nouns should not block a perfect filter match ("שעון גולף" → גולף).
+  const unmatchedWords = queryWords.filter((word, idx) => {
+    if (matchedWordIndices.has(idx)) return false;
+    return !(hasCategoryIntent && isGenericProductIntentWord(word));
+  });
 
   const isPerfectMatch = unmatchedWords.length === 0;
 
