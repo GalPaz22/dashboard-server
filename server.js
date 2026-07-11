@@ -454,6 +454,35 @@ function expandSoftCategoryTerms(softCategories = [], availableSoftCategories = 
   return [...expanded].filter(Boolean);
 }
 
+function inferOccasionSoftCategories(query, availableSoftCategories = []) {
+  const available = normalizeConfigList(availableSoftCategories);
+  if (available.length === 0) return [];
+
+  const queryTokens = tokenizeLabel(query);
+  const queryText = queryTokens.join(' ');
+  const wantsRomanticOccasion = [
+    'הצעת', 'הצעה', 'נישואים', 'נישואין', 'אירוסין', 'חתונה', 'רומנטי', 'רומנטית',
+    'romantic', 'proposal', 'engagement', 'wedding'
+  ].some(term => queryText.includes(term));
+  if (!wantsRomanticOccasion) return [];
+
+  const desiredCategoryMatchers = [
+    category => /רומנט|romantic/i.test(category),
+    category => /מתנ|gift/i.test(category),
+    category => /מבעבע|שמפ|sparkling|champagne/i.test(category)
+  ];
+
+  const inferred = [];
+  for (const matchesDesired of desiredCategoryMatchers) {
+    for (const category of available) {
+      if (matchesDesired(category) && !inferred.includes(category)) {
+        inferred.push(category);
+      }
+    }
+  }
+  return inferred;
+}
+
 function tokenizeLabel(label) {
   return normalizeQuoteCharacters(String(label || '').toLowerCase())
     .split(/[\s\-/,]+/)
@@ -2050,6 +2079,10 @@ app.post("/log-product-click", async (req, res) => {
 
     await clickEventsCollection.insertOne(clickEvent);
 
+    // 👤 PERSONALIZATION: Learn from click (fire-and-forget)
+    trackUserProfileInteraction(db, normalizedSessionId, productId, 'click').catch(err =>
+      console.error("[PROFILE] Failed to learn from click:", err.message)
+    );
 
     return res.status(200).json({ message: "Product click event logged successfully" });
   } catch (error) {
@@ -8707,13 +8740,14 @@ app.get("/search/load-more", async (req, res) => {
             const profileBoost = calculateProfileBoost(product, userProfile);
             return {
               ...product,
-              profileBoost,
-              boostedScore: (product.rrf_score || 0) + profileBoost
+              profileBoost
             };
           });
 
-          // Re-sort current batch: boost FIRST (3 > 2 > 1 > 0), then by boosted score
+          // Re-sort current batch: boost FIRST (3 > 2 > 1 > 0), then by boosted score.
+          // Boost is scaled to the batch's rrf_score range so it biases rather than overrides relevance.
           if (paginatedResults.some(p => (p.profileBoost || 0) > 0)) {
+            applyScaledProfileBoost(paginatedResults, 'rrf_score');
             paginatedResults.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.boostedScore || 0) - (x.boostedScore || 0)));
           }
         }
@@ -9413,6 +9447,11 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       } catch (profileError) {
         console.error(`[${requestId}] 👤 Error loading profile for Phase 1:`, profileError.message);
       }
+
+      // 👤 PERSONALIZATION: Learn searched categories (fire-and-forget)
+      trackQueryCategories(db, session_id, hardCategoriesArray, softCategoriesArray).catch(err =>
+        console.error(`[${requestId}] 👤 Failed to track query categories:`, err.message)
+      );
     }
 
     // CRITICAL: Filter Tier 1 results by extracted hard categories (if enabled via firstMatchCategory flag)
@@ -9596,6 +9635,8 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       } catch (profileError) {
         console.error(`[${requestId}] 👤 Error loading profile for Phase 2:`, profileError.message);
       }
+      // NOTE: query-category learning happens in Phase 1 only — Phase 2 is a follow-up
+      // request for the same user search, so tracking here would double-count.
     }
 
     console.log(`[${requestId}] Excluding ${excludeIds.length} products already shown in Phase 1`);
@@ -9713,15 +9754,14 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       filterOnly: false,
       softCategoryExpansion: true, // Mark as category-filtered
         explanation: null,
-        profileBoost: profileBoost,
-        boostedScore: (product.rrf_score || 0) + profileBoost
+        profileBoost: profileBoost
       };
     });
 
-    // PERSONALIZATION: Re-sort by boosted score if profile is active
-    // Phase 2 uses RRF scores, so personalization can be more aggressive here
+    // PERSONALIZATION: Re-sort by boosted score if profile is active.
+    // Boost is scaled to the set's rrf_score range so it biases rather than overrides relevance.
     if (userProfile && response.some(p => p.profileBoost > 0)) {
-      // personalization applied
+      applyScaledProfileBoost(response, 'rrf_score');
       response.sort((a, b) => (b.boostedScore || 0) - (a.boostedScore || 0));
     }
 
@@ -12578,6 +12618,9 @@ app.post("/search", async (req, res) => {
             const fbHardFilters = {};
             if (fb.category) fbHardFilters.category = Array.isArray(fb.category) ? fb.category : [fb.category];
             if (fb.type) fbHardFilters.type = Array.isArray(fb.type) ? fb.type : [fb.type];
+            if (!fbHardFilters.category && filterCheck?.matchedHardCategories?.length > 0) {
+              fbHardFilters.category = filterCheck.matchedHardCategories;
+            }
             if (fb.minPrice !== undefined && fb.minPrice !== null) fbHardFilters.minPrice = fb.minPrice;
             if (fb.maxPrice !== undefined && fb.maxPrice !== null) fbHardFilters.maxPrice = fb.maxPrice;
             if (fb.price !== undefined && fb.price !== null) fbHardFilters.price = fb.price;
@@ -12585,10 +12628,12 @@ app.post("/search", async (req, res) => {
             const fbSoftFilters = {};
             if (fb.softCategory) fbSoftFilters.softCategory = Array.isArray(fb.softCategory) ? fb.softCategory : [fb.softCategory];
             if (fb.color) fbSoftFilters.color = Array.isArray(fb.color) ? fb.color : [fb.color];
+            const inferredOccasionSoftCategories = inferOccasionSoftCategories(query, finalSoftCategories);
             fbSoftFilters.softCategory = expandSoftCategoryTerms(
               [
                 ...(fbSoftFilters.softCategory || []),
-                ...(filterCheck?.matchedSoftCategories || [])
+                ...(filterCheck?.matchedSoftCategories || []),
+                ...inferredOccasionSoftCategories
               ],
               finalSoftCategories
             );
@@ -12605,11 +12650,20 @@ app.post("/search", async (req, res) => {
             // products). The reranker then keeps only the relevant ones.
             if (fbSoftFilters.softCategory && fbSoftFilters.softCategory.length > 0) {
               try {
-                const softMatches = await collection.find({
-                  softCategory: { $in: fbSoftFilters.softCategory },
-                  ...HIDDEN_MONGO_FILTER,
-                  $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }]
-                }).limit(20).toArray();
+                const softMatchAndConditions = [
+                  { softCategory: { $in: fbSoftFilters.softCategory } },
+                  HIDDEN_MONGO_FILTER,
+                  { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+                ];
+                if (fbHardFilters.category?.length > 0) {
+                  softMatchAndConditions.push({
+                    $or: [
+                      { category: { $in: fbHardFilters.category } },
+                      { type: { $in: fbHardFilters.category } }
+                    ]
+                  });
+                }
+                const softMatches = await collection.find({ $and: softMatchAndConditions }).limit(25).toArray();
                 const seen = new Set(vectorResults.map(p => p._id.toString()));
                 explicitSoftMatches = softMatches.filter(p => isProductVisible(p) && isProductInStock(p));
                 const newSoft = explicitSoftMatches.filter(p => !seen.has(p._id.toString()));
@@ -12640,6 +12694,12 @@ app.post("/search", async (req, res) => {
                 if (orderedResults.length === 0 && explicitSoftMatches.length > 0) {
                   orderedResults = explicitSoftMatches;
                   console.log(`[${requestId}] 🎯 Vector fallback rerank returned empty; keeping ${explicitSoftMatches.length} explicit soft-category match(es)`);
+                }
+                if (inferredOccasionSoftCategories.length > 0 && explicitSoftMatches.length > orderedResults.length) {
+                  const orderedIds = new Set(orderedResults.map(product => product._id.toString()));
+                  const supplementalOccasionMatches = explicitSoftMatches.filter(product => !orderedIds.has(product._id.toString()));
+                  orderedResults = [...orderedResults, ...supplementalOccasionMatches];
+                  console.log(`[${requestId}] 🎁 Occasion soft-category supplement kept ${supplementalOccasionMatches.length} additional match(es) for [${inferredOccasionSoftCategories.join(', ')}]`);
                 }
                 console.log(`[${requestId}] 🎯 Vector fallback rerank kept ${orderedResults.length}/${vectorResults.length} (comprehensive=${reranked?.comprehensive ?? 'n/a'})`);
               } catch (rerankErr) {
@@ -13268,6 +13328,14 @@ app.post("/search", async (req, res) => {
         }
         return c;
       });
+    }
+
+    // 👤 PERSONALIZATION: Learn searched categories on the full/complex path (fire-and-forget).
+    // Phase 1/Phase 2 progressive requests return earlier and are tracked in Phase 1 only.
+    if (session_id) {
+      trackQueryCategories(db, session_id, hardFilters.category, softFilters.softCategory).catch(err =>
+        console.error(`[${requestId}] 👤 Failed to track query categories:`, err.message)
+      );
     }
 
     let tempNoHebrewWord = noHebrewWord ? [...noHebrewWord] : [];
@@ -14303,11 +14371,12 @@ app.post("/search", async (req, res) => {
               const profileBoost = calculateProfileBoost(product, llmUserProfile);
               return {
                 ...product,
-                profileBoost,
-                boostedScore: (product.rrf_score || 0) + profileBoost
+                profileBoost
               };
             });
-            
+            // Scale boost to the set's rrf_score range so it biases rather than overrides relevance
+            applyScaledProfileBoost(combinedResults, 'rrf_score');
+
             // Re-sort: PRIMARY by exact match (text quality), SECONDARY by personalization+RRF
             // This ensures text matches ALWAYS rank first, then personalized, then soft category
             if (combinedResults.some(p => (p.profileBoost || 0) > 0)) {
@@ -15954,7 +16023,10 @@ app.post("/search-to-cart", async (req, res) => {
         targetCollection = db.collection('checkout_events');
         break;
         case 'active_user_profile':
-        targetCollection = db.collection('profiles');
+        // Raw visitor-profile events must NOT go into 'profiles' — that collection holds
+        // the learned personalization profiles keyed by session_id, and event docs with a
+        // session_id but no preferences shadow real profiles in getUserProfileForBoosting.
+        targetCollection = db.collection('active_users');
         break;
       case 'add_to_cart':
         targetCollection = db.collection('cart');
@@ -16234,7 +16306,6 @@ app.post("/search-to-cart", async (req, res) => {
     if (document.event_type === 'add_to_cart' && document.product_id && normalizedSessionId) {
       try {
         const productsCollection = db.collection('products');
-        const profilesCollection = db.collection('profiles');
 
         const product = await productsCollection.findOne({
           $or: [
@@ -16246,102 +16317,40 @@ app.post("/search-to-cart", async (req, res) => {
         });
 
         if (product) {
-          const softCategories = Array.isArray(product.softCategory)
-            ? product.softCategory
-            : (product.softCategory ? [product.softCategory] : []);
-          const price = parseFloat(product.price) || 0;
-
-          // Update profile stats (cart weight = 3)
-          await profilesCollection.updateOne(
-            { session_id: normalizedSessionId },
-            {
-              $set: { updated_at: new Date() },
-              $inc: { 'stats.totalCarts': 1 },
-              $setOnInsert: {
-                session_id: normalizedSessionId,
-                created_at: new Date(),
-                preferences: { softCategories: {}, priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 } }
-              }
-            },
-            { upsert: true }
-          );
-
-          // Update soft category preferences
-          for (const category of softCategories) {
-            if (category && category.trim()) {
-              await profilesCollection.updateOne(
-                { session_id: normalizedSessionId },
-                { $inc: { [`preferences.softCategories.${category}.carts`]: 1 } }
-              );
-              categoriesLearned.push(category);
-            }
+          // Shared learning path (same as clicks/purchases): soft/hard categories,
+          // cartItems, stats, and BOTH global and per-category price ranges —
+          // the previous inline version skipped priceRangesByCategory.
+          const tracked = await trackUserProfileInteraction(db, normalizedSessionId, document.product_id, 'cart', product);
+          if (tracked) {
+            profileUpdated = true;
+            categoriesLearned = (Array.isArray(product.softCategory)
+              ? product.softCategory
+              : (product.softCategory ? [product.softCategory] : [])).filter(c => c && c.trim());
+            console.log(`[SEARCH-TO-CART] 👤 Profile updated from cart: softCategories=[${categoriesLearned.join(', ')}]`);
           }
-
-          // Update hard category preferences
-          const hardCategories = Array.isArray(product.category)
-            ? product.category
-            : (product.category ? [product.category] : []);
-          for (const category of hardCategories) {
-            if (category && category.trim()) {
-              await profilesCollection.updateOne(
-                { session_id: normalizedSessionId },
-                { $inc: { [`preferences.hardCategories.${category}.carts`]: 1 } }
-              );
-            }
-          }
-
-          // Track cart item (name + id) — keep last 50
-          if (product.name || product.id || product.ItemID) {
-            const cartItem = {
-              id: product.id || product.ItemID || null,
-              name: product.name || null,
-              addedAt: new Date()
-            };
-            await profilesCollection.updateOne(
-              { session_id: normalizedSessionId },
-              {
-                $push: {
-                  'preferences.cartItems': {
-                    $each: [cartItem],
-                    $slice: -50
-                  }
-                }
-              }
-            );
-          }
-
-          // Update price range
-          if (price > 0) {
-            const profile = await profilesCollection.findOne({ session_id: normalizedSessionId });
-            const priceRange = profile?.preferences?.priceRange || { min: null, max: null, sum: 0, count: 0 };
-
-            const newMin = priceRange.min === null ? price : Math.min(priceRange.min, price);
-            const newMax = priceRange.max === null ? price : Math.max(priceRange.max, price);
-            const newSum = (priceRange.sum || 0) + price;
-            const newCount = (priceRange.count || 0) + 1;
-
-            await profilesCollection.updateOne(
-              { session_id: normalizedSessionId },
-              {
-                $set: {
-                  'preferences.priceRange.min': newMin,
-                  'preferences.priceRange.max': newMax,
-                  'preferences.priceRange.avg': Math.round((newSum / newCount) * 100) / 100,
-                  'preferences.priceRange.sum': newSum,
-                  'preferences.priceRange.count': newCount
-                }
-              }
-            );
-          }
-
-          profileUpdated = true;
-          console.log(`[SEARCH-TO-CART] 👤 Profile updated from cart: softCategories=[${categoriesLearned.join(', ')}], hardCategories=[${hardCategories.join(', ')}]`);
         }
       } catch (profileError) {
         console.error("[SEARCH-TO-CART] Profile update error:", profileError.message);
       }
     }
-    
+
+    // =========================================================
+    // PERSONALIZATION: Learn purchases from checkout_completed
+    // (WooCommerce plugin sends cart_items through this route; the
+    // WooCommerce webhook path is separate and unaffected)
+    // =========================================================
+    if (document.event_type === 'checkout_completed' && normalizedSessionId && Array.isArray(document.cart_items) && document.cart_items.length > 0) {
+      for (const item of document.cart_items) {
+        if (!item || !item.product_id) continue;
+        // fire-and-forget: learns categories + price range per purchased product
+        trackUserProfileInteraction(db, normalizedSessionId, item.product_id, 'purchase').catch(err =>
+          console.error("[SEARCH-TO-CART] 👤 Failed to learn purchase:", err.message)
+        );
+      }
+      profileUpdated = true;
+      console.log(`[SEARCH-TO-CART] 👤 Learning ${document.cart_items.length} purchased items for session ${normalizedSessionId}`);
+    }
+
     res.status(201).json({
       success: true,
       message: `${document.event_type} event saved successfully`,
@@ -18060,13 +18069,12 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
       { session_id: sessionId },
       {
         $set: { updated_at: new Date() },
+        // NOTE: no `preferences: {}` in $setOnInsert — a whole-object set conflicts with
+        // the dotted $inc paths under preferences.* on upsert-insert. Dotted paths only.
         $setOnInsert: {
           session_id: sessionId,
           created_at: new Date(),
-          preferences: {
-            softCategories: {},
-            priceRange: { min: null, max: null, avg: null, sum: 0, count: 0 }
-          },
+          "preferences.priceRange": { min: null, max: null, avg: null, sum: 0, count: 0 },
           "stats.totalClicks": 0,
           "stats.totalCarts": 0,
           "stats.totalPurchases": 0,
@@ -18091,6 +18099,27 @@ async function trackQueryCategories(db, sessionId, hardCategories = null, softCa
  */
 async function learnPotentialSoftCategories(apiKey, unmatchedTerms = [], rejectedSoftCategories = [], query = '') {
   return;
+}
+
+/**
+ * Rescale raw profile boosts to the result set's own score range so
+ * personalization biases the ranking instead of overriding it.
+ * Raw boosts go up to ~60,000 while rrf_score can be ~0.03 on vector paths,
+ * so adding them directly discards relevance entirely. This maps the largest
+ * boost in the set to (maxInfluence × top score), keeping relative boost
+ * differences intact. Mutates each item: sets boostedScore from scoreField +
+ * scaled profileBoost (profileBoost itself stays raw for logging/response).
+ */
+function applyScaledProfileBoost(results, scoreField = 'rrf_score', maxInfluence = 0.5) {
+  if (!Array.isArray(results) || results.length === 0) return results;
+  const maxScore = results.reduce((m, p) => Math.max(m, p[scoreField] || 0), 0);
+  const maxBoost = results.reduce((m, p) => Math.max(m, p.profileBoost || 0), 0);
+  // No score scale to anchor to (all zero scores): keep raw boost so ordering still works
+  const scale = maxBoost > 0 ? (maxScore > 0 ? (maxInfluence * maxScore) / maxBoost : 1) : 0;
+  for (const p of results) {
+    p.boostedScore = (p[scoreField] || 0) + (p.profileBoost || 0) * scale;
+  }
+  return results;
 }
 
 /**
@@ -18270,6 +18299,121 @@ app.post("/profile/init", async (req, res) => {
 });
 
 /**
+ * POST /profile/merge
+ * Merge a guest session profile into a logged-in user's profile.
+ * Called by store plugins on login (identifier switches from sess_xxx to user_<id>),
+ * so preferences learned while browsing as a guest carry over.
+ * Idempotent: the guest profile is deleted after merging, so a repeated
+ * login event finds nothing to merge.
+ */
+app.post("/profile/merge", async (req, res) => {
+  try {
+    const apiKey = req.get("x-api-key");
+    const store = await getStoreConfigByApiKey(apiKey);
+
+    if (!apiKey || !store) {
+      return res.status(401).json({ error: "Invalid or missing API key" });
+    }
+
+    const { dbName } = store;
+    const { guest_session_id, user_session_id } = req.body;
+
+    if (!guest_session_id || !user_session_id) {
+      return res.status(400).json({ error: "Missing required fields: guest_session_id and user_session_id" });
+    }
+    if (guest_session_id === user_session_id) {
+      return res.status(400).json({ error: "guest_session_id and user_session_id must differ" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const profilesCollection = db.collection('profiles');
+
+    const guestProfile = await profilesCollection.findOne({ session_id: guest_session_id, preferences: { $exists: true } });
+    if (!guestProfile) {
+      return res.status(200).json({ success: true, merged: false, message: "No guest profile to merge" });
+    }
+
+    // Counters merge additively in one upsert
+    const incFields = {};
+    for (const group of ['softCategories', 'hardCategories']) {
+      const cats = guestProfile.preferences?.[group] || {};
+      for (const [cat, data] of Object.entries(cats)) {
+        for (const k of ['searches', 'clicks', 'carts', 'purchases']) {
+          if (data && data[k]) incFields[`preferences.${group}.${cat}.${k}`] = data[k];
+        }
+      }
+    }
+    const guestStats = guestProfile.stats || {};
+    for (const k of ['totalSearches', 'totalClicks', 'totalCarts', 'totalPurchases', 'totalSpent']) {
+      if (guestStats[k]) incFields[`stats.${k}`] = guestStats[k];
+    }
+
+    await profilesCollection.updateOne(
+      { session_id: user_session_id },
+      {
+        $set: { updated_at: new Date() },
+        $setOnInsert: { session_id: user_session_id, created_at: new Date() },
+        ...(Object.keys(incFields).length ? { $inc: incFields } : {}),
+        $addToSet: { merged_from: guest_session_id }
+      },
+      { upsert: true }
+    );
+
+    // Price ranges need min/max/sum/count recombination, so read-modify-write
+    const userProfile = await profilesCollection.findOne({ session_id: user_session_id });
+    const mergeRange = (a, b) => {
+      if (!b || !b.count) return null; // nothing to merge in
+      if (!a || !a.count) return b;
+      const sum = (a.sum || 0) + (b.sum || 0);
+      const count = (a.count || 0) + (b.count || 0);
+      return {
+        min: a.min === null ? b.min : (b.min === null ? a.min : Math.min(a.min, b.min)),
+        max: a.max === null ? b.max : (b.max === null ? a.max : Math.max(a.max, b.max)),
+        avg: count > 0 ? Math.round((sum / count) * 100) / 100 : null,
+        sum,
+        count
+      };
+    };
+
+    const setFields = {};
+    const mergedGlobal = mergeRange(userProfile?.preferences?.priceRange, guestProfile.preferences?.priceRange);
+    if (mergedGlobal) setFields['preferences.priceRange'] = mergedGlobal;
+
+    for (const [cat, range] of Object.entries(guestProfile.preferences?.priceRangesByCategory || {})) {
+      const merged = mergeRange(userProfile?.preferences?.priceRangesByCategory?.[cat], range);
+      if (merged) setFields[`preferences.priceRangesByCategory.${cat}`] = merged;
+    }
+
+    const followUpOps = {};
+    if (Object.keys(setFields).length) followUpOps.$set = setFields;
+    const guestCartItems = guestProfile.preferences?.cartItems || [];
+    if (guestCartItems.length) {
+      followUpOps.$push = { 'preferences.cartItems': { $each: guestCartItems, $slice: -50 } };
+    }
+    if (Object.keys(followUpOps).length) {
+      await profilesCollection.updateOne({ session_id: user_session_id }, followUpOps);
+    }
+
+    // Delete guest profile so repeated login events can't double-merge
+    await profilesCollection.deleteOne({ _id: guestProfile._id });
+
+    console.log(`[PROFILE] 🔀 Merged guest profile ${guest_session_id} into ${user_session_id}`);
+
+    res.status(200).json({
+      success: true,
+      merged: true,
+      guest_session_id,
+      user_session_id
+    });
+
+  } catch (error) {
+    console.error("[PROFILE] Error merging profiles:", error);
+    res.status(500).json({ error: "Server error", details: error.message });
+  }
+});
+
+/**
  * POST /profile/track-interaction
  * Update user profile based on product interaction
  * Learns soft categories and price preferences from user behavior
@@ -18415,7 +18559,9 @@ async function getUserProfileForBoosting(dbOrDbName, sessionId) {
       db = dbOrDbName;
     }
     
-    const profile = await db.collection('profiles').findOne({ session_id: sessionId });
+    // preferences $exists guard: skips stray event docs that were written into this
+    // collection with a session_id but no learned data (they'd shadow the real profile)
+    const profile = await db.collection('profiles').findOne({ session_id: sessionId, preferences: { $exists: true } });
 
     // Only return profile if it has meaningful data
     if (profile && profile.preferences) {
@@ -19000,6 +19146,13 @@ app.post("/product-click", async (req, res) => {
     const insertResult = await clicksCollection.insertOne(clickDocument);
 
     console.log(`[PRODUCT CLICK] Tracked: event_id=${clickDocument.event_id}, session=${normalizedSessionId}, product=${product_id}, type=${interactionType}, source=${source || 'unknown'}, zero_recovery=${zero_recovery}, query="${clickDocument.search_query || 'none'}"`);
+
+    // 👤 PERSONALIZATION: Learn from interaction (fire-and-forget).
+    // Reuses fetchedProduct when the name-enrichment lookup already found it.
+    const profileInteractionType = ['click', 'cart', 'purchase'].includes(interactionType) ? interactionType : 'click';
+    trackUserProfileInteraction(db, normalizedSessionId, product_id, profileInteractionType, fetchedProduct).catch(err =>
+      console.error("[PROFILE] Failed to learn from product click:", err.message)
+    );
 
 
     res.status(201).json({
