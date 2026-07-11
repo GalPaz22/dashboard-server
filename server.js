@@ -520,10 +520,11 @@ function productIsAccessory(product = {}, accessoryCategories = []) {
   const productCats = (Array.isArray(product.category) ? product.category : [product.category])
     .filter(Boolean)
     .map(c => String(c).toLowerCase().trim());
+  const productName = String(product.name || '').toLowerCase().trim();
 
   if (productCats.some(c => accessoryCategories.includes(c))) return true;
   // Safety net: category label itself reads like an accessory (handles unlisted variants).
-  return productCats.some(labelLooksLikeAccessory);
+  return productCats.some(labelLooksLikeAccessory) || labelLooksLikeAccessory(productName);
 }
 
 // Drop accessory products when the query targets a device product-line.
@@ -10395,6 +10396,27 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
             console.warn(`[SIMPLE-SEARCH] Direct soft-category supplement failed: ${directSoftErr.message}`);
           }
           results = strictSoftMatches;
+        }
+
+        try {
+          const existingIds = new Set(results.map(product => product._id.toString()));
+          const directNameMatches = await directNameFallbackProducts(collection, query, perfectMatchLimit, 700);
+          const newDirectNameMatches = filterAccessoriesForDeviceQuery(directNameMatches, query, store, silent)
+            .filter(product =>
+              !existingIds.has(product._id.toString()) &&
+              isProductVisible(product) &&
+              isProductInStock(product)
+            );
+          if (newDirectNameMatches.length > 0) {
+            results = [...newDirectNameMatches, ...results];
+            if (!silent) {
+              console.log(`[SIMPLE-SEARCH] 🎯 Direct-name supplement for soft-category query: +${newDirectNameMatches.length} matches`);
+            }
+          }
+        } catch (directNameErr) {
+          if (!silent) {
+            console.warn(`[SIMPLE-SEARCH] Direct-name supplement failed: ${directNameErr.message}`);
+          }
         }
 
         if (specificSoftCategories.length > 0) {
