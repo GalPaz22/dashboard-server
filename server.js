@@ -184,7 +184,7 @@ async function directNameFallbackProducts(collection, query, limit = 10, maxTime
     .toLowerCase()
     .trim()
     .split(/\s+/)
-    .filter(term => term.length >= 2)
+    .filter(term => term.length >= 2 || /^\d+$/.test(term))
     .slice(0, 5);
 
   if (terms.length === 0) return [];
@@ -258,7 +258,7 @@ async function boostedProductsMatchingQuery(collection, query, limit = 5, maxTim
     .toLowerCase()
     .trim()
     .split(/\s+/)
-    .filter(term => term.length >= 2)
+    .filter(term => term.length >= 2 || /^\d+$/.test(term))
     .slice(0, 5);
 
   if (terms.length === 0) return [];
@@ -294,6 +294,29 @@ async function boostedProductsMatchingQuery(collection, query, limit = 5, maxTim
     console.warn(`[AUTOCOMPLETE] boosted-product lookup failed for "${query}": ${error.message}`);
     return [];
   }
+}
+
+function scoreAutocompleteNameMatch(suggestion, query) {
+  const suggestionText = normalizeQuoteCharacters(String(suggestion || '').toLowerCase()).trim();
+  const queryText = normalizeQuoteCharacters(String(query || '').toLowerCase()).trim();
+  if (!suggestionText || !queryText) return 0;
+
+  const queryTokens = tokenizeLabel(queryText)
+    .filter(token => token.length >= 2 || /^\d+$/.test(token));
+  if (queryTokens.length === 0) return 0;
+
+  const suggestionTokens = tokenizeLabel(suggestionText);
+  const suggestionTokenSet = new Set(suggestionTokens);
+  const matchedTokenCount = queryTokens.filter(token =>
+    suggestionTokenSet.has(token) || suggestionText.includes(token)
+  ).length;
+
+  let score = matchedTokenCount * 20;
+  if (matchedTokenCount === queryTokens.length) score += 300;
+  if (suggestionText.includes(queryText)) score += 120;
+  if (suggestionText.startsWith(queryText)) score += 80;
+  if (suggestionTokens[0] && queryTokens[0] && suggestionTokens[0] === queryTokens[0]) score += 40;
+  return score;
 }
 
 function formatFallbackProduct(product, query, mode = 'direct-name-fallback') {
@@ -362,6 +385,41 @@ async function findDirectExactNameMatches(collection, query, limit = 10) {
   }
 
   return [];
+}
+
+async function findDirectPrefixNameMatches(collection, query, limit = 15) {
+  const normalized = normalizeQuoteCharacters(String(query || '').trim());
+  if (normalized.length < 2) return [];
+
+  const variants = [...new Set([normalized, ...getExactNameQueryVariants(query)])].filter(Boolean);
+  const prefixPatterns = variants.map(variant =>
+    new RegExp(`^${escapeRegExp(variant)}(?:\\s|$)`, 'iu')
+  );
+
+  try {
+    const docs = await collection.find({
+      $and: [
+        { $or: prefixPatterns.map(pattern => ({ name: pattern })) },
+        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        HIDDEN_MONGO_FILTER
+      ]
+    })
+      .project({ name: 1, price: 1, image: 1, url: 1, id: 1, boost: 1 })
+      .limit(Math.max(limit * 2, 20))
+      .maxTimeMS(400)
+      .toArray();
+
+    const visible = docs.filter(product => isProductVisible(product) && isProductInStock(product));
+    if (visible.length === 0) return [];
+
+    const rankTerms = getSpecificNameRankTerms(query.split(/\s+/));
+    return rankByNameTextRelevance(visible, rankTerms).slice(0, limit);
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[DIRECT PREFIX] Prefix lookup failed for "${query}":`, error.message);
+    }
+    return [];
+  }
 }
 
 function isNumericModelQuery(query) {
@@ -443,9 +501,11 @@ function expandSoftCategoryTerms(softCategories = [], availableSoftCategories = 
       const availableLower = availableCategory.toLowerCase().trim();
       if (!availableLower) continue;
       const availableTokens = new Set(tokenizeLabel(availableLower));
+      const availableTokenCount = availableTokens.size;
       const allRequestedTokensMatch = requestedTokens.length > 0 &&
-        requestedTokens.every(token => availableTokens.has(token));
-      if (availableLower.includes(requestedLower) || requestedLower.includes(availableLower) || allRequestedTokensMatch) {
+        requestedTokens.every(token => availableTokens.has(token)) &&
+        availableTokenCount >= requestedTokens.length;
+      if (availableLower.includes(requestedLower) || allRequestedTokensMatch) {
         expanded.add(availableCategory);
       }
     }
@@ -481,6 +541,50 @@ function inferOccasionSoftCategories(query, availableSoftCategories = []) {
     }
   }
   return inferred;
+}
+
+/**
+ * Given a list of query words and available soft categories, find the soft categories
+ * that best match the query words (allowing for partial matches and variations).
+ * This is used for perfect filter match, where we need to know all soft categories
+ * that are mentioned in the query.
+ */
+function findMatchingSoftCategoriesForQueryWords(queryWords, availableSoftCategories, isVariationMatchFn) {
+  const matched = new Set();
+  const matchedIndices = new Set();
+
+  // Prioritize multi-word matches first
+  const sortedAvailable = [...availableSoftCategories].sort((a, b) => b.split(/\s+/).length - a.split(/\s+/).length);
+
+  for (const softCat of sortedAvailable) {
+    const softCatWords = softCat.split(/\s+/);
+    for (let i = 0; i <= queryWords.length - softCatWords.length; i++) {
+      const querySlice = queryWords.slice(i, i + softCatWords.length);
+      const allMatch = softCatWords.every((catWord, idx) =>
+        isVariationMatchFn(querySlice[idx], catWord)
+      );
+      if (allMatch) {
+        const sliceIndices = Array.from({ length: softCatWords.length }, (_, idx) => i + idx);
+        // Only add if no word in this slice was already used by a longer match
+        if (!sliceIndices.some(idx => matchedIndices.has(idx))) {
+          matched.add(softCat);
+          sliceIndices.forEach(idx => matchedIndices.add(idx));
+        }
+      }
+    }
+  }
+
+  // For remaining unmatched query words, try single word matches
+  const unmatchedQueryWords = queryWords.filter((_, idx) => !matchedIndices.has(idx));
+  for (const qWord of unmatchedQueryWords) {
+    for (const softCat of availableSoftCategories) {
+      if (isVariationMatchFn(qWord, softCat)) {
+        matched.add(softCat);
+      }
+    }
+  }
+
+  return [...matched];
 }
 
 function tokenizeLabel(label) {
@@ -562,7 +666,7 @@ function scoreNameTextRelevance(product, terms) {
   let score = 0;
   for (const raw of terms) {
     const term = String(raw || '').toLowerCase().trim();
-    if (term.length < 2) continue;
+    if (term.length < 2 && !/^\d+$/.test(term)) continue;
     const idx = tokens.indexOf(term);
     if (idx !== -1) {
       // Standalone token → the product IS the thing (not "for" the thing)
@@ -727,7 +831,7 @@ function getSpecificNameRankTerms(terms) {
   ]);
   const normalized = terms
     .map(term => normalizeQuoteCharacters(String(term || '').toLowerCase()).trim())
-    .filter(term => term.length > 1);
+    .filter(term => term.length > 1 || /^\d+$/.test(term));
   const specific = normalized.filter(term => !genericProductTerms.has(term));
   return specific.length > 0 ? specific : normalized;
 }
@@ -1166,6 +1270,188 @@ const geographyTranslationMap = {
   'יפני': ['יפן', 'japan', 'japanese'],
 };
 
+const HEBREW_SINGLE_LETTER_PREFIXES = ['מ', 'ב', 'ל', 'ה', 'ו'];
+
+function normalizeList(list) {
+  if (!list) return [];
+  const arr = Array.isArray(list) ? list : String(list).split(',');
+  return arr.map(item => String(item).trim()).filter(Boolean);
+}
+
+function normalizeFilterText(value) {
+  return normalizeQuoteCharacters(String(value || '').toLowerCase()).trim();
+}
+
+function removeHebrewMatres(value) {
+  return normalizeFilterText(value).replace(/[יו]/g, '');
+}
+
+function getHebrewPrefixStrippedVariants(value) {
+  const normalized = normalizeFilterText(value);
+  const variants = [normalized];
+  if (/^[\u0590-\u05FF]+$/.test(normalized) && normalized.length >= 4) {
+    for (const prefix of HEBREW_SINGLE_LETTER_PREFIXES) {
+      if (normalized.startsWith(prefix) && normalized.length > 3) {
+        variants.push(normalized.slice(1));
+      }
+    }
+  }
+  return [...new Set(variants.filter(Boolean))];
+}
+
+function getHebrewSuffixStrippedVariants(value) {
+  const normalized = normalizeFilterText(value);
+  const variants = [normalized];
+  const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
+  for (const suffix of hebrewSuffixes) {
+    if (normalized.endsWith(suffix) && normalized.length > suffix.length + 2) {
+      variants.push(normalized.slice(0, -suffix.length));
+    }
+  }
+  return [...new Set(variants.filter(Boolean))];
+}
+
+function getFlexibleValueVariants(value, fieldName = 'softCategory') {
+  const baseVariants = getHebrewPrefixStrippedVariants(value)
+    .flatMap(v => getHebrewSuffixStrippedVariants(v));
+  const variants = new Set(baseVariants);
+
+  if (fieldName === 'softCategory') {
+    for (const variant of baseVariants) {
+      const geoVariants = geographyTranslationMap[variant] || [];
+      geoVariants.forEach(v => variants.add(normalizeFilterText(v)));
+    }
+  }
+
+  if (fieldName === 'color') {
+    for (const variant of baseVariants) {
+      const similarColors = colorSimilarityMap[variant] || [];
+      similarColors.forEach(v => variants.add(normalizeFilterText(v)));
+    }
+  }
+
+  return [...variants].filter(Boolean);
+}
+
+function resolveFlexibleListValue(value, list, fieldName = 'softCategory') {
+  const normalizedList = normalizeList(list);
+  if (!value || normalizedList.length === 0) return null;
+
+  const variants = getFlexibleValueVariants(value, fieldName);
+  const listEntries = normalizedList.map(item => ({
+    item,
+    lower: normalizeFilterText(item),
+    normalized: removeHebrewMatres(item),
+    tokens: tokenizeLabel(item)
+  }));
+
+  for (const variant of variants) {
+    const exact = listEntries.find(entry => entry.lower === variant);
+    if (exact) return exact.item;
+  }
+
+  for (const variant of variants) {
+    const variantNorm = removeHebrewMatres(variant);
+    const normalizedExact = listEntries.find(entry => entry.normalized === variantNorm);
+    if (normalizedExact) return normalizedExact.item;
+  }
+
+  if (fieldName === 'softCategory') {
+    for (const entry of listEntries) {
+      const geoVariants = getFlexibleValueVariants(entry.lower, 'softCategory');
+      if (variants.some(variant => geoVariants.includes(variant) || geoVariants.includes(removeHebrewMatres(variant)))) {
+        return entry.item;
+      }
+    }
+  }
+
+  if (fieldName === 'color') {
+    for (const entry of listEntries) {
+      const similarColors = colorSimilarityMap[entry.lower] || [];
+      if (similarColors.some(color => variants.includes(normalizeFilterText(color)))) {
+        return entry.item;
+      }
+    }
+  }
+
+  const multiWordVariants = variants.filter(variant => tokenizeLabel(variant).length > 1);
+  for (const variant of multiWordVariants) {
+    const substringMatch = listEntries.find(entry =>
+      (includesWholeWord(entry.lower, variant) || includesWholeWord(variant, entry.lower)) &&
+      Math.min(variant.length, entry.lower.length) >= 3
+    );
+    if (substringMatch) return substringMatch.item;
+  }
+
+  return null;
+}
+
+function extractSoftCategoriesFromQuery(query, softCategories = '') {
+  const softCategoryList = normalizeList(softCategories);
+  if (!query || softCategoryList.length === 0) return [];
+
+  const queryTokens = tokenizeLabel(query).filter(token => token.length >= 2);
+  const candidates = [];
+
+  for (let size = Math.min(4, queryTokens.length); size >= 1; size--) {
+    for (let i = 0; i <= queryTokens.length - size; i++) {
+      candidates.push(queryTokens.slice(i, i + size).join(' '));
+    }
+  }
+
+  const matches = [];
+  for (const candidate of [...new Set(candidates)]) {
+    const resolved = resolveFlexibleListValue(candidate, softCategoryList, 'softCategory');
+    if (resolved && !matches.includes(resolved)) {
+      matches.push(resolved);
+    }
+  }
+
+  return matches;
+}
+
+function mergeSoftCategoryFilters(existingSoftCategory, query, softCategories = '', excludedSoftCategories = []) {
+  const softCategoryList = normalizeList(softCategories);
+  const excluded = new Set(normalizeList(excludedSoftCategories).map(category => normalizeFilterText(category)));
+  const existing = normalizeList(existingSoftCategory)
+    .map(category => resolveFlexibleListValue(category, softCategoryList, 'softCategory'))
+    .filter(category => category && querySupportsSoftCategory(query, category));
+  const detected = extractSoftCategoriesFromQuery(query, softCategoryList)
+    .filter(category => category && !excluded.has(normalizeFilterText(category)));
+  const merged = expandSoftCategoryTerms([...existing, ...detected], softCategoryList);
+  const unique = [...new Set(merged)].filter(category => category && !excluded.has(normalizeFilterText(category)));
+  if (unique.length === 0) return undefined;
+  return unique.length === 1 ? unique[0] : unique;
+}
+
+function querySupportsSoftCategory(query, softCategory) {
+  const category = normalizeFilterText(softCategory);
+  if (!query || !category) return false;
+
+  const queryTokens = tokenizeLabel(query).filter(token => token.length >= 2);
+  if (queryTokens.length === 0) return false;
+
+  const queryText = queryTokens.join(' ');
+  const categoryTokens = tokenizeLabel(category);
+
+  if (queryText === category || includesWholeWord(queryText, category)) return true;
+
+  const categoryVariants = getFlexibleValueVariants(category, 'softCategory');
+  for (let size = Math.min(4, queryTokens.length); size >= 1; size--) {
+    for (let i = 0; i <= queryTokens.length - size; i++) {
+      const candidate = queryTokens.slice(i, i + size).join(' ');
+      const candidateVariants = getFlexibleValueVariants(candidate, 'softCategory');
+      if (candidateVariants.some(variant => categoryVariants.includes(variant))) {
+        return true;
+      }
+    }
+  }
+
+  return categoryTokens.length > 1 && categoryTokens.every(catToken =>
+    queryTokens.some(queryToken => queryToken === catToken)
+  );
+}
+
 /**
  * Get similar colors for flexible color matching
  * @param {string|string[]} colors - Color or array of colors
@@ -1599,19 +1885,11 @@ function extractFiltersFallback(query, categories = '', types = '', softCategori
   // ⚡ IMPROVED: Match each word individually AND full phrase against ALL fields
   const queryWords = queryLower.split(/\s+/).filter(w => w.length >= 2);
 
-  // Helper: Check if a word/phrase matches any item in a list (case-insensitive, partial match)
-  const matchInList = (text, list) => {
-    if (!list) return null;
-    const items = typeof list === 'string' ? list.split(',').map(s => s.trim()) : list;
-
-    // Try exact match first
-    for (const item of items) {
-      const itemLower = item.toLowerCase();
-      if (text === itemLower || text.includes(itemLower) || itemLower.includes(text)) {
-        return item;
-      }
-    }
-    return null;
+  // Helper: Check if a word/phrase matches any item in a list.
+  // Exact and normalized labels win over partials, so "פינו נואר" does not get
+  // collapsed to the first "פינו ..." soft category in the merchant list.
+  const matchInList = (text, list, fieldName = 'softCategory') => {
+    return resolveFlexibleListValue(text, list, fieldName);
   };
 
   // Extract categories (check full query and each word)
@@ -1623,7 +1901,7 @@ function extractFiltersFallback(query, categories = '', types = '', softCategori
   // Extract types (check each word - e.g., "כשר", "יבש", "מתוק")
   if (!filters.type) {
     for (const word of queryWords) {
-      const matchedType = matchInList(word, types);
+      const matchedType = matchInList(word, types, 'type');
       if (matchedType) {
         filters.type = matchedType;
         break; // Take first match
@@ -1631,14 +1909,9 @@ function extractFiltersFallback(query, categories = '', types = '', softCategori
     }
   }
 
-  // Extract soft categories (check each word - e.g., "ישראלי", "איטלקי", "פירותי")
-  const matchedSoftCategories = [];
-  for (const word of queryWords) {
-    const matched = matchInList(word, softCategories);
-    if (matched && !matchedSoftCategories.includes(matched)) {
-      matchedSoftCategories.push(matched);
-    }
-  }
+  // Extract soft categories from full phrases before individual tokens.
+  // This catches "פינו נואר" as a phrase and normalizes variants like "איטלה".
+  const matchedSoftCategories = extractSoftCategoriesFromQuery(query, softCategories);
   if (matchedSoftCategories.length > 0) {
     filters.softCategory = matchedSoftCategories;
   }
@@ -4288,6 +4561,8 @@ Extract the following filters from the query if they exist:
 6. softCategory - FLEXIBLE MATCHING ALLOWED with DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}
    - Extract contextual preferences (e.g., origins, grape varieties, food pairings, occasions, regions)
    - You have MORE FLEXIBILITY here - you can intelligently map related terms
+   - SEMANTIC MATCHING: If the query implies a soft category without saying it literally, extract the closest matching soft category when it is appropriate and useful. Examples: "לפסטה" can imply pasta/Italian-pairing categories; "בורגון" can imply France/Pinot Noir/Chardonnay only if those exact values exist and the query context supports them.
+   - DO NOT over-infer: only add semantic soft categories that are directly supported by the user's words or strong domain knowledge. Do not add broad categories just because they are generally related.
    - EXTRACT AGGRESSIVELY: Extract EVERY relevant attribute you can identify from the query. If a query has multiple characteristics, extract ALL of them.
    - GEOGRAPHIC TERMS: "italian"/"איטלקי" → look for "Italy"/"איטליה" in list. "French"/"צרפתי" → "France"/"צרפת". "Spanish"/"ספרדי" → "Spain"/"ספרד". Always map adjective forms to country/region names in the list.
    - FOOD PAIRING: "for pasta"/"לפסטה" → look for "pasta"/"פסטה" in list. "for steak"/"לסטייק" → "steak"/"סטייק" or "meat"/"בשר".
@@ -4323,6 +4598,7 @@ MATCHING STRICTNESS LEVELS:
 - category: STRICT - Requires solid, clear match. Must be exact or near-exact match with existing categories.
 - type: STRICT - Must exist exactly in the list, but synonyms can be mapped intelligently.
 - softCategory: FLEXIBLE - Be aggressive. Extract every relevant attribute. Map synonyms, translations, adjective-to-noun forms. The more you extract, the better.
+- softCategory semantic rule: infer domain-relevant soft categories only when they are appropriate for the query and present in the list; avoid speculative or generic additions.
 - color: FLEXIBLE - Same as softCategory. Map color synonyms and translations to values in the list.
 
 EXTRACTION EXAMPLES:
@@ -4342,6 +4618,7 @@ CRITICAL VALIDATION:
 - For category: Only extract if there's a solid, unambiguous match in the list
 - For type: Must exist exactly in the list
 - For softCategory: Be creative with mapping — geographic adjectives to country names, food mentions to pairings, style adjectives to attributes. The result must be in the provided list.
+- For semantic softCategory extraction: choose the store-list value that best represents the user's intent, even when wording differs, but only if the mapping is defensible.
 - For color: ALWAYS extract any color you detect, mapping shades/synonyms to the closest available color. "חמרה"→"אדום", "בורדו"→"אדום", "תכלת"→"כחול", "שמנת"→"לבן", etc.
 - If you cannot find a match for category/type/softCategory, do NOT extract that filter. But for COLOR, always try to map to the closest parent color.
 
@@ -4411,7 +4688,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
                   items: { type: Type.STRING }
                 }
               ],
-              description: `Soft filter - FLEXIBLE MATCHING with DOMAIN KNOWLEDGE. Extract AGGRESSIVELY — every geographic term, grape variety, food pairing, occasion, style, and character attribute from the query. Map adjective forms to nouns (e.g., "italian" → "Italy", "איטלקי" → "איטליה"). Available soft categories: ${softCategories}. The final extracted value MUST exist in the provided list. Multiple values allowed as array.`
+              description: `Soft filter - FLEXIBLE SEMANTIC MATCHING with DOMAIN KNOWLEDGE. Extract every appropriate geographic term, grape variety, region, food pairing, occasion, style, and character attribute from the query. Map wording and semantic intent to existing list values (e.g., "italian" → "Italy", "איטלקי" → "איטליה", "לפסטה" → pasta/Italian-pairing if listed). Do not over-infer speculative categories. Available soft categories: ${softCategories}. The final extracted value MUST exist in the provided list. Multiple values allowed as array.`
             },
             color: {
               oneOf: [
@@ -4512,130 +4789,18 @@ Return the extracted filters in JSON format. Only extract values that exist in t
         valueArr = [values];
       }
 
-      const allValues = valueArr.map(v => String(v).trim().replace(/^,+|,+$/g, '').trim());
-      let validValues = allValues.filter(v => list.some(l => l.toLowerCase() === v.toLowerCase()));
-
-      // For softCategory and color: try fuzzy matching for values that didn't match exactly
-      // This catches cases like "italian" → "Italy", "איטלקי" → "איטליה", "פרימיטיבו" vs "פרמיטיבו"
-      // For color: catches Hebrew suffix forms like "אדומה" → "אדום", "לבנה" → "לבן"
-      if (name === 'softCategory' || name === 'color') {
-        const unmatched = allValues.filter(v => !list.some(l => l.toLowerCase() === v.toLowerCase()));
-        for (const v of unmatched) {
-          const vLower = v.toLowerCase();
-          // Try substring match (e.g., "ital" in "italy" or "italy" in "italian")
-          let fuzzyMatch = list.find(l => {
-            const lLower = l.toLowerCase();
-            return (includesWholeWord(lLower, vLower) || includesWholeWord(vLower, lLower)) &&
-                   Math.min(vLower.length, lLower.length) >= 3; // Min 3 chars to avoid false positives
-          });
-          // Try Hebrew normalized match (removing optional י ו characters)
-          if (!fuzzyMatch) {
-            const vNormalized = vLower.replace(/[יו]/g, '');
-            fuzzyMatch = list.find(l => {
-              const lNormalized = l.toLowerCase().replace(/[יו]/g, '');
-              return lNormalized === vNormalized;
-            });
-          }
-          // For color and softCategory: try stripping Hebrew adjective suffixes (ה, ים, ות, ית)
-          if (!fuzzyMatch) {
-            const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
-            for (const suffix of hebrewSuffixes) {
-              if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
-                const stripped = vLower.slice(0, -suffix.length);
-                fuzzyMatch = list.find(l => l.toLowerCase() === stripped);
-                if (fuzzyMatch) break;
-                // Also try normalized match on stripped form
-                const strippedNorm = stripped.replace(/[יו]/g, '');
-                fuzzyMatch = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === strippedNorm);
-                if (fuzzyMatch) break;
-              }
-            }
-          }
-          // For color: try cross-language matching via colorSimilarityMap
-          if (!fuzzyMatch && name === 'color') {
-            // Forward lookup: extracted value → similar colors → find in list
-            if (colorSimilarityMap[vLower]) {
-              for (const similar of colorSimilarityMap[vLower]) {
-                fuzzyMatch = list.find(l => l.toLowerCase() === similar.toLowerCase());
-                if (fuzzyMatch) break;
-              }
-            }
-            // Reverse lookup: list items → their similar colors → check if extracted value is there
-            if (!fuzzyMatch) {
-              for (const listItem of list) {
-                const listLower = listItem.toLowerCase();
-                const similars = colorSimilarityMap[listLower];
-                if (similars && similars.some(s => s.toLowerCase() === vLower)) {
-                  fuzzyMatch = listItem;
-                  break;
-                }
-              }
-            }
-          }
-          if (fuzzyMatch) {
-            validValues.push(v);
-            console.log(`[FILTERS] Fuzzy matched ${name}: "${v}" → "${fuzzyMatch}"`);
-          }
-        }
-      }
+      const allValues = valueArr.map(v => String(v).trim().replace(/^,+|,+$/g, '').trim()).filter(Boolean);
+      const matchedValues = allValues
+        .map(v => resolveFlexibleListValue(v, list, name))
+        .filter(Boolean);
 
       // Capture rejected soft categories for learning
       if (name === 'softCategory') {
-        const rejected = allValues.filter(v => !validValues.includes(v));
+        const rejected = allValues.filter(v => !resolveFlexibleListValue(v, list, name));
         rejected.forEach(r => rejectedSoftCategories.push(r));
       }
 
-      if (validValues.length > 0) {
-        // Return original casing from the list for consistency
-        const matchedValues = validValues.map(v => {
-          const vLower = v.toLowerCase();
-          // Exact match first
-          let match = list.find(l => l.toLowerCase() === vLower);
-          if (match) return match;
-          // Fuzzy match: substring
-          match = list.find(l => {
-            const lLower = l.toLowerCase();
-            return (includesWholeWord(lLower, vLower) || includesWholeWord(vLower, lLower)) &&
-                   Math.min(vLower.length, lLower.length) >= 3;
-          });
-          if (match) return match;
-          // Fuzzy match: Hebrew normalization
-          const vNorm = vLower.replace(/[יו]/g, '');
-          match = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === vNorm);
-          if (match) return match;
-          // Fuzzy match: Hebrew suffix stripping (אדומה→אדום, לבנה→לבן, etc.)
-          if (name === 'color' || name === 'softCategory') {
-            const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
-            for (const suffix of hebrewSuffixes) {
-              if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
-                const stripped = vLower.slice(0, -suffix.length);
-                match = list.find(l => l.toLowerCase() === stripped);
-                if (match) return match;
-                // Also try normalized match on stripped form
-                const strippedNorm = stripped.replace(/[יו]/g, '');
-                match = list.find(l => l.toLowerCase().replace(/[יו]/g, '') === strippedNorm);
-                if (match) return match;
-              }
-            }
-          }
-          // Fuzzy match: cross-language color matching via colorSimilarityMap
-          if (name === 'color') {
-            if (colorSimilarityMap[vLower]) {
-              for (const similar of colorSimilarityMap[vLower]) {
-                match = list.find(l => l.toLowerCase() === similar.toLowerCase());
-                if (match) return match;
-              }
-            }
-            for (const listItem of list) {
-              const listLower = listItem.toLowerCase();
-              const similars = colorSimilarityMap[listLower];
-              if (similars && similars.some(s => s.toLowerCase() === vLower)) {
-                return listItem;
-              }
-            }
-          }
-          return v; // Fallback to original value
-        }).filter(Boolean);
+      if (matchedValues.length > 0) {
         // Deduplicate (fuzzy matches might resolve to same list item)
         const uniqueMatched = [...new Set(matchedValues)];
         return uniqueMatched.length === 1 ? uniqueMatched[0] : uniqueMatched;
@@ -4686,6 +4851,17 @@ Return the extracted filters in JSON format. Only extract values that exist in t
     // Filter to keep only the most specific categories (e.g., "hoop earrings" over "earrings")
     if (filters.category) {
       filters.category = filterToMostSpecificCategories(filters.category);
+    }
+
+    // Merge LLM semantic soft categories with deterministic phrase/typo matches.
+    // The LLM can add inferred categories (pairings, regions, styles), while the
+    // resolver keeps values anchored to this store's actual soft-category list.
+    if (softCategoriesList.length > 0) {
+      const mergedSoftCategory = mergeSoftCategoryFilters(filters.softCategory, query, softCategoriesList, categoriesList);
+      if (mergedSoftCategory) {
+        filters.softCategory = mergedSoftCategory;
+        console.log(`[FILTERS] Semantic soft category merge: "${query}" → softCategory: ${JSON.stringify(filters.softCategory)}`);
+      }
     }
 
     // Fallback color extraction: if LLM didn't extract color, scan query for known colors
@@ -4747,6 +4923,8 @@ CRITICAL RULES:
 4. Return JSON only. Return empty {} if nothing to extract.
 5. SYNONYM MATCHING: If a query word is a SYNONYM or semantically equivalent to a category in the list, map it to that category. For example, if the user searches "כיסא" and the category list contains "כורסא", extract "כורסא" as the category since they refer to similar products.
 6. SOFT CATEGORY — EXTRACT AGGRESSIVELY:
+   - Semantic matching is allowed and desired when appropriate: infer store soft categories from meaning, domain knowledge, origin, grape variety, pairing, occasion, style, or region.
+   - Only extract semantic categories that are clearly supported by the query. Do not add broad or speculative categories.
    - Geographic adjectives → country/region names: "italian"/"איטלקי" → "Italy"/"איטליה", "French"/"צרפתי" → "France"/"צרפת", "Spanish"/"ספרדי" → "Spain"/"ספרד"
    - Food pairings: "for pasta"/"לפסטה" → "pasta", "for steak" → "steak"/"meat"
    - Grape varieties: "cabernet" → "cabernet sauvignon", "merlot" → "merlot"
@@ -4788,7 +4966,7 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
               type: { type: Type.STRING },
               softCategory: { 
                 oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }],
-                description: `Extract EVERY relevant attribute — geographic terms, grape varieties, food pairings, occasions, styles. Map adjective forms to nouns. Available: ${softCategories}`
+                description: `Extract every appropriate semantic attribute — geographic terms, regions, grape varieties, food pairings, occasions, styles. Map query meaning to existing list values, but avoid speculative categories. Available: ${softCategories}`
               },
               color: {
                 oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }],
@@ -4815,13 +4993,6 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
       content = content.replace(/^[^{\[]+/, '').replace(/[^}\]]+$/, '');
       const filters = JSON.parse(content);
 
-      // Helper to normalize string or array lists into a clean array
-      const normalizeList = (list) => {
-        if (!list) return [];
-        const arr = Array.isArray(list) ? list : String(list).split(',');
-        return arr.map(item => String(item).trim());
-      };
-
       const categoriesList = normalizeList(categories);
       const typesList = normalizeList(types);
       const softCategoriesList = normalizeList(softCategories);
@@ -4840,117 +5011,11 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
           vals = [val];
         }
 
-        const valid = vals.map(v => {
-          const vLower = String(v).trim().replace(/^,+|,+$/g, '').trim().toLowerCase();
-
-          // 1. Exact match
-          let match = list.find(l => l.toLowerCase().trim() === vLower);
-          if (match) return match;
-
-          // 2. Hebrew vowel normalization (allowing missing י ו characters)
-          const vNormalized = vLower.replace(/[יו]/g, '');
-          match = list.find(l => {
-            const lNormalized = l.toLowerCase().trim().replace(/[יו]/g, '');
-            return lNormalized === vNormalized;
-          });
-          if (match) return match;
-
-          // Additional fuzzy matching for softCategory and color
-          if (name === 'softCategory' || name === 'color') {
-            // 3. Substring/whole-word matching (e.g., "ital" in "italy")
-            match = list.find(l => {
-              const lLower = l.toLowerCase().trim();
-              return (includesWholeWord(lLower, vLower) || includesWholeWord(vLower, lLower)) &&
-                     Math.min(vLower.length, lLower.length) >= 3;
-            });
-            if (match) return match;
-
-            // 4. Hebrew suffix stripping (אדומה→אדום, לבנה→לבן, שחורים→שחור, כחולה→כחול)
-            const hebrewSuffixes = ['ה', 'ים', 'ות', 'ית'];
-            for (const suffix of hebrewSuffixes) {
-              if (vLower.endsWith(suffix) && vLower.length > suffix.length + 2) {
-                const stripped = vLower.slice(0, -suffix.length);
-                match = list.find(l => l.toLowerCase().trim() === stripped);
-                if (match) return match;
-                // Also try normalized match on stripped form
-                const strippedNorm = stripped.replace(/[יו]/g, '');
-                match = list.find(l => l.toLowerCase().trim().replace(/[יו]/g, '') === strippedNorm);
-                if (match) return match;
-              }
-            }
-
-            // 4.5. Multi-word soft category matching with suffix stripping
-            // Handle cases like "בהיר" matching "צבעים בהירים"
-            if (name === 'softCategory') {
-              match = list.find(l => {
-                const lLower = l.toLowerCase().trim();
-                // Split multi-word categories and check each word
-                const words = lLower.split(/\s+/);
-
-                // Check if vLower matches any word exactly
-                if (words.includes(vLower)) return true;
-
-                // Check if vLower matches any word after suffix stripping
-                for (const word of words) {
-                  // Try stripping suffixes from the list word
-                  for (const suffix of hebrewSuffixes) {
-                    if (word.endsWith(suffix) && word.length > suffix.length + 2) {
-                      const stripped = word.slice(0, -suffix.length);
-                      if (stripped === vLower) return true;
-                      // Also try vowel-normalized match
-                      const strippedNorm = stripped.replace(/[יו]/g, '');
-                      const vNorm = vLower.replace(/[יו]/g, '');
-                      if (strippedNorm === vNorm && strippedNorm.length >= 3) return true;
-                    }
-                  }
-                }
-                return false;
-              });
-              if (match) return match;
-            }
-
-            // 5. Cross-language geography matching for soft categories
-            // Handles "איטליה" ↔ "Italy", "איטלקי" ↔ "Italian" ↔ "Italy"
-            if (name === 'softCategory') {
-              const geoVariants = geographyTranslationMap[vLower];
-              if (geoVariants) {
-                for (const variant of geoVariants) {
-                  match = list.find(l => l.toLowerCase().trim() === variant.toLowerCase());
-                  if (match) return match;
-                }
-              }
-              // Reverse lookup: check if any list item maps to our value via geography map
-              for (const listItem of list) {
-                const listLower = listItem.toLowerCase().trim();
-                const variants = geographyTranslationMap[listLower];
-                if (variants && variants.some(v => v.toLowerCase() === vLower)) {
-                  return listItem;
-                }
-              }
-            }
-
-            // 6. Cross-language color matching via colorSimilarityMap
-            if (name === 'color' && colorSimilarityMap[vLower]) {
-              const similarColors = colorSimilarityMap[vLower];
-              for (const similar of similarColors) {
-                match = list.find(l => l.toLowerCase().trim() === similar.toLowerCase());
-                if (match) return match;
-              }
-            }
-            // Also try reverse lookup: check if any list item maps to our value
-            if (name === 'color') {
-              for (const listItem of list) {
-                const listLower = listItem.toLowerCase().trim();
-                const similars = colorSimilarityMap[listLower];
-                if (similars && similars.some(s => s.toLowerCase() === vLower)) {
-                  return listItem;
-                }
-              }
-            }
-          }
-
-          return undefined;
-        }).filter(Boolean);
+        const valid = vals
+          .map(v => String(v).trim().replace(/^,+|,+$/g, '').trim())
+          .filter(Boolean)
+          .map(v => resolveFlexibleListValue(v, list, name))
+          .filter(Boolean);
 
         // Deduplicate
         const unique = [...new Set(valid)];
@@ -4966,6 +5031,15 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
       // Filter to keep only the most specific categories (e.g., "hoop earrings" over "earrings")
       if (filters.category) {
         filters.category = filterToMostSpecificCategories(filters.category);
+      }
+
+      // Merge LLM semantic soft categories with deterministic phrase/typo matches.
+      if (softCategoriesList.length > 0) {
+        const mergedSoftCategory = mergeSoftCategoryFilters(filters.softCategory, query, softCategoriesList, categoriesList);
+        if (mergedSoftCategory) {
+          filters.softCategory = mergedSoftCategory;
+          console.log(`[FILTERS-BRIEF] Semantic soft category merge: "${query}" → softCategory: ${JSON.stringify(filters.softCategory)}`);
+        }
       }
 
       // Fallback color extraction: if LLM didn't extract color, scan query for known colors
@@ -5873,9 +5947,7 @@ async function unifiedSearchDecision(atlasResults, query, categories, types, sof
       const typesStr = Array.isArray(types)
         ? types.join(', ')
         : (typeof types === 'string' ? types : '');
-      const softCatList = typeof softCategories === 'string'
-        ? softCategories.split(',').map(s => s.trim()).slice(0, 25)
-        : (Array.isArray(softCategories) ? softCategories.slice(0, 25) : []);
+      const softCatList = normalizeList(softCategories);
       const colorsStr = typeof colors === 'string' ? colors : (Array.isArray(colors) ? colors.join(', ') : '');
 
       const systemInstruction = `You are an expert product search AI for a ${context} store.
@@ -5888,7 +5960,7 @@ Given a user search query and the top results already retrieved from our databas
 Extract ONLY if clearly mentioned in the query:
 - category: Must exactly match one from: [${categoriesStr || 'any'}]
 - type: Must exactly match one from: [${typesStr || 'any'}]
-- softCategory: Match from: [${softCatList.join(', ') || 'any'}]. Extract geographic adjectives, food pairings, styles, grape varieties, occasions.
+- softCategory: Match from: [${softCatList.join(', ') || 'any'}]. Extract geographic adjectives, regions, food pairings, styles, grape varieties, occasions. Use semantic/domain matching when appropriate, but only return values from this list.
 - color: Extract if mentioned. Available: [${colorsStr || 'any'}]
 - minPrice / maxPrice: Extract numeric price bounds if explicitly mentioned
 
@@ -5931,7 +6003,7 @@ Extract filters from the query and decide the search path.`;
             properties: {
               category: { type: Type.STRING, description: 'Exact matched category or empty string' },
               type: { type: Type.STRING, description: 'Exact matched type or empty string' },
-              softCategory: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched soft categories' },
+              softCategory: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched semantic soft categories from the provided list' },
               color: { type: Type.ARRAY, items: { type: Type.STRING }, description: 'Matched colors' },
               minPrice: { type: Type.NUMBER, description: 'Min price bound or 0' },
               maxPrice: { type: Type.NUMBER, description: 'Max price bound or 0' }
@@ -5992,10 +6064,11 @@ Extract filters from the query and decide the search path.`;
 
       // Normalize extracted filters (drop empty strings / zero prices)
       const rawF = result.filters || {};
+      const mergedUnifiedSoftCategory = mergeSoftCategoryFilters(rawF.softCategory || [], query, softCategories, categories);
       const filters = {
         ...(rawF.category ? { category: rawF.category } : {}),
         ...(rawF.type ? { type: rawF.type } : {}),
-        ...(rawF.softCategory?.length ? { softCategory: rawF.softCategory } : {}),
+        ...(mergedUnifiedSoftCategory ? { softCategory: mergedUnifiedSoftCategory } : {}),
         ...(rawF.color?.length ? { color: rawF.color } : {}),
         ...(rawF.minPrice > 0 ? { minPrice: rawF.minPrice } : {}),
         ...(rawF.maxPrice > 0 ? { maxPrice: rawF.maxPrice } : {})
@@ -8907,7 +8980,8 @@ app.get("/autocomplete", async (req, res) => {
       { results: regexResults, isPerfectFilterMatch, filterCheck },
       suggestions1,
       suggestions2Raw,
-      boostedMatches
+      boostedMatches,
+      prefixNameMatches
     ] = await Promise.all([
       performSimpleSearch(db, collection1, query, req.store, 25, true).catch(async (err) => {
         if (!isAtlasSearchIndexUnavailable(err)) throw err;
@@ -8937,7 +9011,8 @@ app.get("/autocomplete", async (req, res) => {
       // Isolate pipeline2: if "default2" index missing on this store, return [] instead of crashing
       collection2.aggregate(pipeline2, { maxTimeMS: 500 }).toArray().catch(() => []),
       // Always-on boosted-product lookup so merchant boosts can't be clipped by the candidate window
-      boostedProductsMatchingQuery(collection1, query, 25, 500)
+      boostedProductsMatchingQuery(collection1, query, 25, 500),
+      findDirectPrefixNameMatches(collection1, query, 15).catch(() => [])
     ]);
     const suggestions2 = suggestions2Raw;
 
@@ -8962,6 +9037,19 @@ app.get("/autocomplete", async (req, res) => {
       profileBoost: 0,
       boost: item.boost || 0, // Merchant boost (1-3)
       source: "products-boosted",
+      url: item.url,
+      price: item.price,
+      image: item.image
+    }));
+
+    // Prefix name matches (e.g. "פורטה 6 ...") — same products search surfaces first.
+    const labeledPrefixSuggestions = (prefixNameMatches || []).map((item, index) => ({
+      suggestion: item.name,
+      score: 1000 - index,
+      boostedScore: 1000 - index,
+      profileBoost: 0,
+      boost: item.boost || 0,
+      source: "products-prefix",
       url: item.url,
       price: item.price,
       image: item.image
@@ -9013,20 +9101,42 @@ app.get("/autocomplete", async (req, res) => {
     // 1. Regex Fuzzy matches (Product names)
     // 2. Atlas Search matches (Product names)
     // 3. Query Suggestions (Previous successful searches)
-    // Then a STABLE boost-first sort floats merchant-boosted products (boost 1-3) to
-    // the top of the suggestions, consistent with /search. Array.sort is stable, so when
-    // nothing is boosted this preserves the priority order above exactly.
+    // Full literal name matches must outrank broad boosted matches. For example,
+    // "פורטה 6" should surface "פורטה 6 ..." before unrelated boosted "פורט..." products.
     const rankedSuggestions = [
+      ...labeledPrefixSuggestions,
       ...labeledBoostedSuggestions,
       ...labeledRegexSuggestions,
       ...labeledSuggestions1,
       ...labeledSuggestions2
-    ].sort((a, b) => (b.boost || 0) - (a.boost || 0));
+    ]
+      .map((item, index) => ({
+        ...item,
+        autocompleteNameMatchScore: scoreAutocompleteNameMatch(item.suggestion, query),
+        __rankIndex: index
+      }))
+      .sort((a, b) =>
+        (b.autocompleteNameMatchScore - a.autocompleteNameMatchScore) ||
+        ((b.boost || 0) - (a.boost || 0)) ||
+        (b.boostedScore || b.score || 0) - (a.boostedScore || a.score || 0) ||
+        (a.__rankIndex - b.__rankIndex)
+      )
+      .map(({ __rankIndex, ...item }) => item);
+
+    const strongestNameMatchScore = rankedSuggestions.reduce(
+      (max, item) => Math.max(max, item.autocompleteNameMatchScore || 0),
+      0
+    );
+    const minNameMatchScore = strongestNameMatchScore >= 300 ? 100 : 0;
+    const filteredRankedSuggestions = rankedSuggestions.filter(item =>
+      item.source === 'products-prefix' ||
+      (item.autocompleteNameMatchScore || 0) >= minNameMatchScore
+    );
 
     // Filter Match (Category Search) stays pinned above product/query suggestions.
     const combinedSuggestions = [
       ...filterSuggestions,
-      ...rankedSuggestions
+      ...filteredRankedSuggestions
     ]
       .filter((item, index, self) =>
         index === self.findIndex((t) => t.suggestion === item.suggestion)
@@ -10406,9 +10516,9 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
               !existingIds.has(product._id.toString()) &&
               isProductVisible(product) &&
               isProductInStock(product)
-            );
+          );
           if (newDirectNameMatches.length > 0) {
-            results = [...newDirectNameMatches, ...results];
+            results = [...results, ...newDirectNameMatches];
             if (!silent) {
               console.log(`[SIMPLE-SEARCH] 🎯 Direct-name supplement for soft-category query: +${newDirectNameMatches.length} matches`);
             }
@@ -10455,7 +10565,9 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       }
 
       if (results.length > 0 && filterCheck.matchedSoftCategories?.length > 0) {
+        const requestedSoftCategories = filterCheck.matchedSoftCategories || [];
         const strongIntentMatches = results.filter(product =>
+          productMatchesAnySoftCategory(product, requestedSoftCategories) ||
           scoreNameTextRelevance(product, queryWords) > 0 ||
           scoreSoftCategoryIntent(product, queryWords) >= 100
         );
@@ -10497,6 +10609,21 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       if (results.length > 1) {
         const topBefore = results[0]?.name;
         results = rankByNameTextRelevance(results, queryWords);
+        if (filterCheck.matchedSoftCategories?.length > 0) {
+          const primarySoftCategories = extractSoftCategoriesFromQuery(query, filterCheck.matchedSoftCategories);
+          const exactQuerySoftCategories = primarySoftCategories.length > 0
+            ? primarySoftCategories
+            : filterCheck.matchedSoftCategories;
+          results.sort((a, b) => {
+            const aExactSoftMatch = productMatchesAnySoftCategory(a, exactQuerySoftCategories) ? 1 : 0;
+            const bExactSoftMatch = productMatchesAnySoftCategory(b, exactQuerySoftCategories) ? 1 : 0;
+            if (aExactSoftMatch !== bExactSoftMatch) return bExactSoftMatch - aExactSoftMatch;
+            const aSoftMatch = productMatchesAnySoftCategory(a, filterCheck.matchedSoftCategories) ? 1 : 0;
+            const bSoftMatch = productMatchesAnySoftCategory(b, filterCheck.matchedSoftCategories) ? 1 : 0;
+            if (aSoftMatch !== bSoftMatch) return bSoftMatch - aSoftMatch;
+            return 0;
+          });
+        }
         if (!silent && results[0]?.name !== topBefore) {
           console.log(`[SIMPLE-SEARCH] 🎯 Re-ranked by name relevance for "${query}": top → "${results[0]?.name}"`);
         }
@@ -11589,6 +11716,12 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   const isVariationMatch = (word, cat) => {
     const wordNorm = normalizeFinalLetters(word);
     const catNorm = normalizeFinalLetters(cat);
+    const meaningfulVariantMatch = (a, b) => {
+      if (!a || !b || Math.min(a.length, b.length) < 2) return false;
+      if (a === b) return true;
+      if (Math.min(a.length, b.length) < 4) return false;
+      return (a.startsWith(b) || b.startsWith(a)) && Math.abs(a.length - b.length) <= 1;
+    };
 
     if (wordNorm === catNorm) return true;
 
@@ -11609,10 +11742,10 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       const strippedCatNorm = catNorm.startsWith(p) ? catNorm.substring(p.length) : catNorm;
       const strippedCatQuotesNorm = catQuotesNorm.startsWith(p) ? catQuotesNorm.substring(p.length) : catQuotesNorm;
 
-      if (strippedWordNorm === catNorm || strippedWordNorm.startsWith(catNorm) || catNorm.startsWith(strippedWordNorm)) return true;
-      if (strippedWordQuotesNorm === catQuotesNorm || strippedWordQuotesNorm.startsWith(catQuotesNorm) || catQuotesNorm.startsWith(strippedWordQuotesNorm)) return true;
-      if (wordNorm === strippedCatNorm || wordNorm.startsWith(strippedCatNorm) || strippedCatNorm.startsWith(wordNorm)) return true;
-      if (wordQuotesNorm === strippedCatQuotesNorm || wordQuotesNorm.startsWith(strippedCatQuotesNorm) || strippedCatQuotesNorm.startsWith(wordQuotesNorm)) return true;
+      if (meaningfulVariantMatch(strippedWordNorm, catNorm)) return true;
+      if (meaningfulVariantMatch(strippedWordQuotesNorm, catQuotesNorm)) return true;
+      if (meaningfulVariantMatch(wordNorm, strippedCatNorm)) return true;
+      if (meaningfulVariantMatch(wordQuotesNorm, strippedCatQuotesNorm)) return true;
     }
 
     if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
@@ -11813,6 +11946,21 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       }
     }
   }
+
+  // Fallback for soft categories using the shared resolver. This catches query
+  // variants that are not simple prefix/suffix matches, e.g. "איטלה" → "איטליה".
+  for (let i = 0; i < queryWords.length; i++) {
+    if (matchedWordIndices.has(i)) continue;
+    const resolvedSoftCategory = resolveFlexibleListValue(queryWords[i], normalizedSoftCategories, 'softCategory');
+    if (resolvedSoftCategory && !matchedSoftCategories.includes(resolvedSoftCategory)) {
+      matchedSoftCategories.push(resolvedSoftCategory);
+      matchedWordIndices.add(i);
+      softMatchedIndices.add(i);
+    }
+  }
+
+  const expandedMatchedSoftCategories = expandSoftCategoryTerms(matchedSoftCategories, normalizedSoftCategories);
+  matchedSoftCategories.splice(0, matchedSoftCategories.length, ...expandedMatchedSoftCategories);
 
   if (matchedSoftCategories.length > 1 && queryWords.some(isGenericProductIntentWord)) {
     const matchedCategoryTokenSets = matchedSoftCategories.map(category => ({
@@ -12363,8 +12511,29 @@ app.post("/search", async (req, res) => {
               (x, y) => compareWithBoost(x, y, (left, right) => (right.profileBoost || 0) - (left.profileBoost || 0))
             ));
           } else {
-            // Sort by boost FIRST (3 > 2 > 1 > 0), then by profileBoost as tiebreaker
-            finalProducts.sort((a, b) => compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0)));
+            // Sort by exact soft-category relevance first for perfect soft-category
+            // searches. Merchant boost can order products within the same soft-match
+            // group, but should not let keyword-only products outrank tagged products.
+            const primarySoftCategories = isPerfectFilterMatch && filterCheck?.matchedSoftCategories?.length > 0
+              ? extractSoftCategoriesFromQuery(query, filterCheck.matchedSoftCategories)
+              : [];
+            const exactQuerySoftCategories = primarySoftCategories.length > 0
+              ? primarySoftCategories
+              : (filterCheck?.matchedSoftCategories || []);
+
+            finalProducts.sort((a, b) => {
+              if (isPerfectFilterMatch && exactQuerySoftCategories.length > 0) {
+                const aExactSoftMatch = productMatchesAnySoftCategory(a, exactQuerySoftCategories) ? 1 : 0;
+                const bExactSoftMatch = productMatchesAnySoftCategory(b, exactQuerySoftCategories) ? 1 : 0;
+                if (aExactSoftMatch !== bExactSoftMatch) return bExactSoftMatch - aExactSoftMatch;
+
+                const aAnySoftMatch = productMatchesAnySoftCategory(a, filterCheck.matchedSoftCategories) ? 1 : 0;
+                const bAnySoftMatch = productMatchesAnySoftCategory(b, filterCheck.matchedSoftCategories) ? 1 : 0;
+                if (aAnySoftMatch !== bAnySoftMatch) return bAnySoftMatch - aAnySoftMatch;
+              }
+
+              return compareWithBoost(a, b, (x, y) => (y.profileBoost || 0) - (x.profileBoost || 0));
+            });
           }
         }
 
@@ -12581,6 +12750,25 @@ app.post("/search", async (req, res) => {
         const finalSearchMode = isPerfectFilterMatch
           ? 'perfect-filter-match'
           : (softCategoryExpansion.length > 0 ? 'soft-category-expanded' : searchMode);
+
+        if (isPerfectFilterMatch && filterCheck?.matchedSoftCategories?.length > 0 && allProducts.length > 1) {
+          const primarySoftCategories = extractSoftCategoriesFromQuery(query, filterCheck.matchedSoftCategories);
+          const exactQuerySoftCategories = primarySoftCategories.length > 0
+            ? primarySoftCategories
+            : filterCheck.matchedSoftCategories;
+
+          allProducts.sort((a, b) => {
+            const aExactSoftMatch = productMatchesAnySoftCategory(a, exactQuerySoftCategories) ? 1 : 0;
+            const bExactSoftMatch = productMatchesAnySoftCategory(b, exactQuerySoftCategories) ? 1 : 0;
+            if (aExactSoftMatch !== bExactSoftMatch) return bExactSoftMatch - aExactSoftMatch;
+
+            const aAnySoftMatch = productMatchesAnySoftCategory(a, filterCheck.matchedSoftCategories) ? 1 : 0;
+            const bAnySoftMatch = productMatchesAnySoftCategory(b, filterCheck.matchedSoftCategories) ? 1 : 0;
+            if (aAnySoftMatch !== bAnySoftMatch) return bAnySoftMatch - aAnySoftMatch;
+
+            return 0;
+          });
+        }
 
         const stockNote = stockFiltered > 0 ? ` [⚠️ ${stockFiltered}/${preStockTotal} removed by stock filter]` : '';
         console.log(`[${requestId}] 🚀 [SEARCH] Phase 0 COMPLETE (${finalSearchMode}) - returning ${allProducts.length} products (${finalProducts.length} exact + ${softCategoryExpansion.length} soft-cat + ${aiRecommendations.length} AI → ${allProducts.length} in-stock)${stockNote}`);
@@ -13209,18 +13397,20 @@ app.post("/search", async (req, res) => {
     // distinguishing words do not appear in the original query.
     // Example: query "קברנה פרנק ישראלי" → LLM extracts "קברנה סוביניון" because the prompt
     // used to say "קברנה → cabernet sauvignon". "סוביניון" is NOT in the query → drop it.
-    // This prevents wrong-variety matches while preserving stem-matched extractions like
-    // "ישראל" for "ישראלי".
-    if (enhancedFilters && Array.isArray(enhancedFilters.softCategory) && enhancedFilters.softCategory.length > 0) {
+    // This prevents wrong-variety matches and short accidental stems like
+    // "רון" from "ברונלו", while preserving supported mappings like "ישראל" for "ישראלי".
+    if (enhancedFilters && enhancedFilters.softCategory) {
       const queryWords = query.toLowerCase().split(/\s+/);
-      enhancedFilters.softCategory = enhancedFilters.softCategory.filter(sc => {
+      const softCategoriesToGuard = Array.isArray(enhancedFilters.softCategory)
+        ? enhancedFilters.softCategory
+        : [enhancedFilters.softCategory];
+      const guardedSoftCategories = softCategoriesToGuard.filter(sc => {
         if (!sc || typeof sc !== 'string') return false;
+        if (querySupportsSoftCategory(query, sc)) return true;
         const scWords = sc.toLowerCase().split(/\s+/).filter(w => w.length >= 3);
-        if (scWords.length === 0) return true; // keep very short single-word cats
+        if (scWords.length === 0) return false;
         if (scWords.length === 1) {
-          // Single-word soft categories (e.g. "איטליה" for "איטלקי", "ספרד" for "ספרדי"):
-          // These are valid LLM adjective→noun mappings — always keep them.
-          return true;
+          return false;
         }
         // Multi-word soft category (e.g. "קברנה סוביניון"): ALL words must appear in the query.
         // This prevents "קברנה פרנק" query from extracting "קברנה סוביניון" because "סוביניון" ∉ query.
@@ -13228,6 +13418,11 @@ app.post("/search", async (req, res) => {
           queryWords.some(qw => qw.includes(scWord) || scWord.includes(qw))
         );
       });
+      if (guardedSoftCategories.length > 0) {
+        enhancedFilters.softCategory = guardedSoftCategories;
+      } else {
+        delete enhancedFilters.softCategory;
+      }
     }
 
     // phase 1 done
