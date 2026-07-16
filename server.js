@@ -12807,8 +12807,58 @@ app.post("/search", async (req, res) => {
           console.error(`[${requestId}] Failed to log Phase 0 query:`, err.message)
         );
 
+        // 📄 MODERN MODE PAGINATION: return the first page (store limit) + a standard
+        // 'simple' nextToken; the full result set is cached in Redis and served in
+        // batches by /search/load-more — same contract as the main search path.
+        // Without Redis the token can't be honored, so fall back to returning everything.
+        let pageProducts = allProducts;
+        let perfectPagination = null;
+        if (isModernMode) {
+          const canPaginate = redisClient && redisReady && allProducts.length > searchLimit;
+          pageProducts = canPaginate ? allProducts.slice(0, searchLimit) : allProducts;
+          let perfectNextToken = null;
+          if (canPaginate) {
+            try {
+              const perfectFilters = {};
+              const cacheKey = generateCacheKey('search-pagination', query, JSON.stringify(perfectFilters));
+              await redisClient.setEx(cacheKey, 300, JSON.stringify(allProducts));
+
+              const paginationSessionId = generatePaginationSessionId();
+              await storePaginationSession(paginationSessionId, {
+                deliveredIds: pageProducts.map(p => p._id),
+                batchNumber: 1,
+                lastUpdate: Date.now()
+              });
+
+              perfectNextToken = Buffer.from(JSON.stringify({
+                query,
+                filters: perfectFilters,
+                offset: pageProducts.length,
+                timestamp: Date.now(),
+                type: 'simple',
+                session_id: session_id,
+                paginationSessionId: paginationSessionId
+              })).toString('base64');
+              console.log(`[${requestId}] 📄 Perfect-match pagination: ${pageProducts.length}/${allProducts.length} in batch 1, rest cached for load-more`);
+            } catch (paginationError) {
+              console.error(`[${requestId}] Perfect-match pagination setup failed - returning full result set:`, paginationError.message);
+              pageProducts = allProducts;
+              perfectNextToken = null;
+            }
+          }
+          perfectPagination = {
+            totalAvailable: allProducts.length,
+            returned: pageProducts.length,
+            batchNumber: 1,
+            hasMore: !!perfectNextToken,
+            nextToken: perfectNextToken,
+            secondBatchToken: null
+          };
+        }
+
         return res.json(isModernMode ? {
-          products: allProducts,
+          products: pageProducts,
+          pagination: perfectPagination,
           metadata: {
             query,
             requestId,
