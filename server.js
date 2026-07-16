@@ -2906,11 +2906,31 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
     }
   });
 
+  // 🎯 Rank by soft-filter match count BEFORE the $limit truncation: with OR ($in)
+  // matching, products hitting one common category (e.g. "לבן") can otherwise fill
+  // the whole candidate window sorted by price, pushing multi-match products
+  // (e.g. בורגון+דגים+לבן) out before app-level scoring ever sees them.
+  const hasSoftCategoryFilter = softFilters && Array.isArray(softFilters.softCategory) && softFilters.softCategory.length > 0;
+  if (hasSoftCategoryFilter) {
+    pipeline.push({
+      $addFields: {
+        _softMatchCount: {
+          $cond: [
+            { $isArray: "$softCategory" },
+            { $size: { $setIntersection: ["$softCategory", softFilters.softCategory] } },
+            { $cond: [{ $in: [{ $ifNull: ["$softCategory", null] }, softFilters.softCategory] }, 1, 0] }
+          ]
+        }
+      }
+    });
+  }
+
   // ⚡ BOOST-FIRST SORT: Boosted products (1-3) appear first
-  // Then sort by price and id for consistent ordering
+  // Then most soft-filter matches, then price and id for consistent ordering
   pipeline.push({
     $sort: {
       boost: -1,  // Higher boost first (3 > 2 > 1 > null)
+      ...(hasSoftCategoryFilter ? { _softMatchCount: -1 } : {}),
       price: 1,   // Then by price (ascending)
       id: 1       // Then by id for consistent pagination
     }
@@ -10264,7 +10284,7 @@ async function performSimpleSearch(db, collection, query, store, limit = 10, sil
   return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent), 60);
 }
 
-const MAX_FILTER_MATCH_RESULTS = 500;
+const MAX_FILTER_MATCH_RESULTS = 75;
 
 async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
