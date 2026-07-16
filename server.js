@@ -341,8 +341,11 @@ function formatFallbackProduct(product, query, mode = 'direct-name-fallback') {
 }
 
 function isProductInStock(product = {}) {
-  if (product.stock_status) return product.stock_status === 'instock';
+  // stockStatus (camelCase) is the canonical field: every DB-level stock filter in
+  // this codebase queries it, and every current sync writes it. stock_status is only
+  // a raw leftover on some stores (e.g. manoVino) and can be stale — check it last.
   if (product.stockStatus) return product.stockStatus === 'instock';
+  if (product.stock_status) return product.stock_status === 'instock';
   return true;
 }
 
@@ -10311,8 +10314,10 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       }
     }
 
-    // If PERFECT MATCH → use caller limit for fast paths; else small limit for validation
-    const searchLimit = isPerfectFilterMatch ? Math.min(Math.max(limit, 10), MAX_FILTER_MATCH_RESULTS) : 15;
+    // If PERFECT MATCH → return the full category (up to MAX_FILTER_MATCH_RESULTS),
+    // ignoring the caller's per-page limit: category queries ("יין אדום") should surface
+    // hundreds of products, not the first 10. Else small limit for validation.
+    const searchLimit = isPerfectFilterMatch ? MAX_FILTER_MATCH_RESULTS : 15;
     
     let searchQuery;
     
@@ -10392,6 +10397,15 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
               must: mustClauses,
               ...(shouldClauses.length > 0 ? { should: shouldClauses } : {})
             }
+          }
+        },
+        // Stock/hidden must ALSO be enforced post-$search: on stores whose "default"
+        // index doesn't map stockStatus (dynamic:false), the $search stock clause is a
+        // no-op — `exists` is false for every doc, so `mustNot exists` matches all.
+        {
+          $match: {
+            $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }],
+            ...HIDDEN_MONGO_FILTER
           }
         },
         { $limit: perfectMatchLimit }
@@ -10721,6 +10735,14 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
                 HIDDEN_SEARCH_FILTER
               ]
             }
+          }
+        },
+        // Same post-$search enforcement as the perfect-match pipeline: the in-index
+        // stock filter is a no-op on stores whose index doesn't map stockStatus.
+        {
+          $match: {
+            $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }],
+            ...HIDDEN_MONGO_FILTER
           }
         },
         { $limit: searchLimit > 0 ? searchLimit : 50 }
