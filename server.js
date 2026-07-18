@@ -19322,6 +19322,126 @@ async function executeSKUSearch(collection, skuQuery) {
     return [];
   }
 }
+const zeroSearchIndexedDbs = new Set();
+
+// ───────────────────────────────────────────────────────────────────────────
+// Zero-results search tracking
+// The storefront engine reports every search whose NATIVE results were 0.
+// Upserted per (session_id, query) so refreshes / re-renders don't inflate
+// counts. "Zero-result sessions" = distinct session_ids in this collection.
+// ───────────────────────────────────────────────────────────────────────────
+app.post("/zero-search", async (req, res) => {
+  try {
+    const { dbName } = req.store;
+    const { query, session_id, sessionId, page_url, platform, recovered_count, source, timestamp } = req.body;
+
+    const normalizedSessionId = normalizeSessionId(session_id, sessionId);
+    const q = (query || "").toString().trim();
+
+    if (!q || !normalizedSessionId) {
+      return res.status(400).json({
+        error: "Missing required fields: query and session_id are required"
+      });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+    const col = db.collection("zero_searches");
+    const now = timestamp ? new Date(timestamp) : new Date();
+
+    // Ensure the upsert key is indexed (once per dbName per process)
+    if (!zeroSearchIndexedDbs.has(dbName)) {
+      zeroSearchIndexedDbs.add(dbName);
+      col.createIndex({ session_id: 1, query: 1 }, { unique: true }).catch(() => {});
+    }
+
+    await col.updateOne(
+      { session_id: normalizedSessionId, query: q },
+      {
+        $setOnInsert: {
+          session_id: normalizedSessionId,
+          query: q,
+          first_seen: now,
+          page_url: page_url || null,
+          platform: platform || null,
+          user_agent: req.get("user-agent") || null
+        },
+        $set: {
+          last_seen: now,
+          source: source || "live",
+          // null = unknown (shadow mode never fetches recovery products)
+          recovered_count: (recovered_count === null || recovered_count === undefined)
+            ? null
+            : (Number.isFinite(+recovered_count) ? +recovered_count : null)
+        },
+        $inc: { hits: 1 }
+      },
+      { upsert: true }
+    );
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[ZERO-SEARCH] Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /zero-search-stats?from=ISO&to=ISO&limit=N
+// Returns distinct zero-result session count, total zero searches, and top queries.
+app.get("/zero-search-stats", async (req, res) => {
+  try {
+    const { dbName } = req.store;
+    const { from, to, limit } = req.query;
+
+    const match = {};
+    if (from || to) {
+      match.first_seen = {};
+      if (from) match.first_seen.$gte = new Date(from);
+      if (to) match.first_seen.$lte = new Date(to);
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const col = client.db(dbName).collection("zero_searches");
+
+    const [agg] = await col.aggregate([
+      { $match: match },
+      {
+        $facet: {
+          totals: [
+            {
+              $group: {
+                _id: null,
+                zero_searches: { $sum: 1 },
+                sessions: { $addToSet: "$session_id" },
+                // strict $eq — null (shadow, unknown recovery) must not count as unrecovered
+                unrecovered: { $sum: { $cond: [{ $eq: ["$recovered_count", 0] }, 1, 0] } }
+              }
+            }
+          ],
+          top_queries: [
+            { $group: { _id: "$query", sessions: { $addToSet: "$session_id" }, hits: { $sum: "$hits" } } },
+            { $project: { _id: 0, query: "$_id", session_count: { $size: "$sessions" }, hits: 1 } },
+            { $sort: { session_count: -1, hits: -1 } },
+            { $limit: Math.min(parseInt(limit) || 20, 100) }
+          ]
+        }
+      }
+    ]).toArray();
+
+    const totals = (agg.totals && agg.totals[0]) || { zero_searches: 0, sessions: [], unrecovered: 0 };
+
+    return res.json({
+      zero_search_count: totals.zero_searches,       // distinct (session, query) pairs
+      zero_result_sessions: totals.sessions.length,  // distinct sessions with ≥1 zero-results search
+      unrecovered_count: totals.unrecovered,         // searches where Semantix also found nothing
+      top_queries: agg.top_queries || []
+    });
+  } catch (err) {
+    console.error("[ZERO-SEARCH-STATS] Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 app.post("/product-click", async (req, res) => {
 
   try {
