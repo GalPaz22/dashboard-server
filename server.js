@@ -9,6 +9,8 @@ import { createClient } from 'redis';
 import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { AsyncLocalStorage } from 'async_hooks';
+import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -158,6 +160,36 @@ function escapeRegExp(value = '') {
 const HIDDEN_SEARCH_FILTER = { compound: { mustNot: [{ equals: { path: "hidden", value: true } }] } };
 const HIDDEN_MONGO_FILTER = { hidden: { $ne: true } };
 
+// Per-store "show out-of-stock" toggle (credentials.showOutOfStock, set from the
+// admin panel). The flag rides on AsyncLocalStorage so the deeply nested pipeline
+// builders and fallback helpers can consult it without threading a parameter
+// through every signature. `authenticate` seeds the context per request.
+const requestStoreContext = new AsyncLocalStorage();
+
+function includeOutOfStock() {
+  return requestStoreContext.getStore()?.showOutOfStock === true;
+}
+
+// Atlas $search `compound.filter` clause for in-stock; empty when the store shows out-of-stock
+function stockSearchFilterClauses() {
+  if (includeOutOfStock()) return [];
+  return [{
+    compound: {
+      should: [
+        { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
+        { text: { query: "instock", path: "stockStatus" } }
+      ],
+      minimumShouldMatch: 1
+    }
+  }];
+}
+
+// Plain MongoDB predicate for $and arrays / find() fallbacks; empty when out-of-stock is shown
+function stockMongoFilterClauses() {
+  if (includeOutOfStock()) return [];
+  return [{ $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }];
+}
+
 function isProductHidden(product = {}) {
   const hidden = product.hidden;
   return hidden === true || hidden === 1 || String(hidden).toLowerCase().trim() === 'true';
@@ -206,7 +238,7 @@ async function directNameFallbackProducts(collection, query, limit = 10, maxTime
     docs = await collection.find({
       $and: [
         ...termConditions,
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        ...stockMongoFilterClauses(),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -280,7 +312,7 @@ async function boostedProductsMatchingQuery(collection, query, limit = 5, maxTim
       boost: { $in: [1, 2, 3] },
       $and: [
         ...termConditions,
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        ...stockMongoFilterClauses(),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -344,6 +376,7 @@ function isProductInStock(product = {}) {
   // stockStatus (camelCase) is the canonical field: every DB-level stock filter in
   // this codebase queries it, and every current sync writes it. stock_status is only
   // a raw leftover on some stores (e.g. manoVino) and can be stale — check it last.
+  if (includeOutOfStock()) return true;
   if (product.stockStatus) return product.stockStatus === 'instock';
   if (product.stock_status) return product.stock_status === 'instock';
   return true;
@@ -403,7 +436,7 @@ async function findDirectPrefixNameMatches(collection, query, limit = 15) {
     const docs = await collection.find({
       $and: [
         { $or: prefixPatterns.map(pattern => ({ name: pattern })) },
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        ...stockMongoFilterClauses(),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -794,7 +827,7 @@ async function findDirectSpecificSoftCategoryNameMatches(collection, matchedSoft
   );
   if (baseTokens.length === 0 || differentiatorTokens.length === 0) return [];
 
-  const stockFilter = {
+  const stockFilter = includeOutOfStock() ? {} : {
     $or: [
       { stockStatus: 'instock' },
       { stock_status: 'instock' },
@@ -844,7 +877,10 @@ function scoreProductLineResult(product, terms) {
   const softIntentScore = scoreSoftCategoryIntent(product, terms);
   const price = Number(product?.price);
   const priceScore = Number.isFinite(price) && price > 0 ? Math.log10(price + 1) * 15 : 0;
-  const boostScore = (Number(product?.boost) || 0) * 10;
+  // Experiment variants may override merchant boost per product for this request
+  const expBoosts = requestStoreContext.getStore()?.experimentBoosts;
+  const effectiveBoost = expBoosts?.[String(product?._id)] ?? expBoosts?.[String(product?.id)] ?? product?.boost;
+  const boostScore = (Number(effectiveBoost) || 0) * 10;
 
   // Name match is the strongest signal. Price helps separate main devices from
   // low-cost parts without relying on store-specific accessory-name keywords.
@@ -2462,6 +2498,7 @@ async function getStoreConfigByApiKey(apiKey) {
       firstMatchCategory: userDoc.credentials?.firstMatchCategory || false, // Toggle for category extraction on simple queries (default: false)
       colors: userDoc.credentials?.colors || "",
       pinnedResults: Array.isArray(userDoc.credentials?.pinnedResults) ? userDoc.credentials.pinnedResults : [], // Merchandising: [{ query, productIds: [] }] — promoted products pinned to the top for matching queries
+      showOutOfStock: userDoc.credentials?.showOutOfStock === true, // Admin toggle: include out-of-stock products in all search surfaces
     };
   }, 300); // 5-minute TTL — short enough to pick up config changes
 }
@@ -2475,7 +2512,8 @@ async function authenticate(req, res, next) {
       return res.status(401).json({ error: "Invalid or missing API key" });
     }
     req.store = store;
-    next();
+    // Seed request-scoped store context so nested search helpers can read per-store flags
+    requestStoreContext.run({ showOutOfStock: store.showOutOfStock === true }, next);
   } catch (err) {
     console.error("[AUTH] ❌ Exception during authentication:", err);
     res.status(500).json({ error: "Auth failure" });
@@ -2829,12 +2867,14 @@ const buildOptimizedFilterOnlyPipeline = (hardFilters, softFilters, useOrLogic =
   const matchConditions = [];
 
   // Stock status filter first (most selective)
-  matchConditions.push({
-    $or: [
-      { stockStatus: { $exists: false } },
-      { stockStatus: "instock" }
-    ]
-  });
+  if (!includeOutOfStock()) {
+    matchConditions.push({
+      $or: [
+        { stockStatus: { $exists: false } },
+        { stockStatus: "instock" }
+      ]
+    });
+  }
 
   matchConditions.push(HIDDEN_MONGO_FILTER);
 
@@ -3032,15 +3072,7 @@ const buildAutocompletePipeline = (query, indexName, path, includePersonalizatio
   // Stock status filter lives INSIDE $search so Atlas can apply it before returning docs.
   // This avoids a post-search $match full-scan and lets the $limit early-termination work.
   const filterClauses = [
-    {
-      compound: {
-        should: [
-          { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
-          { text: { query: "instock", path: "stockStatus" } }
-        ],
-        minimumShouldMatch: 1
-      }
-    },
+    ...stockSearchFilterClauses(),
     HIDDEN_SEARCH_FILTER
   ];
 
@@ -3098,27 +3130,8 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     // Build filter clauses for compound operator (moved from $match stages for 10x performance)
     const filterClauses = [];
 
-    // Stock status filter - using compound should for OR logic
-    filterClauses.push({
-      compound: {
-        should: [
-          {
-            compound: {
-              mustNot: [
-                { exists: { path: "stockStatus" } }
-              ]
-            }
-          },
-          {
-            text: {
-              query: "instock",
-              path: "stockStatus"
-            }
-          }
-        ],
-        minimumShouldMatch: 1
-      }
-    });
+    // Stock status filter - using compound should for OR logic (skipped when store shows out-of-stock)
+    filterClauses.push(...stockSearchFilterClauses());
 
     // Exclude products flagged hidden:true
     filterClauses.push(HIDDEN_SEARCH_FILTER);
@@ -3493,7 +3506,9 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
   });
 
   // 🛡️ STOCK SAFETY NET: $search filter may not cover all paths; enforce here
-  pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
+  if (!includeOutOfStock()) {
+    pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
+  }
 
   return pipeline;
 };
@@ -3517,7 +3532,9 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 
   // Stock status filter - OPTIMIZED: moved into $vectorSearch filter
   // Simplified for Atlas Search compatibility - just check for instock
-  conditions.push({ stockStatus: "instock" });
+  if (!includeOutOfStock()) {
+    conditions.push({ stockStatus: "instock" });
+  }
 
   // Exclude products flagged hidden:true (requires `hidden` as a filter field in the vector index)
   conditions.push(HIDDEN_MONGO_FILTER);
@@ -3644,7 +3661,9 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
 
   // 🛡️ STOCK SAFETY NET: $vectorSearch filter is silently ignored when stockStatus
   // is not in the vector index; enforce filtering here at the pipeline level
-  pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
+  if (!includeOutOfStock()) {
+    pipeline.push({ $match: { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] } });
+  }
 
   return pipeline;
 }
@@ -7583,10 +7602,12 @@ async function executeExplicitSoftCategorySearch(
   }
   
   // Add stock status filter
-  sweepQuery.$or = [
-    { stockStatus: { $exists: false } },
-    { stockStatus: "instock" }
-  ];
+  if (!includeOutOfStock()) {
+    sweepQuery.$or = [
+      { stockStatus: { $exists: false } },
+      { stockStatus: "instock" }
+    ];
+  }
   
   const allSoftCategoryProducts = await collection.find(sweepQuery).limit(8).toArray();
   
@@ -8365,7 +8386,7 @@ app.get("/search/load-more", async (req, res) => {
               // Build filter for ANN search - include ALL hard filters
               const annFilter = {
                 $and: [
-                  { stockStatus: "instock" },
+                  ...(includeOutOfStock() ? [] : [{ stockStatus: "instock" }]),
                   HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
                 ]
               };
@@ -8632,7 +8653,7 @@ app.get("/search/load-more", async (req, res) => {
               // Build filter for ANN search - include ALL hard filters
               const annFilter = {
                 $and: [
-                  { stockStatus: "instock" },
+                  ...(includeOutOfStock() ? [] : [{ stockStatus: "instock" }]),
                   HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
                 ]
               };
@@ -10217,15 +10238,7 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
         compound: {
           must: mustClauses,
           filter: [
-            {
-              compound: {
-                should: [
-                  { compound: { mustNot: [{ exists: { path: 'stockStatus' } }] } },
-                  { text: { query: 'instock', path: 'stockStatus' } }
-                ],
-                minimumShouldMatch: 1
-              }
-            },
+            ...stockSearchFilterClauses(),
             HIDDEN_SEARCH_FILTER
           ]
         }
@@ -10251,7 +10264,7 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
     const regexResults = await collection.find({
       $and: [
         ...regexConditions,
-        { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] },
+        ...stockMongoFilterClauses(),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -10352,16 +10365,8 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       const perfectMatchLimit = searchLimit > 0 ? Math.min(Math.max(searchLimit, 10), MAX_FILTER_MATCH_RESULTS) : MAX_FILTER_MATCH_RESULTS;
 
       const mustClauses = [
-        // Stock status filter
-        {
-          compound: {
-            should: [
-              { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
-              { text: { query: "instock", path: "stockStatus" } }
-            ],
-            minimumShouldMatch: 1
-          }
-        },
+        // Stock status filter (skipped when store shows out-of-stock)
+        ...stockSearchFilterClauses(),
         // Exclude products flagged hidden:true
         HIDDEN_SEARCH_FILTER
       ];
@@ -10424,7 +10429,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         // no-op — `exists` is false for every doc, so `mustNot exists` matches all.
         {
           $match: {
-            $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }],
+            ...(includeOutOfStock() ? {} : { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }] }),
             ...HIDDEN_MONGO_FILTER
           }
         },
@@ -10443,7 +10448,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       if (results.length === 0) {
         try {
           const directAndConditions = [
-            { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] },
+            ...stockMongoFilterClauses(),
             HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
           ];
 
@@ -10519,7 +10524,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
             $and: [
               { $or: strictSoftCategoryConditions },
               HIDDEN_MONGO_FILTER,
-              { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] }
+              ...stockMongoFilterClauses()
             ]
           })
             .limit(perfectMatchLimit)
@@ -10743,15 +10748,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
               ],
               // Stock status filter inside compound (avoids post-$search $match)
               filter: [
-                {
-                  compound: {
-                    should: [
-                      { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
-                      { text: { query: "instock", path: "stockStatus" } }
-                    ],
-                    minimumShouldMatch: 1
-                  }
-                },
+                ...stockSearchFilterClauses(),
                 HIDDEN_SEARCH_FILTER
               ]
             }
@@ -10761,7 +10758,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         // stock filter is a no-op on stores whose index doesn't map stockStatus.
         {
           $match: {
-            $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }],
+            ...(includeOutOfStock() ? {} : { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }] }),
             ...HIDDEN_MONGO_FILTER
           }
         },
@@ -10839,10 +10836,12 @@ async function findAiRecommendations(collection, matchedProducts, limit = 5) {
     _id: { $nin: excludeIds },
     // Exclude products flagged hidden:true (recommendations must respect hidden too)
     ...HIDDEN_MONGO_FILTER,
-    $or: [
-      { stockStatus: "instock" },
-      { stockStatus: { $exists: false } }
-    ]
+    ...(includeOutOfStock() ? {} : {
+      $or: [
+        { stockStatus: "instock" },
+        { stockStatus: { $exists: false } }
+      ]
+    })
   };
 
   // Filter by hard category - keep recommendations in the same category (exact match)
@@ -10943,6 +10942,21 @@ app.post("/fast-search", async (req, res) => {
     }
 
     console.log(`[${requestId}] ⚡ FAST SEARCH: "${query}" (limit: ${FAST_LIMIT})${session_id ? ` 👤 [personalized]` : ''}`);
+
+    // 🧪 PERMANENT RULES + A/B EXPERIMENTS: patch store config for this request
+    // (always-on merchandising rules first, then any experiment variant on
+    // top; control/unmodified on any failure).
+    {
+      const expClient = await getMongoClient();
+      const expDb = expClient.db(req.store.dbName);
+      req.store = await applyPermanentRules(req.store, query, expDb, redisClient);
+      req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
+      const expCtx = requestStoreContext.getStore();
+      if (expCtx) {
+        expCtx.experimentBoosts = req.store.experimentBoosts;
+        expCtx.profileBoostMultiplier = req.store.profileBoostMultiplier;
+      }
+    }
 
     // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
     {
@@ -11249,7 +11263,7 @@ app.post("/fast-search", async (req, res) => {
               const softMatches = await collection.find({
                 softCategory: { $in: fbSoftFilters.softCategory },
                 ...HIDDEN_MONGO_FILTER,
-                $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }]
+                ...(includeOutOfStock() ? {} : { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] })
               }).limit(20).toArray();
               const seen = new Set(vectorResults.map(p => p._id.toString()));
               explicitSoftMatches = softMatches.filter(p => isProductVisible(p) && isProductInStock(p));
@@ -12109,6 +12123,21 @@ app.post("/simple-search", async (req, res) => {
 
   console.log(`[${requestId}] 🔍 Simple keyword search: "${query}"${session_id ? ` 👤 [personalized]` : ''}`);
 
+  // 🧪 PERMANENT RULES + A/B EXPERIMENTS: patch store config for this request
+  // (always-on merchandising rules first, then any experiment variant on
+  // top; control/unmodified on any failure).
+  {
+    const expClient = await getMongoClient();
+    const expDb = expClient.db(dbName);
+    req.store = await applyPermanentRules(req.store, query, expDb, redisClient);
+    req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
+    const expCtx = requestStoreContext.getStore();
+    if (expCtx) {
+      expCtx.experimentBoosts = req.store.experimentBoosts;
+      expCtx.profileBoostMultiplier = req.store.profileBoostMultiplier;
+    }
+  }
+
   // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
   {
     const pinned = await getPinnedProductsForQuery(query, req.store);
@@ -12274,6 +12303,21 @@ app.post("/search", async (req, res) => {
   // Only use modern format (with pagination) if explicitly requested
   const isModernMode = modern === true || modern === 'true';
   const isLegacyMode = !isModernMode;
+
+  // 🧪 PERMANENT RULES + A/B EXPERIMENTS: patch store config for this request
+  // (always-on merchandising rules first, then any experiment variant on
+  // top; control/unmodified on any failure).
+  {
+    const expClient = await getMongoClient();
+    const expDb = expClient.db(dbName);
+    req.store = await applyPermanentRules(req.store, query, expDb, redisClient);
+    req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
+    const expCtx = requestStoreContext.getStore();
+    if (expCtx) {
+      expCtx.experimentBoosts = req.store.experimentBoosts;
+      expCtx.profileBoostMultiplier = req.store.profileBoostMultiplier;
+    }
+  }
 
   // 📌 PINNED / PROMOTED RESULTS: if this query matches a merchandising rule,
   // pre-fetch the pinned products and wrap res.json so they're prepended to the
@@ -12600,7 +12644,7 @@ app.post("/search", async (req, res) => {
 
             // Build query: products matching ANY of the soft categories (and optionally hard categories)
             const expansionAndConditions = [
-              { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }] },
+              ...stockMongoFilterClauses(),
               { softCategory: { $in: softCats } }
             ];
 
@@ -12955,7 +12999,7 @@ app.post("/search", async (req, res) => {
                 const softMatchAndConditions = [
                   { softCategory: { $in: fbSoftFilters.softCategory } },
                   HIDDEN_MONGO_FILTER,
-                  { $or: [{ stockStatus: 'instock' }, { stockStatus: { $exists: false } }] }
+                  ...stockMongoFilterClauses()
                 ];
                 if (fbHardFilters.category?.length > 0) {
                   softMatchAndConditions.push({
@@ -13169,15 +13213,7 @@ app.post("/search", async (req, res) => {
           text: { query: word, path: ["name", "description1"] }
         }));
         const engFilterClauses = [
-          {
-            compound: {
-              should: [
-                { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
-                { text: { query: "instock", path: "stockStatus" } }
-              ],
-              minimumShouldMatch: 1
-            }
-          },
+          ...stockSearchFilterClauses(),
           HIDDEN_SEARCH_FILTER
         ];
         // Apply extracted filters (category + color) so we don't return wrong-category results
@@ -13957,15 +13993,7 @@ app.post("/search", async (req, res) => {
       if (translatedWords.length > 0) {
         // Uses Atlas Search compound.should so queries hit the index (not a full collection scan)
         const translatedAtlasFilterClauses = [
-          {
-            compound: {
-              should: [
-                { compound: { mustNot: [{ exists: { path: "stockStatus" } }] } },
-                { text: { query: "instock", path: "stockStatus" } }
-              ],
-              minimumShouldMatch: 1
-            }
-          },
+          ...stockSearchFilterClauses(),
           HIDDEN_SEARCH_FILTER
         ];
         if (hardFilters.category) {
@@ -14382,7 +14410,7 @@ app.post("/search", async (req, res) => {
                     const similaritySearches = topProductEmbeddings.map(async (productEmbed) => {
                       const annFilter = {
                         $and: [
-                          { stockStatus: "instock" },  // Changed from $ne to positive filter to avoid index requirements
+                          ...(includeOutOfStock() ? [] : [{ stockStatus: "instock" }]),  // Changed from $ne to positive filter to avoid index requirements
                           HIDDEN_MONGO_FILTER // Exclude products flagged hidden:true
                           // Exclude the seed product itself - handled after results to avoid index requirements
                         ]
@@ -18514,6 +18542,10 @@ function calculateProfileBoost(product, userProfile) {
     }
   }
 
+  // Experiment variants can scale (or zero out) personalization for this request
+  const profileMultiplier = requestStoreContext.getStore()?.profileBoostMultiplier;
+  if (typeof profileMultiplier === 'number') boost = Math.round(boost * profileMultiplier);
+
   return boost;
 }
 
@@ -18637,6 +18669,10 @@ app.post("/profile/merge", async (req, res) => {
     const client = await connectToMongoDB(mongodbUri);
     const db = client.db(dbName);
     const profilesCollection = db.collection('profiles');
+
+    // 🧪 Record the session-id rewrite so experiment attribution can unify
+    // pre-login and post-login activity (fire-and-forget).
+    recordSessionAlias(db, guest_session_id, user_session_id);
 
     const guestProfile = await profilesCollection.findOne({ session_id: guest_session_id, preferences: { $exists: true } });
     if (!guestProfile) {
@@ -19265,26 +19301,7 @@ function buildSKUSearchPipeline(skuQuery, limit = 65) {
           minimumShouldMatch: 1,
           // Stock status filter - OPTIMIZED: moved into $search filter for 10x performance
           filter: [
-            {
-              compound: {
-                should: [
-                  {
-                    compound: {
-                      mustNot: [
-                        { exists: { path: "stockStatus" } }
-                      ]
-                    }
-                  },
-                  {
-                    text: {
-                      query: "instock",
-                      path: "stockStatus"
-                    }
-                  }
-                ],
-                minimumShouldMatch: 1
-              }
-            },
+            ...stockSearchFilterClauses(),
             HIDDEN_SEARCH_FILTER
           ]
         }
