@@ -7080,34 +7080,52 @@ async function getProductsByIds(ids, dbName, collectionName) {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    // Convert string IDs back to ObjectIds for _id lookup
-    const objectIdArray = ids.map((id) => {
-      try {
-        // Ensure id is a non-empty string before creating ObjectId
-        if (id && typeof id === 'string') {
-          return new ObjectId(id);
+    // Each entry may be a Mongo _id (ObjectId hex string) or the store's own
+    // product `id` field (e.g. a WooCommerce numeric ID, as used by merchandising
+    // pins authored via product id/SKU rather than the internal Mongo _id).
+    // Try _id first; anything that isn't a valid ObjectId falls back to a
+    // lookup by the `id` field instead of being silently dropped.
+    const objectIdEntries = [];
+    const productIdEntries = [];
+    for (const id of ids) {
+      let objId = null;
+      if (id && typeof id === 'string') {
+        try {
+          objId = new ObjectId(id);
+        } catch {
+          // not a valid ObjectId — try the product `id` field below
         }
-        return null;
-      } catch (error) {
-        console.error(`[getProductsByIds] Invalid ObjectId format: ${id}`);
-        return null;
       }
-    }).filter((id) => id !== null);
+      if (objId) objectIdEntries.push(objId);
+      else productIdEntries.push(id);
+    }
 
+    const productMap = new Map();
 
-    if (objectIdArray.length === 0) {
-      console.log(`[getProductsByIds] No valid ObjectIds, returning empty array`);
+    if (objectIdEntries.length > 0) {
+      const byObjectId = await collection.find({ _id: { $in: objectIdEntries }, ...HIDDEN_MONGO_FILTER }).toArray();
+      for (const p of byObjectId) productMap.set(p._id.toString(), p);
+    }
+
+    if (productIdEntries.length > 0) {
+      const numericVariants = productIdEntries.map((id) => Number(id)).filter((n) => !Number.isNaN(n));
+      const byProductId = await collection
+        .find({ id: { $in: [...productIdEntries, ...numericVariants] }, ...HIDDEN_MONGO_FILTER })
+        .toArray();
+      for (const p of byProductId) {
+        const matchingRaw = productIdEntries.find((raw) => String(raw) === String(p.id));
+        if (matchingRaw !== undefined) productMap.set(matchingRaw, p);
+      }
+    }
+
+    if (productMap.size === 0) {
+      console.log(`[getProductsByIds] No matching products found (checked both _id and id field)`);
       return [];
     }
 
-    const products = await collection.find({ _id: { $in: objectIdArray }, ...HIDDEN_MONGO_FILTER }).toArray();
-    
-    // Create a map for quick lookups
-    const productMap = new Map(products.map(p => [p._id.toString(), p]));
-
     // Return products in the order of the original ids array
-    const orderedProducts = ids.map(id => productMap.get(id)).filter(Boolean);
-    
+    const orderedProducts = ids.map((id) => productMap.get(id)).filter(Boolean);
+
     return orderedProducts;
   } catch (error) {
     console.error("Error fetching products by IDs:", error);
