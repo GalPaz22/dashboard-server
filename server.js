@@ -17234,7 +17234,7 @@ app.get("/health", async (req, res) => {
         client: !!redisClient
       },
       mongodb: {
-        connected: !!client
+        connected: !!cachedClient
       },
       aiModels: {
         circuitBreakerOpen: aiCircuitBreaker.isOpen,
@@ -17262,9 +17262,9 @@ app.get("/health", async (req, res) => {
   }
 
   // Check MongoDB health
-  if (client) {
+  if (cachedClient) {
     try {
-      await client.db().admin().ping();
+      await cachedClient.db().admin().ping();
       health.services.mongodb.status = 'healthy';
     } catch (error) {
       health.services.mongodb.status = 'unhealthy';
