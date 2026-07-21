@@ -74,13 +74,21 @@ async function getCached(kind, redisClient, apiKey, redisKeyPrefix) {
   const cached = inProcessCache.get(cacheKey);
   if (cached && Date.now() - cached.at < IN_PROCESS_TTL_MS) return cached.data;
   let data = [];
-  try {
-    if (redisClient?.isOpen) {
+  if (!redisClient) {
+    console.warn(`[experiments] no redis client provided for ${redisKeyPrefix}:${apiKey}`);
+  } else {
+    // Don't gate on redisClient.isOpen: dashboard-server tracks its own
+    // readiness (redisReady) separately from the client's own isOpen getter,
+    // and they can disagree — just attempt the read and let the catch below
+    // handle any real failure, so we get a logged reason instead of a silent
+    // empty result either way.
+    try {
       const raw = await redisClient.get(`${redisKeyPrefix}:${apiKey}`);
       if (raw) data = JSON.parse(raw);
+    } catch (err) {
+      console.error(`[experiments] redis read failed for ${redisKeyPrefix}:${apiKey}:`, err?.message);
+      data = [];
     }
-  } catch {
-    data = [];
   }
   inProcessCache.set(cacheKey, { at: Date.now(), data });
   return data;
