@@ -9086,7 +9086,6 @@ app.get("/autocomplete", async (req, res) => {
         score: 150,
         boostedScore: 150,
         source: "filter-match",
-        isPerfectMatch: isPerfectFilterMatch,
         type: "category-search"
       });
     }
@@ -11057,7 +11056,6 @@ app.post("/fast-search", async (req, res) => {
             executionTime,
             isFastSearch: true,
             searchMode: formattedAlternatives.length > 0 ? 'fast-stock-relaxed-alternatives' : 'out-of-stock-no-alternatives',
-            isPerfectFilterMatch,
             personalizedResults: false,
             personalizedCount: 0,
             softCategoryExpansionCount: 0,
@@ -11117,7 +11115,6 @@ app.post("/fast-search", async (req, res) => {
             executionTime,
             isFastSearch: true,
             searchMode: exactSearchMode,
-            isPerfectFilterMatch: false,
             isExactTextMatch: !isModelNumberMatch,
             isModelNumberMatch: !!isModelNumberMatch,
             personalizedResults: exactProducts.some(p => (p.profileBoost || 0) > 0),
@@ -11379,7 +11376,6 @@ app.post("/fast-search", async (req, res) => {
             executionTime,
             isFastSearch: true,
             searchMode: 'fast-vector-fallback',
-            isPerfectFilterMatch: false,
             personalizedResults: vectorFallbackProducts.some(p => (p.profileBoost || 0) > 0),
             personalizedCount: vectorFallbackProducts.filter(p => (p.profileBoost || 0) > 0).length,
             softCategoryExpansionCount: 0,
@@ -11423,7 +11419,6 @@ app.post("/fast-search", async (req, res) => {
           executionTime,
           isFastSearch: true,
           searchMode: formattedAlternatives.length > 0 ? 'relaxed-text-alternatives' : 'no-simple-results',
-          isPerfectFilterMatch: false,
           personalizedResults: false,
           personalizedCount: 0,
           softCategoryExpansionCount: 0,
@@ -11558,7 +11553,6 @@ app.post("/fast-search", async (req, res) => {
             executionTime,
             isFastSearch: true,
             searchMode: formattedAlternatives.length > 0 ? 'fast-stock-relaxed-alternatives' : 'out-of-stock-no-alternatives',
-            isPerfectFilterMatch,
             personalizedResults: formattedAlternatives.some(p => (p.profileBoost || 0) > 0),
             personalizedCount: formattedAlternatives.filter(p => (p.profileBoost || 0) > 0).length,
             softCategoryExpansionCount: 0,
@@ -11613,7 +11607,6 @@ app.post("/fast-search", async (req, res) => {
           executionTime,
           isFastSearch: true,
           searchMode: searchMode,
-          isPerfectFilterMatch: isPerfectFilterMatch,
           personalizedResults: personalizedCount > 0,
           personalizedCount: personalizedCount,
           softCategoryExpansionCount: softCategoryExpansion.length,
@@ -12285,7 +12278,6 @@ app.post("/simple-search", async (req, res) => {
       count: allProducts.length,
       timing: Date.now() - searchStartTime,
       metadata: {
-        isPerfectFilterMatch,
         searchMode: isPerfectFilterMatch ? 'perfect-filter-match' : 'fuzzy-regex',
         aiRecommendationsCount: aiRecommendations.length
       }
@@ -12836,7 +12828,6 @@ app.post("/search", async (req, res) => {
                   requestId,
                   executionTime: Date.now() - searchStartTime,
                   searchMode: stockSearchMode,
-                  isPerfectFilterMatch,
                   stockFilteredCount: stockFiltered,
                   softCategoryExpansionCount: softCategoryExpansion.length,
                   aiRecommendationsCount: aiRecommendations.length
@@ -12946,7 +12937,6 @@ app.post("/search", async (req, res) => {
             requestId,
             executionTime: Date.now() - searchStartTime,
             searchMode: finalSearchMode,
-            isPerfectFilterMatch,
             softCategoryExpansionCount: softCategoryExpansion.length,
             aiRecommendationsCount: aiRecommendations.length
           }
@@ -13121,7 +13111,6 @@ app.post("/search", async (req, res) => {
               requestId,
               executionTime: Date.now() - searchStartTime,
               searchMode: 'fast-vector-fallback',
-              isPerfectFilterMatch: false,
               personalizedResults: vectorFallbackProducts.some(p => (p.profileBoost || 0) > 0),
               personalizedCount: vectorFallbackProducts.filter(p => (p.profileBoost || 0) > 0).length
             }
@@ -13141,8 +13130,7 @@ app.post("/search", async (req, res) => {
             query,
             requestId,
             executionTime: Date.now() - searchStartTime,
-            searchMode: fastEmptyMode,
-            isPerfectFilterMatch: false
+            searchMode: fastEmptyMode
           }
         } : emptyResponse);
       }
