@@ -367,7 +367,6 @@ function formatFallbackProduct(product, query, mode = 'direct-name-fallback') {
     onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
     ItemID: product.ItemID,
     exactMatchBonus: getExactMatchBonus(product.name, query, query),
-    highlight: true,
     searchMode: mode
   };
 }
@@ -8137,7 +8136,6 @@ app.get("/search/auto-load-more", async (req, res) => {
       price: result.price,
       image: result.image,
       url: result.url,
-      highlight: (result.exactMatchBonus || 0) >= 20000, // Only highlight high-quality text matches
       type: result.type,
       specialSales: result.specialSales,
       onSale: !!(result.specialSales && Array.isArray(result.specialSales) && result.specialSales.length > 0),
@@ -9006,7 +9004,6 @@ app.get("/autocomplete", async (req, res) => {
             boost: product.boost || 0,
             source: "sku",
             skuSearch: true,
-            highlight: true,
             url: product.url,
             price: product.price,
             image: product.image
@@ -9415,7 +9412,6 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
                 specialSales: product.specialSales,
                 onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
                 ItemID: product.ItemID,
-                highlight: true, // LLM-selected products are highlighted
                 softFilterMatch: false,
                 softCategoryMatches: 0,
                 simpleSearch: false,
@@ -9500,7 +9496,6 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
           specialSales: product.specialSales,
           onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
           ItemID: product.ItemID,
-          highlight: false, // Vector results are semantic matches, not textual
           softFilterMatch: false,
           softCategoryMatches: 0,
           simpleSearch: false,
@@ -9668,7 +9663,6 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
       specialSales: product.specialSales,
       onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
       ItemID: product.ItemID,
-      highlight: true, // Text matches are highlighted
       softFilterMatch: false,
       softCategoryMatches: 0,
       simpleSearch: false,
@@ -9918,7 +9912,6 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
       specialSales: product.specialSales,
       onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
       ItemID: product.ItemID,
-      highlight: false,
       softFilterMatch: product.softFilterMatch || false,
       softCategoryMatches: product.softCategoryMatches || 0,
       rrf_score: product.rrf_score || 0,
@@ -11039,7 +11032,6 @@ app.post("/fast-search", async (req, res) => {
           onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
           ItemID: product.ItemID,
           profileBoost: 0,
-          highlight: false,
           fastSearchMode: 'fast-stock-relaxed-alternatives'
         }));
 
@@ -11094,7 +11086,6 @@ app.post("/fast-search", async (req, res) => {
             onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
             ItemID: product.ItemID,
             profileBoost,
-            highlight: true,
             fastSearchMode: isModelNumberMatch ? 'model-number-match' : 'exact-text-match'
           };
         });
@@ -11351,7 +11342,6 @@ app.post("/fast-search", async (req, res) => {
                 onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
                 ItemID: product.ItemID,
                 profileBoost,
-                highlight: false,
                 fastSearchMode: 'fast-vector-fallback'
               };
             });
@@ -11403,7 +11393,6 @@ app.post("/fast-search", async (req, res) => {
         onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
         ItemID: product.ItemID,
         profileBoost: 0,
-        highlight: false,
         fastSearchMode: 'relaxed-text-alternatives'
       }));
 
@@ -11454,7 +11443,6 @@ app.post("/fast-search", async (req, res) => {
           onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
           ItemID: product.ItemID,
           profileBoost: profileBoost,
-          highlight: true, // Textual match
           fastSearchMode: 'simple-validated'
         };
       });
@@ -11533,7 +11521,6 @@ app.post("/fast-search", async (req, res) => {
             onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
             ItemID: product.ItemID,
             profileBoost,
-            highlight: false,
             fastSearchMode: 'fast-stock-relaxed-alternatives'
           };
         });
@@ -11636,7 +11623,6 @@ app.post("/fast-search", async (req, res) => {
       onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
       ItemID: product.ItemID,
       profileBoost: 0,
-      highlight: false,
       fastSearchMode: 'relaxed-text-alternatives'
     }));
 
@@ -12201,8 +12187,7 @@ app.post("/simple-search", async (req, res) => {
         onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
         ItemID: product.ItemID,
         profileBoost: profileBoost,
-        exactMatchBonus: exactMatchBonus,
-        highlight: true
+        exactMatchBonus: exactMatchBonus
       };
     });
 
@@ -12260,8 +12245,7 @@ app.post("/simple-search", async (req, res) => {
             ItemID: product.ItemID,
             profileBoost: profileBoost,
             exactMatchBonus: exactMatchBonus,
-            aiRecommend: true,
-            highlight: false
+            aiRecommend: true
           };
         });
 
@@ -12589,7 +12573,6 @@ app.post("/search", async (req, res) => {
             ...p,
             _id: p._id.toString(),
             profileBoost,
-            highlight: true,
             searchMode
           };
         });
@@ -12714,7 +12697,6 @@ app.post("/search", async (req, res) => {
                 ...product,
                 _id: product._id.toString(),
                 profileBoost,
-                highlight: false,
                 softCategoryMatch: true,
                 searchMode
               };
@@ -12799,7 +12781,6 @@ app.post("/search", async (req, res) => {
                   ...product,
                   _id: product._id.toString(),
                   profileBoost,
-                  highlight: false,
                   stockFallback: true,
                   searchMode: hasRecommendationCategories ? 'stock-fallback-alternatives' : 'stock-relaxed-text-alternatives'
                 };
@@ -13088,7 +13069,6 @@ app.post("/search", async (req, res) => {
                   onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
                   ItemID: product.ItemID,
                   profileBoost,
-                  highlight: false,
                   searchMode: 'fast-vector-fallback'
                 };
               });
@@ -13249,7 +13229,6 @@ app.post("/search", async (req, res) => {
             price: p.price,
             image: p.image,
             url: p.url,
-            highlight: false,
             type: p.type,
             category: p.category,
             softCategory: p.softCategory,
@@ -13310,7 +13289,6 @@ app.post("/search", async (req, res) => {
         price: product.price,
         image: product.image,
         url: product.url,
-        highlight: true, // Highlight SKU matches as they are exact matches
         type: product.type,
         specialSales: product.specialSales,
         onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
@@ -15151,7 +15129,6 @@ app.post("/search", async (req, res) => {
             price: product.price,
             image: product.image,
             url: product.url,
-            highlight: reorderedIds.includes(product._id.toString()),
             type: product.type,
             category: product.category,
             softCategory: product.softCategory,
@@ -15310,7 +15287,6 @@ app.post("/search", async (req, res) => {
               price: product.price,
               image: product.image,
               url: product.url,
-              highlight: reorderedIds.includes(product._id.toString()), // LLM selections are highlighted
               type: product.type,
               category: product.category, // Include for tier-2 category extraction
               softCategory: product.softCategory, // Include for tier-2 category extraction
@@ -15335,7 +15311,6 @@ app.post("/search", async (req, res) => {
               price: r.price,
               image: r.image,
               url: r.url,
-              highlight: false, // Remaining results not highlighted
               type: r.type,
               category: r.category, // Include for tier-2 category extraction
               softCategory: r.softCategory, // Include for tier-2 category extraction
@@ -15387,10 +15362,6 @@ app.post("/search", async (req, res) => {
         const exactMatchBonus = r.exactMatchBonus || 0;
         const isHighTextMatch = isSimpleResult && exactMatchBonus >= 20000;
 
-        // Highlighting logic for simple queries:
-        // - Only highlight high-quality text matches (exactMatchBonus >= 20000)
-        // - Do NOT highlight soft filter matches or semantic matches
-        const isHighlighted = isHighTextMatch;
 
         return {
           _id: r._id.toString(),
@@ -15400,7 +15371,6 @@ app.post("/search", async (req, res) => {
           price: r.price,
           image: r.image,
           url: r.url,
-          highlight: isHighlighted,
           type: r.type,
           category: r.category, // Include for tier-2 category extraction
           softCategory: r.softCategory, // Include for tier-2 category extraction
@@ -15582,7 +15552,6 @@ app.post("/search", async (req, res) => {
             onSale: !!(doc.specialSales && Array.isArray(doc.specialSales) && doc.specialSales.length > 0),
             ItemID: doc.ItemID,
             stockStatus: doc.stockStatus,
-            highlight: false,
             searchMode: 'no-filter-fallback'
           }));
           console.log(`[${requestId}] ✅ Simple+vector fallback found ${finalResults.length} results (fuzzy: ${fuzzyFallback.length}, vector: ${vectorFallback.length})`);
@@ -15626,8 +15595,6 @@ app.post("/search", async (req, res) => {
     }
 
     // Debug soft filter matching
-    const highlightedProducts = finalResults.filter(r => r.highlight).length;
-    console.log(`[${requestId}] Highlighted products: ${highlightedProducts}/${finalResults.length}`);
     
     if (hasSoftFilters) {
       console.log(`[${requestId}] Soft filters extracted:`, JSON.stringify(softFilters.softCategory));
@@ -15636,14 +15603,6 @@ app.post("/search", async (req, res) => {
           _id: p._id?.toString() || p._id, 
           name: p.name, 
           softCategory: p.softCategory
-        }))
-      );
-      console.log(`[${requestId}] Sample highlighted products:`, 
-        limitedResults.filter(r => r.highlight).slice(0, 3).map(p => ({
-          _id: p._id, 
-          name: p.name,
-          highlight: p.highlight,
-          softFilterMatch: p.softFilterMatch
         }))
       );
     }
