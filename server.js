@@ -2225,8 +2225,12 @@ function getMongoClient() {
       // Performance optimizations
       connectTimeoutMS: 10000, // 10 second connection timeout
       serverSelectionTimeoutMS: 5000, // 5 second server selection timeout
-      // Compression for faster data transfer over network
-      compressors: ['snappy', 'zlib'],
+      // Compression for faster data transfer over network. zlib only — snappy
+      // is a native addon whose platform binary isn't reliably present in
+      // every deploy environment, and the driver throws at connect time
+      // (MongoMissingDependencyError) if it's missing, taking down every
+      // authenticated route.
+      compressors: ['zlib'],
       // Spread read load across secondaries so the primary is reserved for writes.
       // Writes (insertOne, updateOne, createIndex, etc) still go to primary automatically.
       // Falls back to primary if no secondary is healthy.
