@@ -11,6 +11,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AsyncLocalStorage } from 'async_hooks';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
+import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -2164,15 +2165,14 @@ async function warmCache() {
   }
   
   const commonQueries = [
-    'יין אדום',
-    'יין לבן', 
-    'יין',
-    'red wine',
-    'white wine'
+    'מוצר',
+    'חדש',
+    'מבצע'
   ];
   
-  // Default context for cache warming
-  const context = 'wine store';
+  // Cache warming must stay vertical-neutral; merchant-specific context is
+  // only available inside an authenticated request.
+  const context = '';
   
   for (const query of commonQueries) {
     try {
@@ -2191,13 +2191,23 @@ const app = express();
 
 // 🎯 MEMORY PROTECTION: Limit request body size to prevent OOM
 app.use(bodyParser.json({ limit: '1mb' }));
-app.use(cors({ origin: "*" }));
+// exposedHeaders is required for the concierge trigger: browsers hide custom
+// response headers from JS unless they're listed here, and the legacy (bare
+// array) search responses have nowhere else to carry the signal.
+app.use(cors({
+  origin: "*",
+  exposedHeaders: ["X-Concierge-Trigger", "X-Concierge-Conversation", "X-Concierge-Display"],
+}));
 
 // 🎯 MEMORY MONITORING: Track memory usage per request
 app.use(memoryMonitoringMiddleware);
 
 // Initialize Google Generative AI client
 const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+// Complex/non-literal searches get one bounded reasoning pass even when the
+// merchant has not enabled the shopper-facing Concierge. Literal searches stay
+// on the fast deterministic path and pay no model cost here.
+const COMPLEX_SEARCH_MODEL = process.env.COMPLEX_SEARCH_MODEL || "gemini-3.7-flash";
 
 // Initialize OpenAI client
 const openai = new OpenAI({
@@ -2496,12 +2506,24 @@ async function getStoreConfigByApiKey(apiKey) {
       syncMode: userDoc.syncMode || "text",
       explain: userDoc.explain || false,
       limit: userDoc.limit || 25,
-      context: userDoc.context || "wine store", // Search limit from user config, default to 25
+      // Optional merchant context for search and Concierge. Never infer a store
+      // vertical here: a missing value must stay open-ended rather than quietly
+      // turning every merchant into a wine store.
+      context: typeof userDoc.context === "string" ? userDoc.context.trim() : "",
       enableSimpleCategoryExtraction: userDoc.credentials?.enableSimpleCategoryExtraction || false,
       firstMatchCategory: userDoc.credentials?.firstMatchCategory || false, // Toggle for category extraction on simple queries (default: false)
       colors: userDoc.credentials?.colors || "",
       pinnedResults: Array.isArray(userDoc.credentials?.pinnedResults) ? userDoc.credentials.pinnedResults : [], // Merchandising: [{ query, productIds: [] }] — promoted products pinned to the top for matching queries
       showOutOfStock: userDoc.credentials?.showOutOfStock === true, // Admin toggle: include out-of-stock products in all search surfaces
+      // Concierge (shopper-facing chat). Gated on a top-level `concierge: true`
+      // on the user doc — anything else (missing, false, nested) leaves the
+      // store exactly as it was: no trigger on search responses, 403 on
+      // /concierge/*. The optional settings below are read from the top level
+      // first, falling back to credentials.
+      conciergeEnabled: userDoc.concierge === true,
+      conciergeAutoOpen: (userDoc.conciergeAutoOpen ?? userDoc.credentials?.conciergeAutoOpen) !== false, // false → widget shows an invitation pill instead of fading open
+      conciergeContext: userDoc.conciergeContext || userDoc.credentials?.conciergeContext || "",          // merchant's own description of the shop, for the system prompt
+      conciergeSystemPrompt: userDoc.conciergeSystemPrompt || userDoc.credentials?.conciergeSystemPrompt || null, // full override, for a merchant with a specific voice
     };
   }, 300); // 5-minute TTL — short enough to pick up config changes
 }
@@ -2575,6 +2597,10 @@ app.use((req, res, next) => {
       req.path === '/clear-cache' ||
       req.path.startsWith('/cache/') ||
       req.path.startsWith('/webhooks/') ||
+      // The demo page is plain HTML with no embedded credentials — the API key
+      // is typed into the page at runtime. A browser opening it can't send an
+      // X-API-Key header, so gating it just makes it a 401.
+      req.path === '/demo-concierge' ||
       req.path === '/site-config') { // 🔧 Allow /site-config to handle its own auth
     return next();
   }
@@ -2643,6 +2669,20 @@ app.use(async (req, res, next) => {
   res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, ids));
   next();
 });
+
+// ───────────────────────────────────────────────────────────────────────────
+// Concierge — shopper-facing chat for queries a product grid can't answer.
+// The middleware stamps /search and /fast-search responses with a trigger
+// block; mountConcierge registers /concierge/* (already behind authenticate,
+// so every route is scoped to the API key's store). See concierge.mjs.
+// ───────────────────────────────────────────────────────────────────────────
+const conciergeDeps = {
+  getMongoClient,
+  getQueryEmbedding: (text) => getQueryEmbedding(text),
+  getRedis: () => (redisClient && redisReady ? redisClient : null),
+};
+app.use(conciergeSearchTrigger(conciergeDeps));
+mountConcierge(app, conciergeDeps);
 
 async function connectToMongoDB(mongodbUri) {
   return await getMongoClient();
@@ -6303,7 +6343,7 @@ Which products (if any) are semantically valid matches for this query?`;
  * @param {number} maxResults - Maximum number of products to return (default: 6)
  * @returns {Object} { success: boolean, products: Array, reason: string }
  */
-async function selectRelevantProductsWithLLM(filteredProducts, query, context = "wine shop", maxResults = 6) {
+async function selectRelevantProductsWithLLM(filteredProducts, query, context = "", maxResults = 6) {
   if (!filteredProducts || filteredProducts.length === 0) {
     return { success: false, products: [], reason: "No products to select from" };
   }
@@ -6364,14 +6404,12 @@ ${productData.map((p, i) => `${i}. ${p.name} - ${p.price} (${p.category || 'no c
 Select the ${maxResults} most relevant products for this query.`;
 
       const response = await genAI.models.generateContent({
-        model: "gemini-2.5-flash", // Fast model for quick selection
+        model: COMPLEX_SEARCH_MODEL,
         contents: [{ text: userPrompt }],
         config: {
           systemInstruction,
           temperature: 0.2, // Slightly higher for diversity
-          thinkingConfig: {
-            thinkingBudget: 0,
-          },
+          thinkingConfig: { thinkingLevel: "LOW" },
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -6494,8 +6532,9 @@ async function reorderResultsWithGPT(
   return withCache(cacheKey, async () => {
     console.time(`Rerank LLM call for ${query} (${limitedResults.length} products)`);
     try {
-      // 🎯 FORCE FAST MODEL: gemini-2.5-flash-lite is optimized for low-latency JSON tasks
-      const modelName = "gemini-2.5-flash";
+      // A bounded reasoning pass for complex/non-literal intent. This path is
+      // independent of the Concierge feature flag and returns ordinary results.
+      const modelName = COMPLEX_SEARCH_MODEL;
       
 
       console.log(`[RERANK] ${isFilterHeavy ? '⚡ LIGHTWEIGHT' : '🚀'} Using ${modelName} to rerank ${limitedResults.length} products${isFilterHeavy ? ' (filter-heavy mode)' : ''}`);
@@ -6694,9 +6733,7 @@ Return a JSON OBJECT: { "relevant": [ {"_id": "..."} ], "comprehensive": boolean
       contents: userContent,
       config: {
         systemInstruction: effectiveSystemInstruction,
-        thinkingConfig: {
-          thinkingBudget: 0,
-        },
+        thinkingConfig: { thinkingLevel: "LOW" },
         temperature: 0.1,
         responseMimeType: "application/json",
         responseSchema: effectiveSchema,
@@ -7020,7 +7057,7 @@ PRIORITIZE query-matching products STRONGLY.`;
            };
 
       // Use fast model if requested (for /fast-search)
-      const modelName = "gemini-2.5-flash";
+      const modelName = COMPLEX_SEARCH_MODEL;
 
        const response = await genAI.models.generateContent({
         model: modelName,
@@ -7028,9 +7065,7 @@ PRIORITIZE query-matching products STRONGLY.`;
 
          config: { 
            temperature: 0.1,
-           thinkingConfig: {
-             thinkingBudget: 0,
-           },
+           thinkingConfig: { thinkingLevel: "LOW" },
            responseMimeType: "application/json",
            responseSchema: responseSchema,
          },
@@ -15974,6 +16009,7 @@ app.post("/search", async (req, res) => {
         requestId: requestId,
         executionTime: executionTime,
         isComplex: isComplexQueryResult, // Flag indicating if query is complex (used for cart tracking)
+        reasoningModel: llmReorderingSuccessful ? COMPLEX_SEARCH_MODEL : null,
         ...(tierInfo && { tiers: tierInfo }), // Include tier info for simple queries
         ...(extractedCategoriesMetadata && { extractedCategories: extractedCategoriesMetadata }) // Include extracted categories
       }
@@ -16319,9 +16355,16 @@ app.post("/search-to-cart", async (req, res) => {
     
     console.log(`[SEARCH-TO-CART] Incoming document:`, JSON.stringify(document));
     
-    // Updated validation - checkout events don't require product_id
-    if (!document || !document.search_query || !document.event_type) {
-      return res.status(400).json({ error: "Missing required fields: search_query and event_type" });
+    // Updated validation - checkout events don't require product_id.
+    // search_query is NOT required: most real events have no search behind them
+    // (add-to-cart from a category or product page, server-side purchase
+    // events), and requiring it silently dropped all of them with a 400.
+    // Normalized to null so downstream reads and the dedupe key stay consistent.
+    if (!document || !document.event_type) {
+      return res.status(400).json({ error: "Missing required field: event_type" });
+    }
+    if (!document.search_query) {
+      document.search_query = null;
     }
     
     const client = await connectToMongoDB(mongodbUri);
@@ -16485,6 +16528,14 @@ app.post("/search-to-cart", async (req, res) => {
       event_type: enhancedDocument.event_type,
     };
 
+    // Scope the dedupe to the session. search_query used to carry most of the
+    // discriminating power here; now that it is null for the majority of
+    // events, two different shoppers adding the same product inside the
+    // 30-minute window would otherwise collapse into a single recorded event.
+    if (normalizedSessionId) {
+      queryForExisting.session_id = normalizedSessionId;
+    }
+
     if (enhancedDocument.product_id) {
       queryForExisting.product_id = enhancedDocument.product_id;
     }
@@ -16512,8 +16563,12 @@ app.post("/search-to-cart", async (req, res) => {
     const insertResult = await targetCollection.insertOne(enhancedDocument);
     console.log(`[SEARCH-TO-CART] Insert result:`, insertResult);
     
-    // Handle query complexity feedback for conversion events
-    if (document.event_type === 'checkout_completed' || document.event_type === 'checkout_initiated') {
+    // Handle query complexity feedback for conversion events.
+    // Guarded on search_query: this scores the complexity of the query that led
+    // to a conversion, so with no query there is nothing to classify — and
+    // without the guard the fallback below would hand null to
+    // classifyQueryComplexity on every searchless checkout.
+    if ((document.event_type === 'checkout_completed' || document.event_type === 'checkout_initiated') && document.search_query) {
       try {
         const queryComplexityCollection = db.collection('query_complexity_feedback');
         let classification = 'unknown';
@@ -16531,7 +16586,7 @@ app.post("/search-to-cart", async (req, res) => {
         } else {
           // Fallback to re-classification only if no classification provided
           console.log(`[COMPLEXITY FEEDBACK] No classification provided, re-classifying query: "${document.search_query}"`);
-          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', false, dbName);
+          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || '', false, dbName);
           classification = queryComplexityResult ? 'simple' : 'complex';
           hasClassification = true;
         }
@@ -16551,7 +16606,7 @@ app.post("/search-to-cart", async (req, res) => {
             timestamp: new Date(),
             feedback_type: 'conversion_based',
             confidence_score: document.event_type === 'checkout_completed' ? 0.95 : 0.8, // Higher confidence for completed purchases
-            context: store.context || 'wine store',
+            context: store.context || '',
             search_metadata: document.searchMetadata || null,
             was_pre_classified: !!document.search_classification || !!(document.searchMetadata && document.searchMetadata.classification)
           };
@@ -16580,7 +16635,7 @@ app.post("/search-to-cart", async (req, res) => {
           classification = document.searchMetadata.classification;
           hasClassification = true;
         } else {
-          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || 'wine store', false, dbName);
+          const queryComplexityResult = await classifyQueryComplexity(document.search_query, store.context || '', false, dbName);
           classification = queryComplexityResult ? 'simple' : 'complex';
           hasClassification = true;
         }
@@ -16596,7 +16651,7 @@ app.post("/search-to-cart", async (req, res) => {
             timestamp: new Date(),
             feedback_type: 'conversion_based',
             confidence_score: 0.9,
-            context: store.context || 'wine store',
+            context: store.context || '',
             search_metadata: document.searchMetadata || null,
             was_pre_classified: !!document.search_classification || !!(document.searchMetadata && document.searchMetadata.classification)
           };
@@ -16829,7 +16884,7 @@ app.post("/tag-query-complexity", async (req, res) => {
     const queryComplexityCollection = db.collection('query_complexity_feedback');
     
     // Get current classification
-    const currentClassification = await classifyQueryComplexity(query, req.store.context || 'wine store', false, dbName);
+    const currentClassification = await classifyQueryComplexity(query, req.store.context || '', false, dbName);
     const currentComplexityLabel = currentClassification ? 'simple' : 'complex';
     
     // Store manual feedback
@@ -16842,7 +16897,7 @@ app.post("/tag-query-complexity", async (req, res) => {
       confidence_score: Math.min(Math.max(confidence, 0), 1), // Clamp between 0-1
       timestamp: new Date(),
       feedback_type: 'manual_tagging',
-      context: req.store.context || 'wine store'
+      context: req.store.context || ''
     };
     
     const result = await queryComplexityCollection.insertOne(feedback);
@@ -17046,13 +17101,13 @@ app.post("/learn-from-feedback", async (req, res) => {
 
 app.post("/test-search-to-cart-flow", async (req, res) => {
   try {
-    const { query = "יין לבן חלק לארוחת ערב", simulateProductId = "test123" } = req.body;
+    const { query = "מוצר מומלץ", simulateProductId = "test123" } = req.body;
     const { dbName } = req.store;
     
     console.log("=== TESTING SEARCH-TO-CART FLOW ===");
     
     // Step 1: Simulate a search (get classification)
-    const isSimple = await classifyQueryComplexity(query, 'wine store', false, dbName);
+    const isSimple = await classifyQueryComplexity(query, req.store.context || '', false, dbName);
     const classification = isSimple ? 'simple' : 'complex';
     
     console.log(`Step 1: Query "${query}" classified as ${classification.toUpperCase()}`);
@@ -17101,7 +17156,7 @@ app.post("/test-search-to-cart-flow", async (req, res) => {
       timestamp: new Date(),
       feedback_type: 'conversion_based',
       confidence_score: 0.9,
-      context: 'wine store',
+      context: req.store.context || '',
       search_metadata: searchMetadata,
       was_pre_classified: true,
       test_mode: true
@@ -17602,7 +17657,7 @@ app.post("/active-users", async (req, res) => {
       last_updated: new Date(),
       user_agent: req.get('user-agent') || null,
       ip_address: req.ip || req.connection.remoteAddress,
-      store_context: store.context || 'wine store',
+      store_context: store.context || '',
       store_name: store.storeName || 'unknown'
     };
     
@@ -18914,6 +18969,11 @@ app.get("/", (req, res) => {
 // Serve enrichment demo
 app.get("/demo-enrichment", (req, res) => {
   res.sendFile(path.join(__dirname, "demo-enrichment.html"));
+});
+
+// Serve concierge demo — live search + the trigger decision + the chat
+app.get("/demo-concierge", (req, res) => {
+  res.sendFile(path.join(__dirname, "demo-concierge.html"));
 });
 
 /* =========================================================== *\
