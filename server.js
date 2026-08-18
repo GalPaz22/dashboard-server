@@ -5734,9 +5734,9 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
   const sessionId = normalizeSessionId(options.session_id, options.sessionId);
-  
+
   const deliveredProducts = products.map(p => p.name).filter(Boolean).slice(0, 20);
-  
+
   const queryDocument = {
     query: query,
     timestamp: timestamp,
@@ -5755,7 +5755,13 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
     queryDocument.session_id = sessionId;
     queryDocument.sessionId = sessionId; // legacy/camelCase compatibility
   }
-  
+
+  // Explicit zero-result flag for callers that know the native result count
+  // but never ran a product search here (e.g. the lightweight /log-query path).
+  if (typeof options.zeroResults === "boolean") {
+    queryDocument.zero_results = options.zeroResults;
+  }
+
   // Log every query without duplicate detection
   console.log(`[QUERY LOG] Inserting query log for: "${query}"`);
   await queryCollection.insertOne(queryDocument);
@@ -19305,6 +19311,41 @@ async function executeSKUSearch(collection, skuQuery) {
   }
 }
 const zeroSearchIndexedDbs = new Set();
+
+// ───────────────────────────────────────────────────────────────────────────
+// Lightweight query logging
+// Storefront widgets that don't need product results (e.g. noresult-saver on
+// a search page that already has native results) call this instead of
+// /search, so `queries` reflects ALL storefront searches, not only the ones
+// that happened to trigger a full semantic search. Zero-result searches that
+// go through /search are still logged there via logQuery() — callers should
+// avoid double-logging the same query through both paths.
+// ───────────────────────────────────────────────────────────────────────────
+app.post("/log-query", async (req, res) => {
+  try {
+    const { dbName } = req.store;
+    const { query, session_id, sessionId, zero_results } = req.body;
+    const q = (query || "").toString().trim();
+
+    if (!q) {
+      return res.status(400).json({ error: "Missing required field: query" });
+    }
+
+    const client = await connectToMongoDB(mongodbUri);
+    const db = client.db(dbName);
+
+    await logQuery(db.collection("queries"), q, {}, [], false, {
+      session_id,
+      sessionId,
+      zeroResults: typeof zero_results === "boolean" ? zero_results : undefined
+    });
+
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[LOG-QUERY] Error:", err);
+    return res.status(500).json({ error: "Internal server error" });
+  }
+});
 
 // ───────────────────────────────────────────────────────────────────────────
 // Zero-results search tracking
