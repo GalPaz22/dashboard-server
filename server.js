@@ -458,6 +458,44 @@ async function findDirectPrefixNameMatches(collection, query, limit = 15) {
   }
 }
 
+async function findBroadSingleTokenNameMatches(collection, query, limit = 75) {
+  const tokens = normalizeQuoteCharacters(String(query || '').toLowerCase().trim())
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length !== 1 || tokens[0].length < 3 || /^\d+$/.test(tokens[0])) return [];
+
+  const token = tokens[0];
+  const tokenRegex = new RegExp(
+    `(^|[^\\p{L}\\p{N}])${escapeRegExp(token)}([^\\p{L}\\p{N}]|$)`,
+    'iu'
+  );
+
+  try {
+    const docs = await collection.find({
+      $and: [
+        { name: tokenRegex },
+        ...stockMongoFilterClauses(),
+        HIDDEN_MONGO_FILTER
+      ]
+    })
+      // One extra result tells us whether this is genuinely broader than the
+      // normal 15-item validation window without running a separate count.
+      .limit(limit + 1)
+      .maxTimeMS(600)
+      .toArray();
+
+    const visible = docs.filter(product => isProductVisible(product) && isProductInStock(product));
+    if (visible.length <= 15) return [];
+
+    return rankByNameTextRelevance(visible, [token]).slice(0, limit);
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[BROAD NAME] Direct token lookup failed for "${query}":`, error.message);
+    }
+    return [];
+  }
+}
+
 function isNumericModelQuery(query) {
   return !!getNumericModelToken(query);
 }
@@ -10388,6 +10426,22 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         };
       }
 
+      const broadNameMatches = await findBroadSingleTokenNameMatches(
+        collection,
+        query,
+        MAX_FILTER_MATCH_RESULTS
+      );
+      if (broadNameMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Broad name match: ${broadNameMatches.length} results for "${query}"`);
+        return {
+          results: broadNameMatches,
+          isPerfectFilterMatch: false,
+          isBroadNameMatch: true,
+          filterCheck,
+          queryWords
+        };
+      }
+
       const numericModelMatches = await findDirectNumericModelMatches(collection, query, limit);
       const filteredNumericModelMatches = filterAccessoriesForDeviceQuery(numericModelMatches, query, store, silent);
       if (filteredNumericModelMatches.length > 0) {
@@ -12435,7 +12489,7 @@ app.post("/search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
-    const { results: simpleResults, isPerfectFilterMatch, filterCheck: fc, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, filterCheck: fc, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, searchLimit);
     filterCheck = fc;
 
@@ -12443,17 +12497,17 @@ app.post("/search", async (req, res) => {
       let approvedProducts = [];
       let searchMode = '';
 
-      if (isPerfectFilterMatch) {
+      if (isPerfectFilterMatch || isBroadNameMatch) {
         // 🎯 PERFECT MATCH: Return matching products (category-based search)
         // 🎯 MEMORY PROTECTION: Limit even perfect matches to prevent OOM
         const MAX_PERFECT_MATCH_RESULTS = MAX_FILTER_MATCH_RESULTS;
         approvedProducts = simpleResults.slice(0, MAX_PERFECT_MATCH_RESULTS);
-        searchMode = 'perfect-filter-match';
+        searchMode = isBroadNameMatch ? 'broad-name-match' : 'perfect-filter-match';
 
         if (simpleResults.length > MAX_PERFECT_MATCH_RESULTS) {
-          console.log(`[${requestId}] 🎯 Perfect filter match detected - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
+          console.log(`[${requestId}] 🎯 ${isBroadNameMatch ? 'Broad name' : 'Perfect filter'} match detected - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
         } else {
-          console.log(`[${requestId}] 🎯 Perfect filter match detected - returning ${approvedProducts.length} products from categories`);
+          console.log(`[${requestId}] 🎯 ${isBroadNameMatch ? 'Broad name' : 'Perfect filter'} match detected - returning ${approvedProducts.length} products`);
         }
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
