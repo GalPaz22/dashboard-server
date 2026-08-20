@@ -496,6 +496,56 @@ async function findBroadSingleTokenNameMatches(collection, query, limit = 75) {
   }
 }
 
+function getDeterministicSearchTranslation(query) {
+  const normalized = normalizeQuoteCharacters(String(query || '').trim());
+  if (!normalized) return null;
+
+  // Common Hebrew spelling of the English beauty product line. Translating
+  // this locally keeps Phase 0 fast and prevents the numeric token ("12") from
+  // being searched on its own before the English product name is considered.
+  if (/הארד\s+בייס/iu.test(normalized)) {
+    return normalized.replace(/הארד\s+בייס/giu, 'hard base');
+  }
+
+  return null;
+}
+
+async function findDirectTranslatedNameMatches(collection, translatedQuery, limit = 15) {
+  const translatedTokens = normalizeQuoteCharacters(String(translatedQuery || '').toLowerCase())
+    .match(/[\p{L}\p{N}]+/gu) || [];
+  const tokens = [...new Set(translatedTokens.filter(token => token.length >= 2 || /^\d+$/.test(token)))];
+  if (tokens.length < 2) return [];
+
+  const nameClauses = tokens.map(token => {
+    const escaped = escapeRegExp(token);
+    const pattern = /^\d+$/.test(token)
+      ? new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu')
+      : new RegExp(escaped, 'iu');
+    return { name: pattern };
+  });
+
+  try {
+    const docs = await collection.find({
+      $and: [
+        ...nameClauses,
+        ...stockMongoFilterClauses(),
+        HIDDEN_MONGO_FILTER
+      ]
+    })
+      .limit(Math.max(limit * 3, 20))
+      .maxTimeMS(600)
+      .toArray();
+
+    const visible = docs.filter(product => isProductVisible(product) && isProductInStock(product));
+    return rankByNameTextRelevance(visible, tokens).slice(0, limit);
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[TRANSLATED NAME] Direct lookup failed for "${translatedQuery}":`, error.message);
+    }
+    return [];
+  }
+}
+
 function isNumericModelQuery(query) {
   return !!getNumericModelToken(query);
 }
@@ -10385,14 +10435,15 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
  * 🎯 CORE SIMPLE SEARCH LOGIC
  * Reusable logic for fast, regex-based fuzzy search with perfect filter match detection.
  */
-async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false) {
-  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${limit}`;
-  return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent), 60);
+async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false, translatedQuery = null) {
+  const normalizedTranslation = String(translatedQuery || '').toLowerCase().trim();
+  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${normalizedTranslation}:${limit}`;
+  return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent, translatedQuery), 60);
 }
 
 const MAX_FILTER_MATCH_RESULTS = 75;
 
-async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false) {
+async function _performSimpleSearchInner(db, collection, query, store, limit = 10, silent = false, translatedQuery = null) {
   const queryWords = query.toLowerCase().split(/\s+/).filter(w => w.length >= 2 || /^\d+$/.test(w));
 
   // 🎯 MEMORY PROTECTION: Limit query complexity to prevent OOM
@@ -10442,7 +10493,31 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         };
       }
 
-      const numericModelMatches = await findDirectNumericModelMatches(collection, query, limit);
+      const normalizedTranslatedQuery = normalizeQuoteCharacters(String(translatedQuery || '').trim());
+      if (normalizedTranslatedQuery && normalizedTranslatedQuery.toLowerCase() !== query.toLowerCase()) {
+        const translatedNameMatches = await findDirectTranslatedNameMatches(
+          collection,
+          normalizedTranslatedQuery,
+          limit
+        );
+        if (translatedNameMatches.length > 0) {
+          if (!silent) console.log(`[SIMPLE-SEARCH] Translated name match: ${translatedNameMatches.length} results for "${query}" → "${normalizedTranslatedQuery}"`);
+          return {
+            results: translatedNameMatches,
+            isPerfectFilterMatch: false,
+            isTranslatedTextMatch: true,
+            filterCheck,
+            queryWords
+          };
+        }
+      }
+
+      const translatedDescriptiveTokens = normalizedTranslatedQuery
+        ? (normalizedTranslatedQuery.match(/[\p{L}]+/gu) || [])
+        : [];
+      const numericModelMatches = translatedDescriptiveTokens.length >= 2
+        ? []
+        : await findDirectNumericModelMatches(collection, query, limit);
       const filteredNumericModelMatches = filterAccessoriesForDeviceQuery(numericModelMatches, query, store, silent);
       if (filteredNumericModelMatches.length > 0) {
         if (!silent) console.log(`[SIMPLE-SEARCH] Direct numeric model match: ${filteredNumericModelMatches.length} results for "${query}"`);
@@ -12489,8 +12564,22 @@ app.post("/search", async (req, res) => {
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
 
+    const deterministicTranslation = getDeterministicSearchTranslation(query);
+    if (deterministicTranslation) {
+      precomputedTranslation = deterministicTranslation;
+      console.log(`[${requestId}] 🔤 Deterministic translation: "${query}" → "${precomputedTranslation}"`);
+    } else if (detectHebrew(query) && getNumericModelToken(query)) {
+      precomputedTranslation = await translateQuery(
+        query,
+        context || req.store?.context || 'product catalog'
+      ).catch(() => null);
+      if (precomputedTranslation && precomputedTranslation.toLowerCase() !== query.toLowerCase()) {
+        console.log(`[${requestId}] 🔤 Pre-search translation: "${query}" → "${precomputedTranslation}"`);
+      }
+    }
+
     const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, filterCheck: fc, queryWords } =
-      await performSimpleSearch(db, collection, query, req.store, searchLimit);
+      await performSimpleSearch(db, collection, query, req.store, searchLimit, false, precomputedTranslation);
     filterCheck = fc;
 
     if (simpleResults.length > 0) {
@@ -12534,10 +12623,12 @@ app.post("/search", async (req, res) => {
               types,
               finalSoftCategories,
               req.store?.colors || '',
-              'wine shop'
+              context || req.store?.context || 'product catalog'
             ),
             withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)),
-            translateQuery(query, context).catch(() => null)
+            precomputedTranslation
+              ? Promise.resolve(precomputedTranslation)
+              : translateQuery(query, context).catch(() => null)
           ]);
           console.log(`[${requestId}] ⚡ Unified + embedding + translation done in ${Date.now() - unifiedStart}ms`);
 
