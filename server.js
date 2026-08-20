@@ -11811,15 +11811,9 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   // Hebrew Variations Map (Common roots and their variations)
   const hebrewPrepositions = ['ה', 'ו', 'ב', 'ל', 'מ', 'כ', 'ש'];
 
-  const isVariationMatch = (word, cat) => {
+  const isDirectVariationMatch = (word, cat) => {
     const wordNorm = normalizeFinalLetters(word);
     const catNorm = normalizeFinalLetters(cat);
-    const meaningfulVariantMatch = (a, b) => {
-      if (!a || !b || Math.min(a.length, b.length) < 2) return false;
-      if (a === b) return true;
-      if (Math.min(a.length, b.length) < 4) return false;
-      return (a.startsWith(b) || b.startsWith(a)) && Math.abs(a.length - b.length) <= 1;
-    };
 
     if (wordNorm === catNorm) return true;
 
@@ -11833,6 +11827,28 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     if (catNorm.startsWith(wordNorm) && catNorm.length <= wordNorm.length + 2) return true;
     if (catQuotesNorm.startsWith(wordQuotesNorm) && catQuotesNorm.length <= wordQuotesNorm.length + 2) return true;
 
+    if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
+    if (catNorm.length >= 3 && includesWholeWord(wordNorm, catNorm)) return true;
+    if (wordQuotesNorm.length >= 3 && includesWholeWord(catQuotesNorm, wordQuotesNorm)) return true;
+    if (catQuotesNorm.length >= 3 && includesWholeWord(wordQuotesNorm, catQuotesNorm)) return true;
+
+    return false;
+  };
+
+  const isVariationMatch = (word, cat) => {
+    if (isDirectVariationMatch(word, cat)) return true;
+
+    const wordNorm = normalizeFinalLetters(word);
+    const catNorm = normalizeFinalLetters(cat);
+    const wordQuotesNorm = normalizeQuotes(wordNorm);
+    const catQuotesNorm = normalizeQuotes(catNorm);
+    const meaningfulVariantMatch = (a, b) => {
+      if (!a || !b || Math.min(a.length, b.length) < 2) return false;
+      if (a === b) return true;
+      if (Math.min(a.length, b.length) < 4) return false;
+      return (a.startsWith(b) || b.startsWith(a)) && Math.abs(a.length - b.length) <= 1;
+    };
+
     for (const p of hebrewPrepositions) {
       // Check for prefix preposition match (e.g., "במבצע" starts with "ב", and "מבצע" matches "מבצעים")
       const strippedWordNorm = wordNorm.startsWith(p) ? wordNorm.substring(p.length) : wordNorm;
@@ -11845,11 +11861,6 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       if (meaningfulVariantMatch(wordNorm, strippedCatNorm)) return true;
       if (meaningfulVariantMatch(wordQuotesNorm, strippedCatQuotesNorm)) return true;
     }
-
-    if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
-    if (catNorm.length >= 3 && includesWholeWord(wordNorm, catNorm)) return true;
-    if (wordQuotesNorm.length >= 3 && includesWholeWord(catQuotesNorm, wordQuotesNorm)) return true;
-    if (catQuotesNorm.length >= 3 && includesWholeWord(wordQuotesNorm, catQuotesNorm)) return true;
 
     return false;
   };
@@ -11960,9 +11971,19 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     for (let i = 0; i <= queryWords.length - colWords.length; i++) {
       const querySlice = queryWords.slice(i, i + colWords.length);
 
-      const allMatch = colWords.every((colWord, idx) =>
-        isVariationMatch(querySlice[idx], colWord)
-      );
+      const allMatch = colWords.every((colWord, idx) => {
+        const queryWord = querySlice[idx];
+        const hasDirectSoftCategoryMatch = normalizedSoftCategories.some(softCategory =>
+          isDirectVariationMatch(queryWord, softCategory)
+        );
+
+        // Prefer a direct product/category variation over a color match that only
+        // exists after stripping a Hebrew prefix. For example, "מכחול" directly
+        // matches "מכחולים"; treating its leading מ as a preposition would turn it
+        // into the unrelated color "כחול".
+        return isDirectVariationMatch(queryWord, colWord) ||
+          (!hasDirectSoftCategoryMatch && isVariationMatch(queryWord, colWord));
+      });
 
       if (allMatch) {
         const sliceIndices = Array.from({ length: colWords.length }, (_, idx) => i + idx);
