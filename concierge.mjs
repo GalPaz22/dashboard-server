@@ -15,9 +15,11 @@
         fade the chat open. no_results/out_of_stock detection is synchronous
         and costs no extra query — it reads the payload that was about to be
         sent anyway. The ambiguous non_literal case (word-match failed but
-        fallback search still returned products) uses the same synchronous
-        heuristic by default. An optional LLM review remains available behind
-        CONCIERGE_TRIGGER_REVIEW=true for experiments.
+        fallback search still returned products) additionally gets a small LLM
+        review, grounded in the store's own context and catalog facets, to
+        tell a misspelling that still resolved correctly apart from a genuine
+        request for something the catalog doesn't carry — see
+        reviewNonLiteralQuery / decideTrigger.
 
      2. A chat. POST /concierge/chat streams a Gemini turn over SSE, grounded
         in this store's own catalog through four tools. Everything is scoped by
@@ -48,16 +50,14 @@ const CONVERSATION_TTL_SECONDS = 3 * 60 * 60;
 const TRIGGER_TTL_SECONDS = 30 * 60;
 const MEMORY_CONVERSATION_CAP = 500;
 
-// Optional non-literal trigger review. It is disabled by default because even a
-// small model call delays the completed search response and therefore delays
-// opening the concierge.
+// Non-literal trigger review — a small, fast LLM call that only runs for the
+// ambiguous branch of decideTrigger (word-match failed, but the fallback
+// search still returned something). Keeping this on its own cheap model/budget
+// means it never adds real cost to the literal/no-result/out-of-stock paths,
+// which stay heuristic-only and synchronous.
 const TRIGGER_REVIEW_MODEL = process.env.CONCIERGE_TRIGGER_MODEL || MODEL;
 const TRIGGER_REVIEW_EFFORT = process.env.CONCIERGE_TRIGGER_EFFORT || "low";
 const TRIGGER_REVIEW_TIMEOUT_MS = Number(process.env.CONCIERGE_TRIGGER_TIMEOUT_MS) || 2500;
-// Triggering used to wait for another LLM call after search had already
-// completed. Keep that optional for experiments, but default to the original
-// synchronous heuristic so the storefront can open the concierge immediately.
-const TRIGGER_REVIEW_ENABLED = process.env.CONCIERGE_TRIGGER_REVIEW === "true";
 
 const FACET_CACHE_TTL_MS = 5 * 60 * 1000;
 
@@ -1056,8 +1056,10 @@ async function reviewNonLiteralQuery({ query, products, store, ctx }) {
  * already removed them, so the case arrives as `no_results` — and the chat
  * itself resolves which it was, by searching with in_stock: false.
  *
- * The `non_literal` branch uses the synchronous heuristic by default. An LLM
- * review can be enabled explicitly with CONCIERGE_TRIGGER_REVIEW=true.
+ * The `non_literal` branch (word-match failed but fallback search returned
+ * products) is reviewed by an LLM when `ctx` is given — see
+ * reviewNonLiteralQuery. Without ctx, or if that review fails, it falls back
+ * to the original heuristic (isComplex flag / lexical overlap).
  */
 export async function decideTrigger({ payload, query, store, ctx }) {
   if (!query || query.trim().length < 2) return null;
@@ -1075,13 +1077,15 @@ export async function decideTrigger({ payload, query, store, ctx }) {
     reason = "out_of_stock";
   } else if (!hasLiteral || isComplex) {
     // Products returned only by vector/category fallback are not necessarily
-    // an answer to the literal search. Trigger synchronously so a completed
-    // search response is never held behind another model call.
-    if (TRIGGER_REVIEW_ENABLED) {
-      const reviewed = await reviewNonLiteralQuery({ query, products, store, ctx });
-      if (reviewed && reviewed.should_trigger === false) {
-        return null;
-      }
+    // an answer to the literal search — but raw word overlap can't tell a
+    // misspelling that still resolved correctly apart from a genuine request
+    // for something the catalog doesn't carry. Ask an LLM, grounded in this
+    // store's context and catalog, to make that call; fall back to treating
+    // it as non_literal (the pre-review behavior) if the review is skipped or
+    // fails, so this never regresses to no trigger at all.
+    const reviewed = await reviewNonLiteralQuery({ query, products, store, ctx });
+    if (reviewed && reviewed.should_trigger === false) {
+      return null;
     }
     reason = "non_literal";
   }
@@ -1105,9 +1109,10 @@ export async function decideTrigger({ payload, query, store, ctx }) {
  * builder in server.js gets the trigger for free — the same idiom the
  * special-label stamping already uses.
  *
- * res.json remains async only because the optional trigger review can be
- * enabled by configuration. With the default settings every decision resolves
- * synchronously without network or database work.
+ * res.json is async here (it wasn't before decideTrigger could review a query
+ * with an LLM): the literal/no-result/out-of-stock paths still resolve in the
+ * same tick since decideTrigger only awaits anything on the reviewed
+ * non-literal branch, so this only delays the response for that subset.
  */
 export function conciergeSearchTrigger(deps) {
   return function conciergeSearchTriggerMiddleware(req, res, next) {
