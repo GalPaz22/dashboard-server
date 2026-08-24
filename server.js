@@ -3700,13 +3700,19 @@ function buildStandardVectorSearchPipeline(queryEmbedding, hardFilters = {}, lim
     conditions.push({ price: priceFilter });
   }
 
-  // Soft category filtering for vector search
+  // Soft category filtering for vector search. Soft categories are a boost signal,
+  // not a hard filter (matching buildStandardSearchPipeline's text-search behavior) —
+  // except when explicitly excluding matches (invertSoftFilter) or a caller opts into
+  // hard filtering via enforceSoftCategoryFilter. Without this gate, every soft-category
+  // vector search silently hard-filtered on values like the raw query text (used as a
+  // fallback "soft category" when nothing better was extracted), which essentially never
+  // matches a real product softCategory value and returns zero results.
   if (softFilters && softFilters.softCategory) {
     const softCatsToMatch = Array.isArray(softFilters.softCategory) ? softFilters.softCategory.filter(Boolean) : [softFilters.softCategory].filter(Boolean);
     if (softCatsToMatch.length > 0) {
       if (invertSoftFilter) {
         conditions.push({ softCategory: { $nin: softCatsToMatch } });
-      } else {
+      } else if (enforceSoftCategoryFilter) {
         conditions.push({ softCategory: { $in: softCatsToMatch } });
       }
     }
@@ -7453,16 +7459,67 @@ async function executeExplicitSoftCategorySearch(
   // Use original text for exact match checks, filtered text for search
   const cleanedTextForExactMatch = originalCleanedText || cleanedTextForSearch;
 
-  // FIRST: Find high-quality text matches that should be included regardless of soft categories
-  // BUT: Skip entirely if skipTextualSearch is true (complex queries, Tier 2)
-  let highQualityTextMatches = [];
-  
-  if (!skipTextualSearch) {
-  try {
-    const textSearchPipeline = buildStandardSearchPipeline(cleanedTextForSearch, query, hardFilters, Math.max(searchLimit, 100), useOrLogic, isImageModeWithSoftCategories);
-    const textSearchResults = await collection.aggregate(textSearchPipeline).toArray();
+  // Check if this is a pure hard category search
+  const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 &&
+    (!cleanedTextForExactMatch || cleanedTextForExactMatch.trim() === '' ||
+     (hardFilters.category && (() => {
+       const categoriesArray = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
+       const lowerQuery = query.toLowerCase().trim();
+       return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
+     })()));
 
-    const textResultsWithBonuses = textSearchResults.map(doc => {
+  const softCategoryLimit = searchLimit;
+  const nonSoftCategoryLimit = searchLimit;
+  // 🎯 SKIP non-soft-category search when colors are specified - we want ONLY products matching the color filter
+  const hasColorFilter = softFilters && softFilters.color && Array.isArray(softFilters.color) && softFilters.color.length > 0;
+
+  // None of these queries depend on each other's results (high-quality text matches,
+  // soft-category matches, and non-soft-category matches are three independent views of
+  // the same collection) — fire all five Atlas calls concurrently instead of three
+  // sequential round trips. That was costing ~2s per stage × 3 stages on a large catalog.
+  const [
+    textSearchResultsRaw,
+    softCategoryFuzzyResults,
+    softCategoryVectorResults,
+    nonSoftCategoryFuzzyResults,
+    nonSoftCategoryVectorResults,
+  ] = await Promise.all([
+    !skipTextualSearch
+      ? collection.aggregate(buildStandardSearchPipeline(
+          cleanedTextForSearch, query, hardFilters, Math.max(searchLimit, 100), useOrLogic, isImageModeWithSoftCategories
+        )).toArray().catch(error => {
+          console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
+          return [];
+        })
+      : Promise.resolve([]),
+    !skipTextualSearch
+      ? collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
+          cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+        )).toArray()
+      : Promise.resolve([]),
+    queryEmbedding
+      ? collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
+          queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic, enforceSoftCategoryFilter
+        )).toArray()
+      : Promise.resolve([]),
+    (!skipTextualSearch && !hasColorFilter)
+      ? collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
+          cleanedTextForSearch, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
+        )).toArray()
+      : Promise.resolve([]),
+    (!skipTextualSearch && !hasColorFilter && queryEmbedding)
+      ? collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
+          queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
+        )).toArray()
+      : Promise.resolve([]),
+  ]);
+
+  // Post-process high-quality text matches: bonus scoring, soft-category boost marking,
+  // strong-exact-match filtering. (Same logic as before, just running after the parallel
+  // fetch instead of inline with its own query.)
+  let highQualityTextMatches = [];
+  try {
+    highQualityTextMatches = textSearchResultsRaw.map(doc => {
       const bonus = getExactMatchBonus(doc.name, query, cleanedTextForExactMatch);
       return {
         ...doc,
@@ -7471,9 +7528,7 @@ async function executeExplicitSoftCategorySearch(
         softFilterMatch: false,
         softCategoryMatches: 0
       };
-    });
-
-    highQualityTextMatches = textResultsWithBonuses.filter(r => (r.exactMatchBonus || 0) >= 1000);
+    }).filter(r => (r.exactMatchBonus || 0) >= 1000);
 
     // 🎯 SOFT CATEGORIES ARE OPTIONAL: Don't filter out text matches, just boost those that match
     // Products without matching soft categories should still appear, just with lower priority
@@ -7498,116 +7553,24 @@ async function executeExplicitSoftCategorySearch(
             }
           }
         });
-
-        const matchCount = highQualityTextMatches.filter(p => p.softCategoryBoost).length;
-        // Soft cat boost applied (logged below)
       }
     }
-    
+
     // CRITICAL: If we have strong exact matches (>= 50000), filter out weak fuzzy matches
     // This prevents "סלמי" from appearing when searching for "סלרי"
     const STRONG_EXACT_MATCH_THRESHOLD = 50000;
     const strongExactMatches = highQualityTextMatches.filter(r => (r.exactMatchBonus || 0) >= STRONG_EXACT_MATCH_THRESHOLD);
-    
-    if (strongExactMatches.length > 0) {
-      const beforeCount = highQualityTextMatches.length;
-      highQualityTextMatches = strongExactMatches;
-          // Strong exact matches only — weak filtered out
-    }
-    
-    highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
 
-    // [text match count logged in summary below]
-  } catch (error) {
-    console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
+    if (strongExactMatches.length > 0) {
+      highQualityTextMatches = strongExactMatches;
     }
-  } else {
-    // Skipping text match search (skipTextualSearch = true)
+
+    highQualityTextMatches.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
+  } catch (error) {
+    console.error("[SOFT SEARCH] Error processing high-quality text matches:", error.message);
+    highQualityTextMatches = [];
   }
-  
-  // Check if this is a pure hard category search
-  const isPureHardCategorySearch = Object.keys(hardFilters).length > 0 && 
-    (!cleanedTextForExactMatch || cleanedTextForExactMatch.trim() === '' || 
-     (hardFilters.category && (() => {
-       const categoriesArray = Array.isArray(hardFilters.category) ? hardFilters.category : [hardFilters.category];
-       const lowerQuery = query.toLowerCase().trim();
-       return categoriesArray.some(cat => typeof cat === 'string' && lowerQuery === cat.toLowerCase().trim());
-     })()));
-  
-  const softCategoryLimit = searchLimit;
-  const nonSoftCategoryLimit = searchLimit;
-  
-  // isPureHardCategorySearch: ${isPureHardCategorySearch}
-  
-  if (skipTextualSearch) {
-    // Skipping textual fuzzy search (complex query - vectors only)
-  }
-  
-  // Phase 1: Get products WITH soft categories
-  const softCategoryPromises = [];
-  
-  // Add text search only if NOT skipping
-  if (!skipTextualSearch) {
-    softCategoryPromises.push(
-    collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
-      cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
-    )).toArray()
-    );
-  }
-  
-  // Always add vector search if embedding is available
-  if (queryEmbedding) {
-    softCategoryPromises.push(
-      collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic, enforceSoftCategoryFilter
-      )).toArray()
-    );
-  }
-  
-  // Handle results based on what searches were run
-  let softCategoryFuzzyResults = [];
-  let softCategoryVectorResults = [];
-  
-  if (skipTextualSearch && queryEmbedding) {
-    // Only vector search was run
-    [softCategoryVectorResults] = await Promise.all(softCategoryPromises);
-  } else if (!skipTextualSearch && queryEmbedding) {
-    // Both text and vector searches were run
-    [softCategoryFuzzyResults, softCategoryVectorResults] = await Promise.all(softCategoryPromises);
-  } else if (!skipTextualSearch && !queryEmbedding) {
-    // Only text search was run
-    [softCategoryFuzzyResults] = await Promise.all(softCategoryPromises);
-  }
-  
-  // Phase 2: Get products WITHOUT soft categories (ALWAYS SKIP for complex queries with skipTextualSearch)
-  // 🎯 ALSO SKIP when colors are specified - we want ONLY products matching the color filter
-  let nonSoftCategoryFuzzyResults = [];
-  let nonSoftCategoryVectorResults = [];
-  
-  const hasColorFilter = softFilters && softFilters.color && Array.isArray(softFilters.color) && softFilters.color.length > 0;
-  
-  if (skipTextualSearch) {
-    // Skipping non-soft-category search (complex query mode)
-  } else if (hasColorFilter) {
-    // Skipping non-soft-category search (color filter active)
-  } else {
-  const nonSoftCategoryPromises = [
-    collection.aggregate(buildNonSoftCategoryFilteredSearchPipeline(
-      cleanedTextForSearch, query, hardFilters, softFilters, nonSoftCategoryLimit, useOrLogic, isImageModeWithSoftCategories
-    )).toArray()
-  ];
-  
-  if (queryEmbedding) {
-    nonSoftCategoryPromises.push(
-      collection.aggregate(buildNonSoftCategoryFilteredVectorSearchPipeline(
-        queryEmbedding, hardFilters, softFilters, vectorLimit, useOrLogic
-      )).toArray()
-    );
-  }
-  
-    [nonSoftCategoryFuzzyResults, nonSoftCategoryVectorResults = []] = await Promise.all(nonSoftCategoryPromises);
-  }
-  
+
   const softCategoryDocumentRanks = new Map();
   softCategoryFuzzyResults.forEach((doc, index) => {
     softCategoryDocumentRanks.set(doc._id.toString(), { fuzzyRank: index, vectorRank: Infinity, doc });
