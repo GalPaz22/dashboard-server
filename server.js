@@ -514,7 +514,11 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
   const translatedTokens = normalizeQuoteCharacters(String(translatedQuery || '').toLowerCase())
     .match(/[\p{L}\p{N}]+/gu) || [];
   const tokens = [...new Set(translatedTokens.filter(token => token.length >= 2 || /^\d+$/.test(token)))];
-  if (tokens.length < 2) return [];
+  // A single translated token is enough — this is only reached after exact/broad name
+  // matching already failed, for a query that translated cleanly (e.g. Hebrew "לילי" →
+  // English "Lily", a single-word brand name that would never otherwise match the
+  // Latin-script product name). Requiring 2+ tokens silently excluded exactly this case.
+  if (tokens.length < 1) return [];
 
   const nameClauses = tokens.map(token => {
     const escaped = escapeRegExp(token);
@@ -3148,28 +3152,70 @@ async function executeOptimizedFilterOnlySearch(
   query = '',
   cleanedText = '',
   boostScores = null,
-  limit = 200
+  limit = 200,
+  context = ''
 ) {
   const startTime = Date.now();
-  
+
   try {
     // Use optimized pipeline with user-specified limit to reduce latency
     const pipeline = buildOptimizedFilterOnlyPipeline(hardFilters, softFilters, useOrLogic, limit);
-    
-    // Execute with performance optimizations
-    const results = await collection.aggregate(pipeline, {
-      allowDiskUse: false,  // Force memory usage for speed
-      maxTimeMS: 30000      // 30 second timeout
-    }).toArray();
-    
+
+    // The filter-only pipeline above only matches on hard category/type — it never looks
+    // at the query text at all. That's fine when the query genuinely IS just a filter
+    // ("red wine"), but this path also fires whenever an LLM infers a type/category from
+    // a single word that's actually a literal product name (e.g. "Kindle" → inferred
+    // type "digital book" — which excludes the actual Kindle-named products/accessories,
+    // since none of them carry that type). Run a filter-unconstrained name search
+    // alongside it so a real product-name match always has a chance to surface,
+    // regardless of what category/type got inferred.
+    const nameSearch = (text) => collection.aggregate(
+      buildStandardSearchPipeline(text, text, {}, Math.min(limit, 50), useOrLogic)
+    ).toArray().catch(err => {
+      console.error("[FILTER-ONLY] Supplementary name search failed:", err.message);
+      return [];
+    });
+
+    const [filterResults, initialNameMatchResults] = await Promise.all([
+      collection.aggregate(pipeline, {
+        allowDiskUse: false,  // Force memory usage for speed
+        maxTimeMS: 30000      // 30 second timeout
+      }).toArray(),
+      (query && query.trim()) ? nameSearch(cleanedText || query) : Promise.resolve([]),
+    ]);
+
+    // The name search above matches same-script text only (Atlas Search doesn't bridge
+    // scripts). If the query is Latin-script and found nothing, it may still be a real
+    // product name written in Hebrew on this store (e.g. "Kindle" → "קינדל") — try a
+    // transliteration and search again before giving up on a text match entirely.
+    let nameMatchResults = initialNameMatchResults;
+    if (nameMatchResults.length === 0 && query && query.trim() && !detectHebrew(query)) {
+      const hebrewTransliteration = await translateEnglishToHebrew(query, context).catch(() => null);
+      if (hebrewTransliteration) {
+        nameMatchResults = await nameSearch(hebrewTransliteration);
+      }
+    }
+
     const executionTime = Date.now() - startTime;
-    
+
+    // Merge, preferring the filter-matched set's order but adding any name matches the
+    // filter missed (deduplicated by _id).
+    const seenIds = new Set(filterResults.map(doc => doc._id.toString()));
+    const mergedResults = [
+      ...filterResults,
+      // Tag these so scoring below can trust "this is a real name match" even when
+      // getExactMatchBonus can't confirm it itself — e.g. a Hebrew product name matched
+      // via an English query's Hebrew transliteration, which doesn't share characters
+      // with the original query text for a substring/fuzzy comparison to find.
+      ...nameMatchResults.filter(doc => !seenIds.has(doc._id.toString())).map(doc => ({ ...doc, __nameMatched: true })),
+    ];
+
     // Filter out already-delivered products
     const filteredResults = deliveredIds && deliveredIds.length > 0
-      ? results.filter(doc => !deliveredIds.includes(doc._id.toString()))
-      : results;
-    
-    console.log(`[FILTER-ONLY] ${filteredResults.length} results in ${executionTime}ms`);
+      ? mergedResults.filter(doc => !deliveredIds.includes(doc._id.toString()))
+      : mergedResults;
+
+    console.log(`[FILTER-ONLY] ${filteredResults.length} results in ${executionTime}ms (${filterResults.length} filter + ${nameMatchResults.length} name-match candidates)`);
     
     // Add simple scoring for consistent ordering with multi-category boosting
     const scoredResults = filteredResults.map((doc, index) => {
@@ -3177,15 +3223,23 @@ async function executeOptimizedFilterOnlySearch(
         calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, boostScores, doc.colors, softFilters.color) :
         { count: 0, weightedScore: 0 };
       
-      // Calculate text match bonus if query is provided
-      const exactMatchBonus = query ? getExactMatchBonus(doc.name, query, cleanedText) : 0;
-      
+      // Calculate text match bonus if query is provided. A doc pulled in by the
+      // supplementary name search is a confirmed match even when the bonus heuristic
+      // itself can't see it (cross-script transliteration case) — trust the tag over a
+      // score of 0 in that case.
+      const computedBonus = query ? getExactMatchBonus(doc.name, query, cleanedText) : 0;
+      const exactMatchBonus = doc.__nameMatched ? Math.max(computedBonus, 50000) : computedBonus;
+
       // Base score with exponential boost - use weightedScore to respect boost values
       const multiCategoryBoost = matchResult.weightedScore > 0 ? Math.pow(5, matchResult.weightedScore) * 2000 : 0;
-      
+
+      const { __nameMatched, ...docWithoutTag } = doc;
       return {
-        ...doc,
-        rrf_score: 10000 - index + multiCategoryBoost, // High base score with multi-category boost
+        ...docWithoutTag,
+        // exactMatchBonus folded in here, not just stored separately — a later stage
+        // re-sorts purely by rrf_score ("Sorting by RRF score only"), which would
+        // otherwise silently discard the ordering set by the sort below.
+        rrf_score: 10000 - index + multiCategoryBoost + exactMatchBonus,
         softFilterMatch: !!(softFilters && softFilters.softCategory),
         softCategoryMatches: matchResult.count,
         exactMatchBonus: exactMatchBonus, // Store for sorting
@@ -3193,9 +3247,17 @@ async function executeOptimizedFilterOnlySearch(
         filterOnly: true
       };
     });
-    
+
+    // Float genuine product-name matches (from the supplementary search above, or from
+    // the filter-matched set itself) to the front. Callers slice this down to a page size
+    // downstream, so without this a real name match sitting behind a large filter-matched
+    // set could get cut off entirely instead of ever reaching the response. Stable sort:
+    // ties (the common case — a pure category browse, where every doc scores 0) keep their
+    // original filter-relevance order.
+    scoredResults.sort((a, b) => (b.exactMatchBonus || 0) - (a.exactMatchBonus || 0));
+
     return scoredResults;
-    
+
   } catch (error) {
     console.error("[FILTER-ONLY] Pipeline execution failed:", error);
     throw error;
@@ -3876,7 +3938,19 @@ async function translateQuery(query, context) {
   try {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
-      
+
+    // These wine-domain hints only make sense for wine/beverage merchants — they used to
+    // apply unconditionally to every store on this server, which actively corrupted
+    // translations elsewhere. E.g. Garmin's "לילי" (the Lily watch line) was translated to
+    // "Lillet" (a French aperitif brand) because the model was primed to read ambiguous
+    // short Hebrew words as wine terms, regardless of what store was actually asking.
+    const isWineContext = /wine|winery|יין|יקב/i.test(context || '');
+    const wineHints = isWineContext
+      ? `\nPay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
+Also:
+- "פלאם" or "פלם" should be translated as "Flam" (winery name), NOT "plum" or "flame".`
+      : '';
+
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.1,
@@ -3884,15 +3958,12 @@ async function translateQuery(query, context) {
         {
           role: "system",
           content:
-            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction. 
+            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction.
 Instructions:
 1. Translate the text from Hebrew to English.
 2. Remove any extraneous or stop words.
-3. Output only the essential keywords and phrases that will best represent the query context 
-(remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
-Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
-Also:
-- "פלאם" or "פלם" should be translated as "Flam" (winery name), NOT "plum" or "flame".`
+3. Output only the essential keywords and phrases that will best represent the query context
+(remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).${wineHints}`
         },
         { role: "user", content: query },
       ],
@@ -3928,18 +3999,7 @@ IMPORTANT: Only provide a Hebrew transliteration if:
 1. The query looks like a brand name or product name (not a generic word)
 2. There's a clear Hebrew transliteration commonly used
 
-Common transliterations for ${context || 'wine and spirits'}:
-- "balvini" or "balvenie" → "בלוויני" (Balvenie whisky)
-- "glenfiddich" → "גלנפידיך"
-- "macallan" → "מקאלן"
-- "johnnie walker" → "ג'וני ווקר"
-- "chivas" → "שיבאס"
-- "absolut" → "אבסולוט"
-- "smirnoff" → "סמירנוף"
-- "grey goose" → "גריי גוס"
-- "moet" → "מואט"
-- "veuve clicquot" → "וו קליקו"
-- "dom perignon" → "דום פריניון"
+This is for a "${context || 'general e-commerce'}" store — base the transliteration on how that transliteration is actually written in Hebrew for products in this domain (e.g. "kindle" → "קינדל" for an electronics/books store, "balvenie" → "בלוויני" for a wine/spirits store).
 
 If you can provide a Hebrew transliteration, output ONLY the Hebrew text.
 If the query is generic (like "vodka", "wine", "red") or you're not confident, output "NO_TRANSLATION".`
@@ -8016,7 +8076,9 @@ app.get("/search/auto-load-more", async (req, res) => {
         deliveredIds,
         query,
         cleanedText,
-        req.store.softCategoriesBoost
+        req.store.softCategoriesBoost,
+        undefined,
+        context
       );
     } else if (hasSoftFilters) {
       console.log(`[${requestId}] Using soft category search`);
@@ -10465,7 +10527,46 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         };
       }
 
-      const normalizedTranslatedQuery = normalizeQuoteCharacters(String(translatedQuery || '').trim());
+      // Neither check above catches a single word that's a literal substring/token of a
+      // SMALL number of product names (e.g. "קינדל" appearing in "כיסוי לקינדל..." — only
+      // ~6 products). findDirectExactNameMatches requires the whole name to match exactly;
+      // findBroadSingleTokenNameMatches intentionally requires >15 matches (it's for
+      // browsing a whole product line, not finding a specific item). Try the same
+      // regex-token lookup used for translated queries below, but on the query as typed —
+      // it's a real gap otherwise: a query that IS the exact right word for a small set of
+      // real products falls through to fuzzy matching, which can return unrelated
+      // same-edit-distance words instead.
+      const directNameMatches = await findDirectTranslatedNameMatches(collection, query, limit);
+      if (directNameMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Direct token name match: ${directNameMatches.length} results for "${query}"`);
+        return {
+          results: directNameMatches,
+          isPerfectFilterMatch: false,
+          isExactTextMatch: true,
+          filterCheck,
+          queryWords
+        };
+      }
+
+      let normalizedTranslatedQuery = normalizeQuoteCharacters(String(translatedQuery || '').trim());
+
+      // The caller only pre-translates Hebrew queries that contain a numeric model token
+      // (e.g. "פניקס 8"), so a pure brand/product-name query in Hebrew with no digits
+      // (e.g. "לילי" for the English-named product "Lily") never gets a translation and
+      // therefore never reaches findDirectTranslatedNameMatches below — even though that
+      // lookup would find the product correctly once it has the English name. Exact/broad
+      // name matching (above) already had its shot and found nothing, so it's worth the
+      // one-off translation call here (cached 7 days) before falling through to fuzzy
+      // matching, which can return unrelated same-edit-distance Hebrew words instead.
+      if (!normalizedTranslatedQuery && detectHebrew(query)) {
+        try {
+          const lazyTranslation = await translateQuery(query, store.context || 'product catalog');
+          normalizedTranslatedQuery = normalizeQuoteCharacters(String(lazyTranslation || '').trim());
+        } catch (err) {
+          if (!silent) console.warn(`[SIMPLE-SEARCH] Lazy translation failed for "${query}":`, err.message);
+        }
+      }
+
       if (normalizedTranslatedQuery && normalizedTranslatedQuery.toLowerCase() !== query.toLowerCase()) {
         const translatedNameMatches = await findDirectTranslatedNameMatches(
           collection,
@@ -13944,7 +14045,8 @@ app.post("/search", async (req, res) => {
           query,
           cleanedText,
           req.store.softCategoriesBoost,
-          searchLimit * 3 // Limit to reduce latency while maintaining quality
+          searchLimit * 3, // Limit to reduce latency while maintaining quality
+          context || req.store?.context || 'product catalog'
         );
         
         const filterExecutionTime = Date.now() - filterStartTime;
