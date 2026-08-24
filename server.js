@@ -514,7 +514,11 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
   const translatedTokens = normalizeQuoteCharacters(String(translatedQuery || '').toLowerCase())
     .match(/[\p{L}\p{N}]+/gu) || [];
   const tokens = [...new Set(translatedTokens.filter(token => token.length >= 2 || /^\d+$/.test(token)))];
-  if (tokens.length < 2) return [];
+  // A single translated token is enough — this is only reached after exact/broad name
+  // matching already failed, for a query that translated cleanly (e.g. Hebrew "לילי" →
+  // English "Lily", a single-word brand name that would never otherwise match the
+  // Latin-script product name). Requiring 2+ tokens silently excluded exactly this case.
+  if (tokens.length < 1) return [];
 
   const nameClauses = tokens.map(token => {
     const escaped = escapeRegExp(token);
@@ -3876,7 +3880,19 @@ async function translateQuery(query, context) {
   try {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
-      
+
+    // These wine-domain hints only make sense for wine/beverage merchants — they used to
+    // apply unconditionally to every store on this server, which actively corrupted
+    // translations elsewhere. E.g. Garmin's "לילי" (the Lily watch line) was translated to
+    // "Lillet" (a French aperitif brand) because the model was primed to read ambiguous
+    // short Hebrew words as wine terms, regardless of what store was actually asking.
+    const isWineContext = /wine|winery|יין|יקב/i.test(context || '');
+    const wineHints = isWineContext
+      ? `\nPay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
+Also:
+- "פלאם" or "פלם" should be translated as "Flam" (winery name), NOT "plum" or "flame".`
+      : '';
+
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.1,
@@ -3884,15 +3900,12 @@ async function translateQuery(query, context) {
         {
           role: "system",
           content:
-            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction. 
+            `Your task is to translate and clean the following Hebrew search query so that it is optimized for embedding extraction.
 Instructions:
 1. Translate the text from Hebrew to English.
 2. Remove any extraneous or stop words.
-3. Output only the essential keywords and phrases that will best represent the query context 
-(remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).
-Pay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
-Also:
-- "פלאם" or "פלם" should be translated as "Flam" (winery name), NOT "plum" or "flame".`
+3. Output only the essential keywords and phrases that will best represent the query context
+(remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).${wineHints}`
         },
         { role: "user", content: query },
       ],
@@ -10465,7 +10478,25 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         };
       }
 
-      const normalizedTranslatedQuery = normalizeQuoteCharacters(String(translatedQuery || '').trim());
+      let normalizedTranslatedQuery = normalizeQuoteCharacters(String(translatedQuery || '').trim());
+
+      // The caller only pre-translates Hebrew queries that contain a numeric model token
+      // (e.g. "פניקס 8"), so a pure brand/product-name query in Hebrew with no digits
+      // (e.g. "לילי" for the English-named product "Lily") never gets a translation and
+      // therefore never reaches findDirectTranslatedNameMatches below — even though that
+      // lookup would find the product correctly once it has the English name. Exact/broad
+      // name matching (above) already had its shot and found nothing, so it's worth the
+      // one-off translation call here (cached 7 days) before falling through to fuzzy
+      // matching, which can return unrelated same-edit-distance Hebrew words instead.
+      if (!normalizedTranslatedQuery && detectHebrew(query)) {
+        try {
+          const lazyTranslation = await translateQuery(query, store.context || 'product catalog');
+          normalizedTranslatedQuery = normalizeQuoteCharacters(String(lazyTranslation || '').trim());
+        } catch (err) {
+          if (!silent) console.warn(`[SIMPLE-SEARCH] Lazy translation failed for "${query}":`, err.message);
+        }
+      }
+
       if (normalizedTranslatedQuery && normalizedTranslatedQuery.toLowerCase() !== query.toLowerCase()) {
         const translatedNameMatches = await findDirectTranslatedNameMatches(
           collection,
