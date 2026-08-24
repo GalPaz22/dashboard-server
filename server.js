@@ -3644,12 +3644,6 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
   return pipeline;
 };
 
-// Search pipeline WITH soft category filter - OPTIMIZED
-const buildSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
-  // Soft category filter now integrated into $search compound operator
-  return buildStandardSearchPipeline(cleanedHebrewText, query, hardFilters, limit, useOrLogic, isImageModeWithSoftCategories, [], softFilters, false);
-};
-
 // Search pipeline WITHOUT soft category filter - OPTIMIZED
 const buildNonSoftCategoryFilteredSearchPipeline = (cleanedHebrewText, query, hardFilters, softFilters, limit = 12, useOrLogic = false, isImageModeWithSoftCategories = false) => {
   // Inverted soft category filter now integrated into $search compound operator
@@ -7475,11 +7469,19 @@ async function executeExplicitSoftCategorySearch(
 
   // None of these queries depend on each other's results (high-quality text matches,
   // soft-category matches, and non-soft-category matches are three independent views of
-  // the same collection) — fire all five Atlas calls concurrently instead of three
-  // sequential round trips. That was costing ~2s per stage × 3 stages on a large catalog.
+  // the same collection) — fire them all concurrently instead of sequential round trips.
+  //
+  // buildSoftCategoryFilteredSearchPipeline(..., invertSoftFilter=false) is NOT actually
+  // filtered or scored any differently by softFilters — buildStandardSearchPipeline only
+  // branches on softFilters when invertSoftFilter is true (the "exclude" case used below
+  // for non-soft-category results). With invertSoftFilter=false the two calls produce the
+  // identical $search compound query, differing only in $limit — so the fuzzy text half of
+  // "soft category" results is just a prefix of the "high-quality text matches" results
+  // fetched with a larger limit. Slicing instead of re-querying removes one of what used
+  // to be five concurrent Atlas calls (was real duplicate load on the cluster, not just an
+  // extra request).
   const [
     textSearchResultsRaw,
-    softCategoryFuzzyResults,
     softCategoryVectorResults,
     nonSoftCategoryFuzzyResults,
     nonSoftCategoryVectorResults,
@@ -7491,11 +7493,6 @@ async function executeExplicitSoftCategorySearch(
           console.error("[SOFT SEARCH] Error finding high-quality text matches:", error.message);
           return [];
         })
-      : Promise.resolve([]),
-    !skipTextualSearch
-      ? collection.aggregate(buildSoftCategoryFilteredSearchPipeline(
-          cleanedTextForSearch, query, hardFilters, softFilters, softCategoryLimit, useOrLogic, isImageModeWithSoftCategories
-        )).toArray()
       : Promise.resolve([]),
     queryEmbedding
       ? collection.aggregate(buildSoftCategoryFilteredVectorSearchPipeline(
@@ -7513,6 +7510,7 @@ async function executeExplicitSoftCategorySearch(
         )).toArray()
       : Promise.resolve([]),
   ]);
+  const softCategoryFuzzyResults = skipTextualSearch ? [] : textSearchResultsRaw.slice(0, softCategoryLimit);
 
   // Post-process high-quality text matches: bonus scoring, soft-category boost marking,
   // strong-exact-match filtering. (Same logic as before, just running after the parallel
