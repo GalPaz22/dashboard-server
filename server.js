@@ -2697,64 +2697,70 @@ app.use((req, res, next) => {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Special-label stamping
-// Merchants flag products in Mongo with `specialLabel: true`. We tag every
-// product returned by the /search endpoints with that boolean — looked up once
-// per store and cached — so the storefront widget can render a merchant-defined
-// label, regardless of which internal search path built the response.
+// Merchants flag products in Mongo with `specialLabel`. Legacy merchants store
+// a plain `true`; newer merchants store a value object (e.g. book_formats with
+// printed/digital price tiers). We look this up once per store, cache it, and
+// stamp every product returned by the /search endpoints with the *complete*
+// stored value — never coerced to boolean — so the storefront widget can
+// render whatever shape the merchant configured, regardless of which internal
+// search path built the response.
 // ───────────────────────────────────────────────────────────────────────────
 const SPECIAL_LABEL_SEARCH_PATHS = new Set(['/search', '/search/load-more', '/search/auto-load-more']);
 const SPECIAL_LABEL_TTL_MS = 60 * 1000;
-const specialLabelCache = new Map(); // `${dbName}.${collection}` -> { ids:Set, at:number }
+const specialLabelCache = new Map(); // `${dbName}.${collection}` -> { labels:Map, at:number }
 
-async function getSpecialLabelIds(dbName, collectionName) {
+async function getSpecialLabels(dbName, collectionName) {
   const key = `${dbName}.${collectionName}`;
   const cached = specialLabelCache.get(key);
-  if (cached && Date.now() - cached.at < SPECIAL_LABEL_TTL_MS) return cached.ids;
+  if (cached && Date.now() - cached.at < SPECIAL_LABEL_TTL_MS) return cached.labels;
 
   const client = await connectToMongoDB(mongodbUri);
   const docs = await client.db(dbName).collection(collectionName)
-    .find({ specialLabel: true }, { projection: { id: 1, _id: 0 } })
+    .find({ specialLabel: { $exists: true, $nin: [null, false] } }, { projection: { id: 1, specialLabel: 1, _id: 0 } })
     .toArray();
-  const ids = new Set(docs.map(d => d.id).filter(v => v !== undefined && v !== null));
-  specialLabelCache.set(key, { ids, at: Date.now() });
-  return ids;
+  const labels = new Map();
+  for (const d of docs) {
+    if (d.id !== undefined && d.id !== null) labels.set(d.id, d.specialLabel);
+  }
+  specialLabelCache.set(key, { labels, at: Date.now() });
+  return labels;
 }
 
-function stampSpecialLabelArray(arr, ids) {
+function stampSpecialLabelArray(arr, labels) {
   if (!Array.isArray(arr)) return;
   for (const p of arr) {
-    if (p && typeof p === 'object') p.specialLabel = ids.has(p.id);
+    if (p && typeof p === 'object') p.specialLabel = labels.get(p.id) ?? false;
   }
 }
 
-function stampSpecialLabelPayload(payload, ids) {
+function stampSpecialLabelPayload(payload, labels) {
   if (!payload || typeof payload !== 'object') return payload;
-  if (Array.isArray(payload)) { stampSpecialLabelArray(payload, ids); return payload; }
-  stampSpecialLabelArray(payload.products, ids);
-  stampSpecialLabelArray(payload.results, ids);
-  stampSpecialLabelArray(payload.items, ids);
-  stampSpecialLabelArray(payload.hits, ids);
-  if (payload.data) stampSpecialLabelArray(payload.data.products, ids);
+  if (Array.isArray(payload)) { stampSpecialLabelArray(payload, labels); return payload; }
+  stampSpecialLabelArray(payload.products, labels);
+  stampSpecialLabelArray(payload.results, labels);
+  stampSpecialLabelArray(payload.items, labels);
+  stampSpecialLabelArray(payload.hits, labels);
+  if (payload.data) stampSpecialLabelArray(payload.data.products, labels);
   if (Array.isArray(payload.tiers)) {
-    payload.tiers.forEach(t => stampSpecialLabelArray(t && t.products, ids));
+    payload.tiers.forEach(t => stampSpecialLabelArray(t && t.products, labels));
   }
   return payload;
 }
 
-// Wrap res.json on the search routes so every outgoing product carries the flag,
+// Wrap res.json on the search routes so every outgoing product carries the label,
 // no matter which of the ~15 internal response builders produced it.
 app.use(async (req, res, next) => {
   if (!SPECIAL_LABEL_SEARCH_PATHS.has(req.path) || !req.store || !req.store.dbName) return next();
 
-  let ids = new Set();
+  let labels = new Map();
   try {
-    ids = await getSpecialLabelIds(req.store.dbName, req.store.products);
+    labels = await getSpecialLabels(req.store.dbName, req.store.products);
   } catch (err) {
     console.warn('[SPECIAL-LABEL] lookup failed:', err.message);
   }
 
   const sendJson = res.json.bind(res);
-  res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, ids));
+  res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, labels));
   next();
 });
 
@@ -6690,8 +6696,12 @@ Products with these similar colors should be ranked highly as they match the use
       }
     }
 
-    const explainMaxItems = isEmergencyMode ? 15 : 8;
-    const noExplainMaxItems = isEmergencyMode ? 15 : (isFilterHeavy ? 8 : 10);
+    // Cap output at however many candidates were actually shown to the LLM (limitedResults) —
+    // not a fixed 8/10/15. The real ceiling is the candidate pool size; anything tighter
+    // artificially truncates legitimately relevant results whenever more than the old
+    // hardcoded cap turn out to match (e.g. 12 of 20 candidates are genuinely relevant).
+    const explainMaxItems = limitedResults.length;
+    const noExplainMaxItems = limitedResults.length;
 
     // ⚡ LIGHTWEIGHT SYSTEM PROMPT: used when hard+soft filters already narrowed the set
     // The LLM only needs to nudge the ordering by the remaining nuance, not do full relevance analysis
@@ -15291,234 +15301,36 @@ app.post("/search", async (req, res) => {
         }
       }
 
-      const fastSearchTier1Only = isFastSearchMode === true;
+      // Return exactly what the LLM judged relevant — no padding back up to searchLimit
+      // with additional vector-search candidates the LLM never saw or rejected. A narrow
+      // query returning fewer results (even just 1-2) is the correct outcome, not a defect
+      // to paper over with "vector-search leftovers".
+      finalResults = orderedProducts.map((product) => {
+        const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
 
-      if (fastSearchTier1Only) {
-        console.log(`[${requestId}] ⚡ FAST SEARCH MODE: Returning LLM Tier 1 only (skip vector re-run)`);
-
-        finalResults = orderedProducts.map((product) => {
-          const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
-
-          return {
-            _id: product._id.toString(),
-            id: product.id,
-            name: product.name,
-            description: product.description,
-            price: product.price,
-            image: product.image,
-            url: product.url,
-            type: product.type,
-            category: product.category,
-            softCategory: product.softCategory,
-            specialSales: product.specialSales,
-            onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-            ItemID: product.ItemID,
-            explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
-            softFilterMatch: !!(resultData?.softFilterMatch),
-            softCategoryMatches: resultData?.softCategoryMatches || 0,
-            simpleSearch: false,
-            filterOnly: !!(resultData?.filterOnly),
-            highTextMatch: false,
-            softCategoryExpansion: false
-          };
-        });
-      } else {
-        const reorderedProductIds = new Set(orderedProducts.map(p => p._id.toString()));
-        let remainingResults = [];
-
-        // Remaining: ${combinedResults.length} total − ${orderedProducts.length} LLM-selected
-
-        // CRITICAL: Re-run vector search with category filter
-        // 🛡️ PRIORITY: Use query-extracted hard category if available, otherwise fall back to LLM-product categories
-        if (orderedProducts.length > 0 && queryEmbedding) {
-          let categoriesForVectorRerun;
-
-          if (queryHardCatsForRerankArray.length > 0) {
-            // 🛡️ Use query-extracted hard category - this is the authoritative source
-            categoriesForVectorRerun = queryHardCatsForRerankArray;
-            // Vector re-run with query-extracted hard categories
-          } else {
-            // Fallback: extract from LLM-selected products
-            categoriesForVectorRerun = [];
-            orderedProducts.slice(0, 3).forEach(product => {
-              const categories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
-              categories.forEach(cat => {
-                if (cat && !categoriesForVectorRerun.includes(cat)) {
-                  categoriesForVectorRerun.push(cat);
-                }
-              });
-            });
-            // Vector re-run with product-extracted categories
-          }
-
-          if (categoriesForVectorRerun.length > 0) {
-
-            // Build hard filters with extracted category
-            const categoryFilteredHardFilters = { ...hardFilters, category: categoriesForVectorRerun };
-            
-            // Run new vector search with category filter
-            const categoryFilteredVectorResults = await collection.aggregate(
-              buildStandardVectorSearchPipeline(
-                queryEmbedding,
-                categoryFilteredHardFilters,
-                searchLimit * 2, // was 100, now proportional to what we actually need
-                useOrLogic,
-                Array.from(reorderedProductIds) // Exclude already selected products
-              )
-            ).toArray();
-            
-            // Category-filtered vector search: ${categoryFilteredVectorResults.length} results
-            
-            // Convert to combinedResults format with QUERY-SPECIFIC boost map
-            const querySoftCats = Array.isArray(softFilters.softCategory) 
-              ? softFilters.softCategory 
-              : [softFilters.softCategory];
-            
-            const reRunBoostMap = {};
-            querySoftCats.forEach(cat => {
-              reRunBoostMap[cat] = 100; // 🎯 QUERY-EXTRACTED: 100x boost for re-run results
-            });
-
-            remainingResults = categoryFilteredVectorResults.map((doc, index) => {
-              const exactMatchBonus = getExactMatchBonus(doc.name, query, cleanedText);
-              // 🎯 Use reRunBoostMap instead of store default!
-              const matchResult = calculateSoftCategoryMatches(doc.softCategory, softFilters.softCategory, reRunBoostMap, doc.colors, softFilters.color);
-              
-              // ENHANCED: Give strong weight to vector rank (low index = high similarity)
-              // Vector rank is PRIORITIZED over exact match for semantic searches
-              const vectorBoost = 10000 / (index + 1); // Top result gets 10000, 2nd gets 5000, etc.
-              
-              return {
-                ...doc,
-                rrf_score: calculateEnhancedRRFScore(Infinity, index, 0, 0, exactMatchBonus, matchResult.weightedScore) + vectorBoost,
-                softFilterMatch: matchResult.count > 0,
-                softCategoryMatches: matchResult.count,
-                exactMatchBonus: exactMatchBonus,
-                vectorRank: index, // Store for debugging
-                vectorBoost: vectorBoost // Store for debugging
-              };
-            }).sort((a, b) => b.rrf_score - a.rrf_score); // 🎯 CRITICAL FIX: Sort by boosted score
-          } else {
-            // No categories extracted, use original remaining results
-            remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
-          }
-        } else {
-          // No vector search possible, use original remaining results
-          remainingResults = combinedResults.filter((r) => !reorderedProductIds.has(r._id.toString()));
-        }
-
-        // 🛡️ HARD CATEGORY GATE on remaining results: Filter out products not matching query hard category
-        if (queryHardCatsForRerankArray.length > 0 && remainingResults.length > 0) {
-          const beforeRemaining = remainingResults.length;
-          remainingResults = remainingResults.filter(product => {
-            const productCategories = Array.isArray(product.category) ? product.category : (product.category ? [product.category] : []);
-            if (productCategories.length === 0) return false;
-            return queryHardCatsForRerankArray.some(hardCat =>
-              productCategories.some(pCat =>
-                pCat.toLowerCase() === hardCat.toLowerCase() || includesWholeWord(pCat.toLowerCase(), hardCat.toLowerCase()) || includesWholeWord(hardCat.toLowerCase(), pCat.toLowerCase())
-              )
-            );
-          });
-          const remainingFiltered = beforeRemaining - remainingResults.length;
-          // Hard category gate filtered ${remainingFiltered} remaining results
-        }
-
-        // 🎯 POST-RERANK SOFT CATEGORY BOOST: After LLM reranking, boost soft category matches to the top
-        // This ensures that e.g., "italian" products appear first in tier 2 when searching "italian red wine for pasta"
-        const querySoftCatsForBoost = Array.isArray(softFilters.softCategory)
-          ? softFilters.softCategory.filter(Boolean)
-          : (softFilters.softCategory ? [softFilters.softCategory] : []);
-
-        if (querySoftCatsForBoost.length > 0 && remainingResults.length > 0) {
-          // Ensure all remaining results have soft category match info computed
-          remainingResults.forEach(r => {
-            if (r.softFilterMatch === undefined) {
-              const matchResult = calculateSoftCategoryMatches(r.softCategory, querySoftCatsForBoost, null, r.colors, softFilters.color);
-              r.softFilterMatch = matchResult.count > 0;
-              r.softCategoryMatches = matchResult.count;
-            }
-          });
-
-          // Sort: soft category matches come first, then by match count, then by score
-          remainingResults.sort((a, b) => {
-            const aHasSoft = a.softFilterMatch ? 1 : 0;
-            const bHasSoft = b.softFilterMatch ? 1 : 0;
-            if (aHasSoft !== bHasSoft) return bHasSoft - aHasSoft;
-            if ((a.softCategoryMatches || 0) !== (b.softCategoryMatches || 0)) return (b.softCategoryMatches || 0) - (a.softCategoryMatches || 0);
-            return (b.rrf_score || 0) - (a.rrf_score || 0);
-          });
-
-          const softMatchCount = remainingResults.filter(r => r.softFilterMatch).length;
-          // Post-rerank soft boost: ${softMatchCount}/${remainingResults.length} soft matches
-        }
-
-        // Construct finalResults and deduplicate
-        const complexFinalResults = [
-          ...orderedProducts.map((product) => {
-            const resultData = combinedResults.find(r => r._id.toString() === product._id.toString());
-
-            return {
-              _id: product._id.toString(),
-              id: product.id,
-              name: product.name,
-              description: product.description,
-              price: product.price,
-              image: product.image,
-              url: product.url,
-              type: product.type,
-              category: product.category, // Include for tier-2 category extraction
-              softCategory: product.softCategory, // Include for tier-2 category extraction
-              specialSales: product.specialSales,
-              onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-              ItemID: product.ItemID,
-              explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
-              softFilterMatch: !!(resultData?.softFilterMatch),
-              softCategoryMatches: resultData?.softCategoryMatches || 0,
-              simpleSearch: false,
-              filterOnly: !!(resultData?.filterOnly),
-              highTextMatch: false, // Not used for complex queries
-              softCategoryExpansion: !!(resultData?.softCategoryExpansion)
-            };
-          }),
-          ...remainingResults.map((r) => {
-            return {
-              _id: r._id.toString(),
-              id: r.id,
-              name: r.name,
-              description: r.description,
-              price: r.price,
-              image: r.image,
-              url: r.url,
-              type: r.type,
-              category: r.category, // Include for tier-2 category extraction
-              softCategory: r.softCategory, // Include for tier-2 category extraction
-              specialSales: r.specialSales,
-              onSale: !!(r.specialSales && Array.isArray(r.specialSales) && r.specialSales.length > 0),
-              ItemID: r.ItemID,
-              explanation: null,
-              softFilterMatch: !!r.softFilterMatch,
-              softCategoryMatches: r.softCategoryMatches || 0,
-              simpleSearch: false,
-              filterOnly: !!r.filterOnly,
-              highTextMatch: false, // Not used for complex queries
-              softCategoryExpansion: !!r.softCategoryExpansion
-            };
-          }),
-        ];
-
-        // Deduplicate complex results by _id
-        const uniqueComplexResults = [];
-        const seenComplexIds = new Set();
-        for (const result of complexFinalResults) {
-          if (!seenComplexIds.has(result._id)) {
-            seenComplexIds.add(result._id);
-            uniqueComplexResults.push(result);
-          }
-        }
-
-        // Deduped: ${complexFinalResults.length} → ${uniqueComplexResults.length}
-        finalResults = uniqueComplexResults;
-      }
+        return {
+          _id: product._id.toString(),
+          id: product.id,
+          name: product.name,
+          description: product.description,
+          price: product.price,
+          image: product.image,
+          url: product.url,
+          type: product.type,
+          category: product.category,
+          softCategory: product.softCategory,
+          specialSales: product.specialSales,
+          onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+          ItemID: product.ItemID,
+          explanation: explain ? (explanationsMap.get(product._id.toString()) || null) : null,
+          softFilterMatch: !!(resultData?.softFilterMatch),
+          softCategoryMatches: resultData?.softCategoryMatches || 0,
+          simpleSearch: false,
+          filterOnly: !!(resultData?.filterOnly),
+          highTextMatch: false,
+          softCategoryExpansion: !!(resultData?.softCategoryExpansion)
+        };
+      });
     } else {
       const explanationsMap = new Map(reorderedData.map(item => [item._id, item.explanation]));
 
