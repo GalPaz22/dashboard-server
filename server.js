@@ -6620,10 +6620,11 @@ async function reorderResultsWithGPT(
   return withCache(cacheKey, async () => {
     console.time(`Rerank LLM call for ${query} (${limitedResults.length} products)`);
     try {
-      // A bounded reasoning pass for complex/non-literal intent. This path is
-      // independent of the Concierge feature flag and returns ordinary results.
-      const modelName = COMPLEX_SEARCH_MODEL;
-      
+      // gemini-3.7-flash (COMPLEX_SEARCH_MODEL) can't fully disable its reasoning
+      // tokens even at thinkingLevel LOW, making this call 2-4x slower and prone to
+      // hitting the reranker timeout below. gemini-2.5-flash with thinking off
+      // answers this JSON-only ranking task in under a second.
+      const modelName = "gemini-2.5-flash";
 
       console.log(`[RERANK] ${isFilterHeavy ? '⚡ LIGHTWEIGHT' : '🚀'} Using ${modelName} to rerank ${limitedResults.length} products${isFilterHeavy ? ' (filter-heavy mode)' : ''}`);
       
@@ -6821,7 +6822,7 @@ Return a JSON OBJECT: { "relevant": [ {"_id": "..."} ], "comprehensive": boolean
       contents: userContent,
       config: {
         systemInstruction: effectiveSystemInstruction,
-        thinkingConfig: { thinkingLevel: "LOW" },
+        thinkingConfig: { thinkingBudget: 0 },
         temperature: 0.1,
         responseMimeType: "application/json",
         responseSchema: effectiveSchema,
