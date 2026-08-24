@@ -2697,64 +2697,70 @@ app.use((req, res, next) => {
 
 // ───────────────────────────────────────────────────────────────────────────
 // Special-label stamping
-// Merchants flag products in Mongo with `specialLabel: true`. We tag every
-// product returned by the /search endpoints with that boolean — looked up once
-// per store and cached — so the storefront widget can render a merchant-defined
-// label, regardless of which internal search path built the response.
+// Merchants flag products in Mongo with `specialLabel`. Legacy merchants store
+// a plain `true`; newer merchants store a value object (e.g. book_formats with
+// printed/digital price tiers). We look this up once per store, cache it, and
+// stamp every product returned by the /search endpoints with the *complete*
+// stored value — never coerced to boolean — so the storefront widget can
+// render whatever shape the merchant configured, regardless of which internal
+// search path built the response.
 // ───────────────────────────────────────────────────────────────────────────
 const SPECIAL_LABEL_SEARCH_PATHS = new Set(['/search', '/search/load-more', '/search/auto-load-more']);
 const SPECIAL_LABEL_TTL_MS = 60 * 1000;
-const specialLabelCache = new Map(); // `${dbName}.${collection}` -> { ids:Set, at:number }
+const specialLabelCache = new Map(); // `${dbName}.${collection}` -> { labels:Map, at:number }
 
-async function getSpecialLabelIds(dbName, collectionName) {
+async function getSpecialLabels(dbName, collectionName) {
   const key = `${dbName}.${collectionName}`;
   const cached = specialLabelCache.get(key);
-  if (cached && Date.now() - cached.at < SPECIAL_LABEL_TTL_MS) return cached.ids;
+  if (cached && Date.now() - cached.at < SPECIAL_LABEL_TTL_MS) return cached.labels;
 
   const client = await connectToMongoDB(mongodbUri);
   const docs = await client.db(dbName).collection(collectionName)
-    .find({ specialLabel: true }, { projection: { id: 1, _id: 0 } })
+    .find({ specialLabel: { $exists: true, $nin: [null, false] } }, { projection: { id: 1, specialLabel: 1, _id: 0 } })
     .toArray();
-  const ids = new Set(docs.map(d => d.id).filter(v => v !== undefined && v !== null));
-  specialLabelCache.set(key, { ids, at: Date.now() });
-  return ids;
+  const labels = new Map();
+  for (const d of docs) {
+    if (d.id !== undefined && d.id !== null) labels.set(d.id, d.specialLabel);
+  }
+  specialLabelCache.set(key, { labels, at: Date.now() });
+  return labels;
 }
 
-function stampSpecialLabelArray(arr, ids) {
+function stampSpecialLabelArray(arr, labels) {
   if (!Array.isArray(arr)) return;
   for (const p of arr) {
-    if (p && typeof p === 'object') p.specialLabel = ids.has(p.id);
+    if (p && typeof p === 'object') p.specialLabel = labels.get(p.id) ?? false;
   }
 }
 
-function stampSpecialLabelPayload(payload, ids) {
+function stampSpecialLabelPayload(payload, labels) {
   if (!payload || typeof payload !== 'object') return payload;
-  if (Array.isArray(payload)) { stampSpecialLabelArray(payload, ids); return payload; }
-  stampSpecialLabelArray(payload.products, ids);
-  stampSpecialLabelArray(payload.results, ids);
-  stampSpecialLabelArray(payload.items, ids);
-  stampSpecialLabelArray(payload.hits, ids);
-  if (payload.data) stampSpecialLabelArray(payload.data.products, ids);
+  if (Array.isArray(payload)) { stampSpecialLabelArray(payload, labels); return payload; }
+  stampSpecialLabelArray(payload.products, labels);
+  stampSpecialLabelArray(payload.results, labels);
+  stampSpecialLabelArray(payload.items, labels);
+  stampSpecialLabelArray(payload.hits, labels);
+  if (payload.data) stampSpecialLabelArray(payload.data.products, labels);
   if (Array.isArray(payload.tiers)) {
-    payload.tiers.forEach(t => stampSpecialLabelArray(t && t.products, ids));
+    payload.tiers.forEach(t => stampSpecialLabelArray(t && t.products, labels));
   }
   return payload;
 }
 
-// Wrap res.json on the search routes so every outgoing product carries the flag,
+// Wrap res.json on the search routes so every outgoing product carries the label,
 // no matter which of the ~15 internal response builders produced it.
 app.use(async (req, res, next) => {
   if (!SPECIAL_LABEL_SEARCH_PATHS.has(req.path) || !req.store || !req.store.dbName) return next();
 
-  let ids = new Set();
+  let labels = new Map();
   try {
-    ids = await getSpecialLabelIds(req.store.dbName, req.store.products);
+    labels = await getSpecialLabels(req.store.dbName, req.store.products);
   } catch (err) {
     console.warn('[SPECIAL-LABEL] lookup failed:', err.message);
   }
 
   const sendJson = res.json.bind(res);
-  res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, ids));
+  res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, labels));
   next();
 });
 
