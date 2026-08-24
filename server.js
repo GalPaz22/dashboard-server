@@ -12523,10 +12523,32 @@ app.post("/search", async (req, res) => {
   let precomputedEmbedding = null;  // started in parallel with unified LLM
   let precomputedTranslation = null;
   let extractedFilters = null;      // populated in "no Atlas results" branch; used by Quick English search
+  // Phase 1's preliminary text search (below) depends only on `query` — not on Phase 0's
+  // results or the unified LLM decision — so start it here and let it run in the
+  // background while Phase 0 does its own work. It's discarded unread if Phase 0
+  // resolves the request via the simple-match path; awaited (already-settled, in the
+  // common complex-query case) once we reach Phase 1. This alone used to cost ~2s of
+  // pure sequential wait on every complex query.
+  let preliminaryTextSearchPromise = null;
   try {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
+
+    preliminaryTextSearchPromise = (() => {
+      const pipeline = buildStandardSearchPipeline(query, query, {}, 50, false, false, [], {});
+      pipeline.push({
+        $project: {
+          id: 1, name: 1, description: 1, price: 1, image: 1, url: 1, type: 1,
+          specialSales: 1, ItemID: 1, category: 1, softCategory: 1, colors: 1,
+          stockStatus: 1, score: { $meta: "searchScore" }
+        }
+      });
+      return collection.aggregate(pipeline, { maxTimeMS: 4000 }).toArray().catch(err => {
+        console.error(`[${requestId}] Preliminary text search failed:`, err.message);
+        return [];
+      });
+    })();
 
     const deterministicTranslation = getDeterministicSearchTranslation(query);
     if (deterministicTranslation) {
@@ -13516,39 +13538,22 @@ app.post("/search", async (req, res) => {
     let hasHighTextMatch = false;
     let preliminaryTextSearchResults = []; // Initialize outside try block to avoid ReferenceError
     try {
-      const preliminaryTextSearchPipeline = buildStandardSearchPipeline(
-        query, // We don't have cleanedTextForSearch here yet, so use query
-        query,
-        initialFilters, // No hard filters yet
-        50, // OPTIMIZATION: Increased from 10 to 50 to reuse in two-step search (avoid duplicate query)
-        false,
-        false,
-        [],
-        {} // CRITICAL FIX: Don't use soft filters for classification - we need to find ALL text matches regardless of filters
-      );
-
-      // Add score projection for reuse in classification AND two-step search
-      // CRITICAL: Must include ALL fields needed by two-step search to avoid missing data
-      preliminaryTextSearchPipeline.push({
-        $project: {
-          id: 1,
-          name: 1,
-          description: 1,
-          price: 1,
-          image: 1,
-          url: 1,
-          type: 1,
-          specialSales: 1,
-          ItemID: 1,
-          category: 1,
-          softCategory: 1,
-          colors: 1,
-          stockStatus: 1,
-          score: { $meta: "searchScore" }
-        }
-      });
-
-      preliminaryTextSearchResults = await collection.aggregate(preliminaryTextSearchPipeline).toArray();
+      // Fetched concurrently with Phase 0 (see kickoff + comment near the top of this
+      // handler) — usually already settled by the time we get here. Fall back to firing
+      // it fresh only if that early start somehow never happened.
+      preliminaryTextSearchResults = preliminaryTextSearchPromise
+        ? await preliminaryTextSearchPromise
+        : await (async () => {
+            const pipeline = buildStandardSearchPipeline(query, query, initialFilters, 50, false, false, [], {});
+            pipeline.push({
+              $project: {
+                id: 1, name: 1, description: 1, price: 1, image: 1, url: 1, type: 1,
+                specialSales: 1, ItemID: 1, category: 1, softCategory: 1, colors: 1,
+                stockStatus: 1, score: { $meta: "searchScore" }
+              }
+            });
+            return collection.aggregate(pipeline, { maxTimeMS: 4000 }).toArray();
+          })();
 
       // CRITICAL: Filter out fuzzy noise if we have strong exact matches
       // This prevents "סלמי" from interfering with "סלרי" searches
