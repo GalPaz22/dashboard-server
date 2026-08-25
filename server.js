@@ -558,6 +558,81 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
   }
 }
 
+function getAuthorSearchTokens(query) {
+  return [...new Set(
+    (normalizeQuoteCharacters(String(query || '').toLowerCase()).match(/[\p{L}\p{N}]+/gu) || [])
+      .filter(token => token.length >= 2 || /^\d+$/.test(token))
+  )];
+}
+
+async function findDirectAuthorMatches(collection, query, limit = 20) {
+  const tokens = getAuthorSearchTokens(query);
+  if (tokens.length === 0) return [];
+
+  try {
+    const docs = await collection.find({
+      $and: [
+        ...tokens.map(token => ({
+          author: new RegExp(
+            `(^|[^\\p{L}\\p{N}])${escapeRegExp(token)}([^\\p{L}\\p{N}]|$)`,
+            'iu'
+          )
+        })),
+        ...stockMongoFilterClauses(),
+        HIDDEN_MONGO_FILTER
+      ]
+    })
+      .limit(limit)
+      .maxTimeMS(600)
+      .toArray();
+
+    return docs.filter(product => isProductVisible(product) && isProductInStock(product));
+  } catch (error) {
+    console.warn(`[AUTHOR SEARCH] Direct lookup failed for "${query}":`, error.message);
+    return [];
+  }
+}
+
+async function findFuzzyAuthorMatches(collection, query, limit = 20) {
+  const tokens = getAuthorSearchTokens(query);
+  if (tokens.length === 0) return [];
+
+  try {
+    return await collection.aggregate([
+      {
+        $search: {
+          index: "default",
+          compound: {
+            must: tokens.map(token => ({
+              text: {
+                query: token,
+                path: "author",
+                ...(token.length >= 4 ? { fuzzy: { maxEdits: 1, prefixLength: 2, maxExpansions: 20 } } : {})
+              }
+            })),
+            filter: [
+              ...stockSearchFilterClauses(),
+              HIDDEN_SEARCH_FILTER
+            ]
+          }
+        }
+      },
+      {
+        $match: {
+          ...(includeOutOfStock() ? {} : { $or: [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }, { stockStatus: null }] }),
+          ...HIDDEN_MONGO_FILTER
+        }
+      },
+      { $limit: limit }
+    ], { maxTimeMS: 1500 }).toArray();
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[AUTHOR SEARCH] Fuzzy lookup failed for "${query}":`, error.message);
+    }
+    return [];
+  }
+}
+
 function isNumericModelQuery(query) {
   return !!getNumericModelToken(query);
 }
@@ -10615,6 +10690,20 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         };
       }
 
+      if (includeAuthorSearch()) {
+        const authorMatches = await findDirectAuthorMatches(collection, query, limit);
+        if (authorMatches.length > 0) {
+          if (!silent) console.log(`[SIMPLE-SEARCH] Direct author match: ${authorMatches.length} results for "${query}"`);
+          return {
+            results: authorMatches,
+            isPerfectFilterMatch: false,
+            isAuthorSearch: true,
+            filterCheck,
+            queryWords
+          };
+        }
+      }
+
       const broadNameMatches = await findBroadSingleTokenNameMatches(
         collection,
         query,
@@ -10642,6 +10731,19 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       // same-edit-distance words instead.
       const directNameMatches = await findDirectTranslatedNameMatches(collection, query, limit);
       if (directNameMatches.length > 0) {
+        if (includeAuthorSearch() && directNameMatches.length <= 2) {
+          const fuzzyAuthorMatches = await findFuzzyAuthorMatches(collection, query, limit);
+          if (fuzzyAuthorMatches.length > directNameMatches.length) {
+            if (!silent) console.log(`[SIMPLE-SEARCH] Fuzzy author match: ${fuzzyAuthorMatches.length} results for "${query}"`);
+            return {
+              results: fuzzyAuthorMatches,
+              isPerfectFilterMatch: false,
+              isAuthorSearch: true,
+              filterCheck,
+              queryWords
+            };
+          }
+        }
         if (!silent) console.log(`[SIMPLE-SEARCH] Direct token name match: ${directNameMatches.length} results for "${query}"`);
         return {
           results: directNameMatches,
@@ -11061,6 +11163,16 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
                     }
                   ])
                 ];
+                if (includeAuthorSearch()) {
+                  shouldClauses.push({
+                    text: {
+                      query: word,
+                      path: "author",
+                      fuzzy: { maxEdits: 1, prefixLength: 2 },
+                      score: { boost: { value: 9 } }
+                    }
+                  });
+                }
                 // Construct state (סמיכות): word ending in ת is often the construct form
                 // of a feminine noun ending in ה. e.g., ריבת→ריבה, עוגת→עוגה, גבינת→גבינה
                 if (word.endsWith('ת') && word.length > 2) {
@@ -11337,7 +11449,7 @@ app.post("/fast-search", async (req, res) => {
     const collection = db.collection(req.store.products);
     const querycollection = db.collection("queries");
 
-    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, isModelNumberMatch, filterCheck, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, isModelNumberMatch, isAuthorSearch, filterCheck, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
@@ -11809,7 +11921,7 @@ app.post("/fast-search", async (req, res) => {
       // ============================================================
       let aiRecommendations = [];
       const totalSoFar = productsWithBoost.length + softCategoryExpansion.length;
-      if (!isPerfectFilterMatch && totalSoFar <= 2 && productsWithBoost.length > 0) {
+      if (!isPerfectFilterMatch && !isAuthorSearch && !includeAuthorSearch() && totalSoFar <= 2 && productsWithBoost.length > 0) {
         const exactMatches = productsWithBoost.filter(p => {
           const bonus = getExactMatchBonus(p.name, query, query);
           return bonus >= 50000;
@@ -12523,7 +12635,7 @@ app.post("/simple-search", async (req, res) => {
     const collection = db.collection(collectionName);
 
     // Use the reusable simple search logic
-    const { results, isPerfectFilterMatch, filterCheck, queryWords } = 
+    const { results, isPerfectFilterMatch, isAuthorSearch, filterCheck, queryWords } = 
       await performSimpleSearch(db, collection, query, req.store, limit);
     
     if (queryWords.length === 0) {
@@ -12589,7 +12701,7 @@ app.post("/simple-search", async (req, res) => {
     // 🎯 AI RECOMMENDATIONS: When 1-2 exact matches found, add similar products
     // ============================================================
     let aiRecommendations = [];
-    if (!isPerfectFilterMatch && response.length <= 2 && response.length > 0) {
+    if (!isPerfectFilterMatch && !isAuthorSearch && !includeAuthorSearch() && response.length <= 2 && response.length > 0) {
       const exactMatches = response.filter(p => (p.exactMatchBonus || 0) >= 50000);
 
       if (exactMatches.length > 0 && exactMatches.length <= 2) {
@@ -12777,7 +12889,7 @@ app.post("/search", async (req, res) => {
       }
     }
 
-    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, filterCheck: fc, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, isAuthorSearch, filterCheck: fc, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, searchLimit, false, precomputedTranslation);
     filterCheck = fc;
 
@@ -13125,7 +13237,7 @@ app.post("/search", async (req, res) => {
         // ============================================================
         let aiRecommendations = [];
         const totalSoFar = finalProducts.length + softCategoryExpansion.length;
-        if (!isPerfectFilterMatch && totalSoFar <= 2 && finalProducts.length > 0) {
+        if (!isPerfectFilterMatch && !isAuthorSearch && !includeAuthorSearch() && totalSoFar <= 2 && finalProducts.length > 0) {
           const exactMatches = finalProducts.filter(p => {
             const bonus = getExactMatchBonus(p.name, query, query);
             return bonus >= 50000;

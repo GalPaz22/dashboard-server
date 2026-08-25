@@ -1302,11 +1302,15 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     }
 
     const results = await Promise.all(toolBlocks.map((block) => runTool(block, ctx, onEvent)));
+    let justPresented = false;
     for (let index = 0; index < toolBlocks.length; index++) {
       if (toolBlocks[index].name !== "present_products") continue;
       try {
         const parsed = JSON.parse(results[index].content);
-        if (Array.isArray(parsed.products) && parsed.products.length > 0) presentedProducts = true;
+        if (Array.isArray(parsed.products) && parsed.products.length > 0) {
+          presentedProducts = true;
+          justPresented = true;
+        }
       } catch { /* malformed/failed selection gets corrected in the next round */ }
     }
     messages.push({
@@ -1319,6 +1323,21 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
         },
       })),
     });
+
+    // The system prompt has the model call present_products immediately
+    // before its final answer, and it often writes that answer in the same
+    // round as the tool call rather than waiting to see the tool's echo back.
+    // When that already happened — cards selected, closing text streamed —
+    // asking for one more round only spends a full model round-trip (with
+    // thinking) to restate what the shopper already has. Stop here instead;
+    // the functionResponse above still went into history so a later turn's
+    // context stays valid. If the model called present_products without any
+    // text this round, roundText is empty and the loop continues as before
+    // to get the real answer.
+    if (justPresented && roundText.trim()) {
+      onEvent({ type: "done", usage, model: MODEL });
+      return { stopped: finishReason || "STOP", usage };
+    }
   }
 
   onEvent({ type: "error", message: "לא הצלחתי לסיים את החיפוש. אפשר לשאול משהו ממוקד יותר?" });
