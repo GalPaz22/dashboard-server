@@ -171,6 +171,14 @@ function includeOutOfStock() {
   return requestStoreContext.getStore()?.showOutOfStock === true;
 }
 
+// Steimatzky-only: also match the book publisher name in Atlas Search. Gated on
+// dbName because the "publisher" field is only mapped in Steimatzky's Atlas
+// Search index — every other store's index is dynamic:false without it, so
+// querying that path there would throw.
+function includePublisherSearch() {
+  return requestStoreContext.getStore()?.dbName === 'steimatzky';
+}
+
 // Atlas $search `compound.filter` clause for in-stock; empty when the store shows out-of-stock
 function stockSearchFilterClauses() {
   if (includeOutOfStock()) return [];
@@ -2630,7 +2638,7 @@ async function authenticate(req, res, next) {
     }
     req.store = store;
     // Seed request-scoped store context so nested search helpers can read per-store flags
-    requestStoreContext.run({ showOutOfStock: store.showOutOfStock === true }, next);
+    requestStoreContext.run({ showOutOfStock: store.showOutOfStock === true, dbName: store.dbName }, next);
   } catch (err) {
     console.error("[AUTH] ❌ Exception during authentication:", err);
     res.status(500).json({ error: "Auth failure" });
@@ -2765,6 +2773,76 @@ app.use(async (req, res, next) => {
 
   const sendJson = res.json.bind(res);
   res.json = (payload) => sendJson(stampSpecialLabelPayload(payload, labels));
+  next();
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// Publisher stamping (Steimatzky only)
+// Steimatzky products carry a `publisher` field (book publisher), but each of
+// the ~20 internal response builders enumerates its own field whitelist and
+// drops it. Rather than touching every one, stamp it onto outgoing products
+// post-hoc — same approach as specialLabel above — gated to this one store so
+// no other merchant's response shape changes.
+// ───────────────────────────────────────────────────────────────────────────
+const PUBLISHER_SEARCH_PATHS = new Set(['/search', '/fast-search', '/search/load-more', '/search/auto-load-more']);
+const PUBLISHER_STORE_DB = 'steimatzky';
+const PUBLISHER_TTL_MS = 60 * 1000;
+const publisherCache = new Map(); // `${dbName}.${collection}` -> { publishers:Map, at:number }
+
+// Keyed by _id (a real, guaranteed-unique ObjectId) rather than the `id` field —
+// Steimatzky's feed-sourced `id` has ~200 duplicate values across distinct products.
+async function getPublishers(dbName, collectionName) {
+  const key = `${dbName}.${collectionName}`;
+  const cached = publisherCache.get(key);
+  if (cached && Date.now() - cached.at < PUBLISHER_TTL_MS) return cached.publishers;
+
+  const client = await connectToMongoDB(mongodbUri);
+  const docs = await client.db(dbName).collection(collectionName)
+    .find({ publisher: { $exists: true, $nin: [null, ''] } }, { projection: { _id: 1, publisher: 1 } })
+    .toArray();
+  const publishers = new Map();
+  for (const d of docs) {
+    publishers.set(d._id.toString(), d.publisher);
+  }
+  publisherCache.set(key, { publishers, at: Date.now() });
+  return publishers;
+}
+
+function stampPublisherArray(arr, publishers) {
+  if (!Array.isArray(arr)) return;
+  for (const p of arr) {
+    if (p && typeof p === 'object' && p._id !== undefined && publishers.has(String(p._id))) {
+      p.publisher = publishers.get(String(p._id));
+    }
+  }
+}
+
+function stampPublisherPayload(payload, publishers) {
+  if (!payload || typeof payload !== 'object') return payload;
+  if (Array.isArray(payload)) { stampPublisherArray(payload, publishers); return payload; }
+  stampPublisherArray(payload.products, publishers);
+  stampPublisherArray(payload.results, publishers);
+  stampPublisherArray(payload.items, publishers);
+  stampPublisherArray(payload.hits, publishers);
+  if (payload.data) stampPublisherArray(payload.data.products, publishers);
+  if (Array.isArray(payload.tiers)) {
+    payload.tiers.forEach(t => stampPublisherArray(t && t.products, publishers));
+  }
+  return payload;
+}
+
+app.use(async (req, res, next) => {
+  if (!PUBLISHER_SEARCH_PATHS.has(req.path) || !req.store || req.store.dbName !== PUBLISHER_STORE_DB) return next();
+
+  let publishers = new Map();
+  try {
+    publishers = await getPublishers(req.store.dbName, req.store.products);
+  } catch (err) {
+    console.warn('[PUBLISHER] lookup failed:', err.message);
+  }
+
+  const sendJson = res.json.bind(res);
+  res.json = (payload) => sendJson(stampPublisherPayload(payload, publishers));
   next();
 });
 
@@ -3637,6 +3715,32 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
               }
             }
     );
+
+    // Steimatzky-only: match the book publisher name too, weighted a little below
+    // the product name (name's exact-match boost above is 100).
+    if (includePublisherSearch()) {
+      shouldClauses.push(
+        {
+          text: {
+            query: query,
+            path: "publisher",
+            score: { boost: { value: 80 * textBoostMultiplier } }
+          }
+        },
+        {
+          text: {
+            query: cleanedHebrewText,
+            path: "publisher",
+            fuzzy: {
+              maxEdits: 1,
+              prefixLength: 2,
+              maxExpansions: 20,
+            },
+            score: { boost: { value: 8 * textBoostMultiplier } }
+          }
+        }
+      );
+    }
 
     const searchStage = {
       $search: {
