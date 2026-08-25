@@ -171,11 +171,11 @@ function includeOutOfStock() {
   return requestStoreContext.getStore()?.showOutOfStock === true;
 }
 
-// Steimatzky-only: also match the book publisher name in Atlas Search. Gated on
-// dbName because the "publisher" field is only mapped in Steimatzky's Atlas
+// Steimatzky-only: also match the book author name in Atlas Search. Gated on
+// dbName because the "author" field is only mapped in Steimatzky's Atlas
 // Search index — every other store's index is dynamic:false without it, so
 // querying that path there would throw.
-function includePublisherSearch() {
+function includeAuthorSearch() {
   return requestStoreContext.getStore()?.dbName === 'steimatzky';
 }
 
@@ -2777,72 +2777,72 @@ app.use(async (req, res, next) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Publisher stamping (Steimatzky only)
-// Steimatzky products carry a `publisher` field (book publisher), but each of
+// Author stamping (Steimatzky only)
+// Steimatzky products carry an `author` field (book author), but each of
 // the ~20 internal response builders enumerates its own field whitelist and
 // drops it. Rather than touching every one, stamp it onto outgoing products
 // post-hoc — same approach as specialLabel above — gated to this one store so
 // no other merchant's response shape changes.
 // ───────────────────────────────────────────────────────────────────────────
-const PUBLISHER_SEARCH_PATHS = new Set(['/search', '/fast-search', '/search/load-more', '/search/auto-load-more']);
-const PUBLISHER_STORE_DB = 'steimatzky';
-const PUBLISHER_TTL_MS = 60 * 1000;
-const publisherCache = new Map(); // `${dbName}.${collection}` -> { publishers:Map, at:number }
+const AUTHOR_SEARCH_PATHS = new Set(['/search', '/fast-search', '/search/load-more', '/search/auto-load-more']);
+const AUTHOR_STORE_DB = 'steimatzky';
+const AUTHOR_TTL_MS = 60 * 1000;
+const authorCache = new Map(); // `${dbName}.${collection}` -> { authors:Map, at:number }
 
 // Keyed by _id (a real, guaranteed-unique ObjectId) rather than the `id` field —
 // Steimatzky's feed-sourced `id` has ~200 duplicate values across distinct products.
-async function getPublishers(dbName, collectionName) {
+async function getAuthors(dbName, collectionName) {
   const key = `${dbName}.${collectionName}`;
-  const cached = publisherCache.get(key);
-  if (cached && Date.now() - cached.at < PUBLISHER_TTL_MS) return cached.publishers;
+  const cached = authorCache.get(key);
+  if (cached && Date.now() - cached.at < AUTHOR_TTL_MS) return cached.authors;
 
   const client = await connectToMongoDB(mongodbUri);
   const docs = await client.db(dbName).collection(collectionName)
-    .find({ publisher: { $exists: true, $nin: [null, ''] } }, { projection: { _id: 1, publisher: 1 } })
+    .find({ author: { $exists: true, $nin: [null, ''] } }, { projection: { _id: 1, author: 1 } })
     .toArray();
-  const publishers = new Map();
+  const authors = new Map();
   for (const d of docs) {
-    publishers.set(d._id.toString(), d.publisher);
+    authors.set(d._id.toString(), d.author);
   }
-  publisherCache.set(key, { publishers, at: Date.now() });
-  return publishers;
+  authorCache.set(key, { authors, at: Date.now() });
+  return authors;
 }
 
-function stampPublisherArray(arr, publishers) {
+function stampAuthorArray(arr, authors) {
   if (!Array.isArray(arr)) return;
   for (const p of arr) {
-    if (p && typeof p === 'object' && p._id !== undefined && publishers.has(String(p._id))) {
-      p.publisher = publishers.get(String(p._id));
+    if (p && typeof p === 'object' && p._id !== undefined && authors.has(String(p._id))) {
+      p.author = authors.get(String(p._id));
     }
   }
 }
 
-function stampPublisherPayload(payload, publishers) {
+function stampAuthorPayload(payload, authors) {
   if (!payload || typeof payload !== 'object') return payload;
-  if (Array.isArray(payload)) { stampPublisherArray(payload, publishers); return payload; }
-  stampPublisherArray(payload.products, publishers);
-  stampPublisherArray(payload.results, publishers);
-  stampPublisherArray(payload.items, publishers);
-  stampPublisherArray(payload.hits, publishers);
-  if (payload.data) stampPublisherArray(payload.data.products, publishers);
+  if (Array.isArray(payload)) { stampAuthorArray(payload, authors); return payload; }
+  stampAuthorArray(payload.products, authors);
+  stampAuthorArray(payload.results, authors);
+  stampAuthorArray(payload.items, authors);
+  stampAuthorArray(payload.hits, authors);
+  if (payload.data) stampAuthorArray(payload.data.products, authors);
   if (Array.isArray(payload.tiers)) {
-    payload.tiers.forEach(t => stampPublisherArray(t && t.products, publishers));
+    payload.tiers.forEach(t => stampAuthorArray(t && t.products, authors));
   }
   return payload;
 }
 
 app.use(async (req, res, next) => {
-  if (!PUBLISHER_SEARCH_PATHS.has(req.path) || !req.store || req.store.dbName !== PUBLISHER_STORE_DB) return next();
+  if (!AUTHOR_SEARCH_PATHS.has(req.path) || !req.store || req.store.dbName !== AUTHOR_STORE_DB) return next();
 
-  let publishers = new Map();
+  let authors = new Map();
   try {
-    publishers = await getPublishers(req.store.dbName, req.store.products);
+    authors = await getAuthors(req.store.dbName, req.store.products);
   } catch (err) {
-    console.warn('[PUBLISHER] lookup failed:', err.message);
+    console.warn('[AUTHOR] lookup failed:', err.message);
   }
 
   const sendJson = res.json.bind(res);
-  res.json = (payload) => sendJson(stampPublisherPayload(payload, publishers));
+  res.json = (payload) => sendJson(stampAuthorPayload(payload, authors));
   next();
 });
 
@@ -3716,21 +3716,21 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
             }
     );
 
-    // Steimatzky-only: match the book publisher name too, weighted a little below
+    // Steimatzky-only: match the book author name too, weighted a little below
     // the product name (name's exact-match boost above is 100).
-    if (includePublisherSearch()) {
+    if (includeAuthorSearch()) {
       shouldClauses.push(
         {
           text: {
             query: query,
-            path: "publisher",
+            path: "author",
             score: { boost: { value: 80 * textBoostMultiplier } }
           }
         },
         {
           text: {
             query: cleanedHebrewText,
-            path: "publisher",
+            path: "author",
             fuzzy: {
               maxEdits: 1,
               prefixLength: 2,
