@@ -4202,7 +4202,13 @@ If the query is generic (like "vodka", "wine", "red") or you're not confident, o
 
 // Enhanced Gemini-based query classification function with learning
 async function classifyQueryComplexity(query, context, hasHighTextMatch = false, dbName = null) {
-  const cacheKey = generateCacheKey('classify', query, context, hasHighTextMatch);
+  const normalizedQuery = typeof query === 'string' ? query.trim() : '';
+  // Analytics/conversion events can legitimately arrive without a search query.
+  // Do not send null/empty content to Gemini; callers that only need a boolean
+  // retain the conservative short-query fallback behavior.
+  if (!normalizedQuery) return true;
+
+  const cacheKey = generateCacheKey('classify', normalizedQuery, context, hasHighTextMatch);
   
   return withCache(cacheKey, async () => {
     try {
@@ -4213,7 +4219,7 @@ async function classifyQueryComplexity(query, context, hasHighTextMatch = false,
           const db = client.db(dbName);
           const learningCollection = db.collection('query_complexity_learned');
           
-          const learnedPattern = await learningCollection.findOne({ query: query });
+          const learnedPattern = await learningCollection.findOne({ query: normalizedQuery });
           if (learnedPattern) {
             // learned classification applied
             return learnedPattern.learned_classification === "simple";
@@ -4233,7 +4239,7 @@ async function classifyQueryComplexity(query, context, hasHighTextMatch = false,
       // Check circuit breaker - use fallback if AI is unavailable
       if (aiCircuitBreaker.shouldBypassAI()) {
         // ai bypass - fallback classification
-        return classifyQueryFallback(query);
+        return classifyQueryFallback(normalizedQuery);
       }
       
       const systemInstruction = `You are an expert at analyzing e-commerce search queries to determine if they are simple product name searches or complex descriptive searches.
@@ -4258,7 +4264,7 @@ Analyze the query and return your classification.`;
 
       const response = await genAI.models.generateContent({
         model: "gemini-2.5-flash",
-        contents: [{ text: query }],
+        contents: [{ text: normalizedQuery }],
         config: {
           systemInstruction,
           temperature: 0.1,
@@ -4311,14 +4317,15 @@ Analyze the query and return your classification.`;
       aiCircuitBreaker.recordFailure();
       
       // Fallback to simple classification if AI fails or circuit breaker is open
-      return classifyQueryFallback(query);
+      return classifyQueryFallback(normalizedQuery);
     }
   }, 7200);
 }
 
 // Fallback classification for when AI is bypassed or fails
 function classifyQueryFallback(query) {
-  const lowerQuery = query.toLowerCase().trim();
+  const lowerQuery = typeof query === 'string' ? query.toLowerCase().trim() : '';
+  if (!lowerQuery) return true;
   // Simple heuristic for fallback: queries with 1-2 words are often simple
   // unless they contain obvious complex keywords (e.g., "from", "price")
   const words = lowerQuery.split(/\s+/);
@@ -16885,7 +16892,12 @@ app.post("/search-to-cart", async (req, res) => {
     }
     
     // Legacy support for add_to_cart events (keep existing logic)
-    if (document.event_type === 'add_to_cart' && document.product_id) {
+    if (
+      document.event_type === 'add_to_cart' &&
+      document.product_id &&
+      typeof document.search_query === 'string' &&
+      document.search_query.trim()
+    ) {
       try {
         const queryComplexityCollection = db.collection('query_complexity_feedback');
         let classification = 'unknown';
