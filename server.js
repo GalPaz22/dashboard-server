@@ -151,6 +151,40 @@ function escapeRegExp(value = '') {
   return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Accented Latin letter → every precomposed form sharing its base letter, built once
+// from the Latin-1 Supplement / Latin Extended blocks rather than a hand-kept table.
+// Shoppers type ASCII ("fenix", "cafe") for product names that carry diacritics
+// ("fēnix® 9", "Café"), so the two spellings have to be interchangeable everywhere.
+const DIACRITIC_VARIANTS = (() => {
+  const variants = new Map();
+  for (let code = 0x00c0; code <= 0x024f; code++) {
+    const char = String.fromCodePoint(code).toLowerCase();
+    const base = foldDiacritics(char);
+    if (char.length !== 1 || base.length !== 1 || !/[a-z]/.test(base) || base === char) continue;
+    if (!variants.has(base)) variants.set(base, new Set());
+    variants.get(base).add(char);
+  }
+  return variants;
+})();
+
+function foldDiacritics(value = '') {
+  return String(value).normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+}
+
+// Regex source matching `value` with every Latin letter also accepting its accented
+// forms, for the direct-to-Mongo name lookups (Atlas Search folding is an index-side
+// analyzer setting we don't control from here).
+function diacriticInsensitivePattern(value = '') {
+  return foldDiacritics(value)
+    .split('')
+    .map(char => {
+      const accented = DIACRITIC_VARIANTS.get(char.toLowerCase());
+      if (!accented) return escapeRegExp(char);
+      return `[${escapeRegExp(char)}${[...accented].join('')}]`;
+    })
+    .join('');
+}
+
 // Products flagged `hidden:true` in the DB are excluded from every result surface
 // (autocomplete, search, fast-search). Two equivalent forms:
 //  - HIDDEN_SEARCH_FILTER → drop into an Atlas $search `compound.filter` (or `must`)
@@ -237,7 +271,7 @@ async function directNameFallbackProducts(collection, query, limit = 10, maxTime
 
     return {
       $or: variants.map(variant => ({
-        name: { $regex: escapeRegExp(variant), $options: 'i' }
+        name: { $regex: diacriticInsensitivePattern(variant), $options: 'i' }
       }))
     };
   });
@@ -311,7 +345,7 @@ async function boostedProductsMatchingQuery(collection, query, limit = 5, maxTim
 
     return {
       $or: variants.map(variant => ({
-        name: { $regex: escapeRegExp(variant), $options: 'i' }
+        name: { $regex: diacriticInsensitivePattern(variant), $options: 'i' }
       }))
     };
   });
@@ -437,7 +471,7 @@ async function findDirectPrefixNameMatches(collection, query, limit = 15) {
 
   const variants = [...new Set([normalized, ...getExactNameQueryVariants(query)])].filter(Boolean);
   const prefixPatterns = variants.map(variant =>
-    new RegExp(`^${escapeRegExp(variant)}(?:\\s|$)`, 'iu')
+    new RegExp(`^${diacriticInsensitivePattern(variant)}(?:\\s|$)`, 'iu')
   );
 
   try {
@@ -474,7 +508,7 @@ async function findBroadSingleTokenNameMatches(collection, query, limit = 75) {
 
   const token = tokens[0];
   const tokenRegex = new RegExp(
-    `(^|[^\\p{L}\\p{N}])${escapeRegExp(token)}([^\\p{L}\\p{N}]|$)`,
+    `(^|[^\\p{L}\\p{N}])${diacriticInsensitivePattern(token)}([^\\p{L}\\p{N}]|$)`,
     'iu'
   );
 
@@ -529,7 +563,7 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
   if (tokens.length < 1) return [];
 
   const nameClauses = tokens.map(token => {
-    const escaped = escapeRegExp(token);
+    const escaped = diacriticInsensitivePattern(token);
     const pattern = /^\d+$/.test(token)
       ? new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu')
       : new RegExp(escaped, 'iu');
@@ -1015,8 +1049,8 @@ async function findDirectSpecificSoftCategoryNameMatches(collection, matchedSoft
       HIDDEN_MONGO_FILTER,
       stockFilter,
       ...(existingIds.length > 0 ? [{ _id: { $nin: existingIds } }] : []),
-      { $or: baseTokens.map(token => ({ name: { $regex: escapeRegExp(token), $options: 'i' } })) },
-      { $or: differentiatorTokens.map(token => ({ name: { $regex: escapeRegExp(token), $options: 'i' } })) }
+      { $or: baseTokens.map(token => ({ name: { $regex: diacriticInsensitivePattern(token), $options: 'i' } })) },
+      { $or: differentiatorTokens.map(token => ({ name: { $regex: diacriticInsensitivePattern(token), $options: 'i' } })) }
     ]
   };
 
@@ -5623,7 +5657,10 @@ function normalizeQuoteCharacters(text) {
   // Prime: ′ (U+2032)
   // Acute accent: ´ (U+00B4)
   // Grave accent: ` (U+0060)
-  return text
+  // Latin diacritics are folded too (fēnix → fenix), so every comparison and score
+  // built on this helper treats the ASCII spelling as equal to the accented one.
+  // Hebrew niqqud sits outside U+0300–U+036F and is left untouched.
+  return foldDiacritics(text)
     .replace(/[\u05F3\u2019\u2018\u02BC\u2032\u00B4\u0060]/g, "'")  // → ASCII apostrophe
     .replace(/[\u05F4\u201C\u201D]/g, '"');  // → ASCII double quote
 }
