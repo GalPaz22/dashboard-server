@@ -631,6 +631,10 @@ async function findFuzzyAuthorMatches(collection, query, limit = 20) {
   const tokens = getAuthorSearchTokens(query);
   if (tokens.length === 0) return [];
 
+  // 🔍 LANGUAGE-AWARE FUZZY PARAMETERS FOR AUTHOR SEARCH
+  const isQueryHebrew = await isHebrew(query);
+  const authorFuzzyPrefix = isQueryHebrew ? 2 : 3;
+
   try {
     return await collection.aggregate([
       {
@@ -641,7 +645,7 @@ async function findFuzzyAuthorMatches(collection, query, limit = 20) {
               text: {
                 query: token,
                 path: "author",
-                ...(token.length >= 4 ? { fuzzy: { maxEdits: 1, prefixLength: 2, maxExpansions: 20 } } : {})
+                ...(token.length >= 4 ? { fuzzy: { maxEdits: 1, prefixLength: authorFuzzyPrefix, maxExpansions: 20 } } : {})
               }
             })),
             filter: [
@@ -3706,7 +3710,16 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
     const isOriginalQueryHebrew = isHebrew(originalQuery);
     const hebrewVariations = isOriginalQueryHebrew ? generateHebrewQueryVariations(originalQuery) : [];
 
-    // Hebrew stemming: generated variations if applicable
+    // 🔍 LANGUAGE-AWARE FUZZY SEARCH PARAMETERS
+    // Hebrew text needs more fuzzy tolerance (maxEdits: 2, prefixLength: 2) for:
+    // - Niqqud variations (vowel marks)
+    // - Final letter forms (ך/כ, ם/מ, ן/נ, ף/פ, ץ/צ)
+    // - Plural/singular variations
+    // English/Latin text needs stricter fuzzy search (maxEdits: 1, prefixLength: 4) to avoid
+    // irrelevant matches (e.g., "monopoly" with maxEdits:2 + prefixLength:2 matches too much)
+    const fuzzyParams = isOriginalQueryHebrew 
+      ? { maxEdits: 2, prefixLength: 2, maxExpansions: 50 }  // Tolerant for Hebrew
+      : { maxEdits: 1, prefixLength: 4, maxExpansions: 30 }; // Strict for English/Latin
 
     // Build should clauses for text search
     const shouldClauses = [
@@ -3740,17 +3753,13 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
       }
     });
 
-    // Add remaining search clauses
+    // Add remaining search clauses with language-aware fuzzy parameters
     shouldClauses.push(
             {
               text: {
                 query: cleanedHebrewText,
                 path: "name",
-                fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 2,
-                  maxExpansions: 50,
-                },
+                fuzzy: fuzzyParams,
                 score: { boost: { value: 10 * textBoostMultiplier } }
               }
             },
@@ -3759,9 +3768,9 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 query: cleanedHebrewText,
                 path: "description",
                 fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3,
-                  maxExpansions: 50,
+                  maxEdits: isOriginalQueryHebrew ? 2 : 1,
+                  prefixLength: isOriginalQueryHebrew ? 3 : 5,
+                  maxExpansions: isOriginalQueryHebrew ? 50 : 30,
                 },
                 score: { boost: { value: 3 * textBoostMultiplier } }
               }
@@ -3772,7 +3781,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 path: "category",
                 fuzzy: {
                   maxEdits: 1,
-                  prefixLength: 2,
+                  prefixLength: isOriginalQueryHebrew ? 2 : 3,
                   maxExpansions: 10,
                 },
                 score: { boost: { value: 2 * textBoostMultiplier } }
@@ -3784,7 +3793,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 path: "softCategory",
                 fuzzy: {
                   maxEdits: 1,
-                  prefixLength: 2,
+                  prefixLength: isOriginalQueryHebrew ? 2 : 3,
                   maxExpansions: 10,
                 },
                 score: { boost: { value: 1.5 * textBoostMultiplier } }
@@ -3795,8 +3804,8 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 query: cleanedHebrewText,
                 path: "name",
                 fuzzy: {
-                  maxEdits: 2,
-                  prefixLength: 3
+                  maxEdits: isOriginalQueryHebrew ? 2 : 1,
+                  prefixLength: isOriginalQueryHebrew ? 3 : 4
                 },
                 score: { boost: { value: 5 * textBoostMultiplier } }
               }
@@ -3807,7 +3816,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 path: "category",
                 fuzzy: {
                   maxEdits: 1,
-                  prefixLength: 2
+                  prefixLength: isOriginalQueryHebrew ? 2 : 3
                 },
                 score: { boost: { value: 1 * textBoostMultiplier } }
               }
@@ -3818,7 +3827,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
                 path: "softCategory",
                 fuzzy: {
                   maxEdits: 1,
-                  prefixLength: 2
+                  prefixLength: isOriginalQueryHebrew ? 2 : 3
                 },
                 score: { boost: { value: 0.8 * textBoostMultiplier } }
               }
@@ -3842,7 +3851,7 @@ const buildStandardSearchPipeline = (cleanedHebrewText, query, hardFilters, limi
             path: "author",
             fuzzy: {
               maxEdits: 1,
-              prefixLength: 2,
+              prefixLength: isOriginalQueryHebrew ? 2 : 3,
               maxExpansions: 20,
             },
             score: { boost: { value: 8 * textBoostMultiplier } }
@@ -10614,6 +10623,10 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
   const requiredTerms = getRelaxedProductTerms(query);
   if (requiredTerms.length === 0) return [];
 
+  // 🔍 LANGUAGE-AWARE FUZZY PARAMETERS FOR RELAXED TEXT SEARCH
+  const isQueryHebrew = await isHebrew(query);
+  const relaxedFuzzyPrefix = isQueryHebrew ? 2 : 3;
+
   const excludeSet = new Set(excludeIds.map(id => id.toString()));
   const getTermVariants = (term) => {
     if (term === 'טלוויזיה') return ['טלוויזיה', 'טלויזיה'];
@@ -10625,7 +10638,7 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
     compound: {
       should: getTermVariants(term).flatMap(variant => [
         { autocomplete: { query: variant, path: 'name', tokenOrder: 'any', score: { boost: { value: 10 } } } },
-        { text: { query: variant, path: 'name', fuzzy: { maxEdits: 1, prefixLength: 2 }, score: { boost: { value: 8 } } } }
+        { text: { query: variant, path: 'name', fuzzy: { maxEdits: 1, prefixLength: relaxedFuzzyPrefix }, score: { boost: { value: 8 } } } }
       ]),
       minimumShouldMatch: 1
     }
@@ -11179,6 +11192,12 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
     } else {
       // 🎯 REGULAR SEARCH: Atlas Search autocomplete — no regex, no multiplanner timeout
       // Each query word must match in name (must), with optional boost from category/softCategory (should)
+      
+      // 🔍 LANGUAGE-AWARE FUZZY PARAMETERS FOR SIMPLE SEARCH
+      // Detect query language to apply appropriate fuzzy search tolerances
+      const isQueryHebrew = await isHebrew(query);
+      const simpleFuzzyPrefix = isQueryHebrew ? 2 : 3;  // Hebrew: 2, English/Latin: 3
+      
       const atlasPipeline = [
         {
           $search: {
@@ -11201,7 +11220,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
                     text: {
                         query: variant,
                       path: "name",
-                      fuzzy: { maxEdits: 1, prefixLength: 2 },
+                      fuzzy: { maxEdits: 1, prefixLength: simpleFuzzyPrefix },
                       score: { boost: { value: 8 } }
                     }
                     }
@@ -11212,7 +11231,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
                     text: {
                       query: word,
                       path: "author",
-                      fuzzy: { maxEdits: 1, prefixLength: 2 },
+                      fuzzy: { maxEdits: 1, prefixLength: simpleFuzzyPrefix },
                       score: { boost: { value: 9 } }
                     }
                   });
@@ -11235,7 +11254,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
                         text: {
                           query: constructBase,
                           path: "name",
-                          fuzzy: { maxEdits: 1, prefixLength: 2 },
+                          fuzzy: { maxEdits: 1, prefixLength: simpleFuzzyPrefix },
                           score: { boost: { value: 7 } }
                         }
                       }
@@ -16845,6 +16864,14 @@ app.post("/search-to-cart", async (req, res) => {
 
     if (enhancedDocument.product_id) {
       queryForExisting.product_id = enhancedDocument.product_id;
+    }
+
+    // Completed purchases may legitimately have neither a search query nor a
+    // browser session (for example server-side, admin or payment-webhook
+    // orders). Keep those orders distinct while still deduplicating retries of
+    // the same WooCommerce completion hook.
+    if (enhancedDocument.order_id) {
+      queryForExisting.order_id = enhancedDocument.order_id;
     }
 
     // Convert timestamp to Date object for comparison
