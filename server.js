@@ -13553,9 +13553,14 @@ app.post("/search", async (req, res) => {
         } // end else (allProducts.length > 0 after stock gate)
       }
     } else {
-      if (phase === 'text-matches-only' || isFastSearchMode) {
-        const fastEmptyMode = phase === 'text-matches-only' ? 'text-matches-only-empty' : 'fast-no-simple-results';
-        console.log(`[${requestId}] 📭 No text matches - trying quick LLM + vector fallback (${fastEmptyMode})`);
+      // 0 textual matches: always try vector+rerank first.
+      // Live /search (no phase) used to skip this and dump an LLM-extracted
+      // category (e.g. "monopoly" → cheapest משחקי קופסא). text-matches-only
+      // and /fast-search already used this path and returned the right products.
+      const fastEmptyMode = phase === 'text-matches-only'
+        ? 'text-matches-only-empty'
+        : (isFastSearchMode ? 'fast-no-simple-results' : 'search-no-simple-results');
+      console.log(`[${requestId}] 📭 No text matches - trying quick LLM + vector fallback (${fastEmptyMode})`);
 
         // ⚡ QUICK VECTOR FALLBACK: 0 textual results → extract filters + embed in parallel,
         // run a bounded vector search, then a fast LLM rerank. Mirrors the /fast-search
@@ -13725,23 +13730,26 @@ app.post("/search", async (req, res) => {
           } : vectorFallbackProducts);
         }
 
-        console.log(`[${requestId}] 📭 Vector fallback empty - returning empty ${fastEmptyMode} response`);
+        if (phase === 'text-matches-only' || isFastSearchMode) {
+          console.log(`[${requestId}] 📭 Vector fallback empty - returning empty ${fastEmptyMode} response`);
 
-        const emptyResponse = [];
-        logQuery(db.collection("queries"), query, {}, emptyResponse, false, { session_id }).catch(err =>
-          console.error(`[${requestId}] Failed to log empty ${fastEmptyMode} query:`, err.message)
-        );
+          const emptyResponse = [];
+          logQuery(db.collection("queries"), query, {}, emptyResponse, false, { session_id }).catch(err =>
+            console.error(`[${requestId}] Failed to log empty ${fastEmptyMode} query:`, err.message)
+          );
 
-        return res.json(isModernMode ? {
-          products: emptyResponse,
-          metadata: {
-            query,
-            requestId,
-            executionTime: Date.now() - searchStartTime,
-            searchMode: fastEmptyMode
-          }
-        } : emptyResponse);
-      }
+          return res.json(isModernMode ? {
+            products: emptyResponse,
+            metadata: {
+              query,
+              requestId,
+              executionTime: Date.now() - searchStartTime,
+              searchMode: fastEmptyMode
+            }
+          } : emptyResponse);
+        }
+
+        console.log(`[${requestId}] 📭 Vector fallback empty - continuing to full search`);
 
       // Atlas Search found 0 results — run filter extraction + embedding + translation in parallel.
       // Uses extractFiltersBrief (simpler prompt, faster) instead of the heavier unifiedSearchDecision
