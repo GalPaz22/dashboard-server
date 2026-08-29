@@ -3,7 +3,8 @@
  *
  * Shows only when:
  *   1. siteConfig.poweredBy.enabled === true  (Wine House is gated server-side)
- *   2. the page actually has Semantix-painted results
+ *   2. native search was empty and Semantix built a zero-results recovery grid
+ *      ([data-semantix-zero-grid]). Inject/rerank on native hits do not count.
  *
  * Does not clone cards, does not call injectIntoGrid, does not change ranking.
  */
@@ -15,11 +16,7 @@
 
   var BAR_ID = "semantix-powered-bar";
   var LINK_ID = "semantix-powered-preview";
-  var MARKERS =
-    '[data-semantix-zero-grid],' +
-    '[data-semantix-injected="1"],' +
-    '[data-semantix-reranked="1"],' +
-    ".semantix-zero-grid";
+  var MARKERS = '[data-semantix-zero-grid], .semantix-zero-grid';
 
   var observer = null;
   var timer = null;
@@ -35,7 +32,7 @@
     return poweredByCfg().enabled === true;
   }
 
-  function hasSemantixResults() {
+  function hasZeroResultsGrid() {
     try {
       return !!document.querySelector(MARKERS);
     } catch (e) {
@@ -44,14 +41,11 @@
   }
 
   function resultsHost() {
-    var category = document.querySelector(".categoryPage");
-    if (category) return category;
-
-    var marked =
-      document.querySelector("[data-semantix-zero-grid]") ||
-      document.querySelector('[data-semantix-injected="1"]') ||
-      document.querySelector('[data-semantix-reranked="1"]');
+    var marked = document.querySelector("[data-semantix-zero-grid], .semantix-zero-grid");
     if (!marked) return null;
+
+    var category = document.querySelector(".categoryPage");
+    if (category && category.contains(marked)) return category;
 
     return (
       marked.closest(".catalogList, .catalog_category, main, #main") ||
@@ -65,7 +59,7 @@
   }
 
   function mount() {
-    if (!isEnabled() || !hasSemantixResults()) {
+    if (!isEnabled() || !hasZeroResultsGrid()) {
       unmount();
       return;
     }
