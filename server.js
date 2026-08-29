@@ -1072,6 +1072,31 @@ function rankByNameTextRelevance(products, terms) {
   return scored.map(x => x.product);
 }
 
+// True when the product actually contains the query (or a long prefix of it)
+// in name/author — not just an Atlas fuzzy/autocomplete near-miss.
+// "בובספוג" matching "בובו" must fail here so we fall through to vector search.
+function productHasQueryAnchor(product, query) {
+  const q = normalizeQuoteCharacters(String(query || '').toLowerCase().trim());
+  if (!q) return false;
+  const hay = normalizeQuoteCharacters(
+    `${product?.name || ''} ${product?.author || ''}`
+  ).toLowerCase();
+  if (!hay.trim()) return false;
+  if (hay.includes(q)) return true;
+  const tokens = q.split(/\s+/).filter(t => t.length >= 3);
+  if (tokens.length > 0 && tokens.every(t => hay.includes(t))) return true;
+  const compact = q.replace(/\s+/g, '');
+  if (compact.length >= 5 && hay.includes(compact.slice(0, 5))) return true;
+  return false;
+}
+
+function dropUnanchoredNameMatches(products, query) {
+  if (!Array.isArray(products) || products.length === 0) return products;
+  const compactLen = normalizeQuoteCharacters(String(query || '')).replace(/\s+/g, '').length;
+  if (compactLen < 5) return products;
+  return products.filter(product => productHasQueryAnchor(product, query));
+}
+
 function getSpecificNameRankTerms(terms) {
   if (!Array.isArray(terms) || terms.length === 0) return [];
   const genericProductTerms = new Set([
@@ -2728,6 +2753,8 @@ async function getStoreConfigByApiKey(apiKey) {
       colors: userDoc.credentials?.colors || "",
       pinnedResults: Array.isArray(userDoc.credentials?.pinnedResults) ? userDoc.credentials.pinnedResults : [], // Merchandising: [{ query, productIds: [] }] — promoted products pinned to the top for matching queries
       showOutOfStock: userDoc.credentials?.showOutOfStock === true, // Admin toggle: include out-of-stock products in all search surfaces
+      // English queries → Hebrew transliteration (authors/product names), then search name+author
+      hebrewTranslate: userDoc.hebrewTranslate === true || userDoc.credentials?.hebrewTranslate === true,
       // Concierge (shopper-facing chat). Gated on a top-level `concierge: true`
       // on the user doc — anything else (missing, false, nested) leaves the
       // store exactly as it was: no trigger on search responses, 403 on
@@ -2751,7 +2778,11 @@ async function authenticate(req, res, next) {
     }
     req.store = store;
     // Seed request-scoped store context so nested search helpers can read per-store flags
-    requestStoreContext.run({ showOutOfStock: store.showOutOfStock === true, dbName: store.dbName }, next);
+    requestStoreContext.run({
+      showOutOfStock: store.showOutOfStock === true,
+      dbName: store.dbName,
+      hebrewTranslate: store.hebrewTranslate === true
+    }, next);
   } catch (err) {
     console.error("[AUTH] ❌ Exception during authentication:", err);
     res.status(500).json({ error: "Auth failure" });
@@ -3423,7 +3454,7 @@ async function executeOptimizedFilterOnlySearch(
     // product name written in Hebrew on this store (e.g. "Kindle" → "קינדל") — try a
     // transliteration and search again before giving up on a text match entirely.
     let nameMatchResults = initialNameMatchResults;
-    if (nameMatchResults.length === 0 && query && query.trim() && !detectHebrew(query)) {
+    if (nameMatchResults.length === 0 && query && query.trim() && !detectHebrew(query) && requestStoreContext.getStore()?.hebrewTranslate) {
       const hebrewTransliteration = await translateEnglishToHebrew(query, context).catch(() => null);
       if (hebrewTransliteration) {
         nameMatchResults = await nameSearch(hebrewTransliteration);
@@ -4258,16 +4289,15 @@ async function translateEnglishToHebrew(query, context) {
         messages: [
           {
             role: "system",
-            content: `You are helping with Hebrew product search. Given an English brand name or product name, provide the Hebrew transliteration that would commonly be used in Israeli e-commerce.
+            content: `You transliterate English search queries into Hebrew for this store: "${context || 'Israeli e-commerce'}".
 
-IMPORTANT: Only provide a Hebrew transliteration if:
-1. The query looks like a brand name or product name (not a generic word)
-2. There's a clear Hebrew transliteration commonly used
+If the query is a person (author, writer, illustrator), output the Hebrew spelling used in Israeli bookstores — not a word-for-word translation.
+Examples: "tamir mandovsky" → "תמיר מנדובסקי", "dostoevsky" → "דוסטויבסקי", "spongebob" → "בוב ספוג".
 
-This is for a "${context || 'general e-commerce'}" store — base the transliteration on how that transliteration is actually written in Hebrew for products in this domain (e.g. "kindle" → "קינדל" for an electronics/books store, "balvenie" → "בלוויני" for a wine/spirits store).
+If it is a brand or product line, use the common Israeli-commerce spelling for this store's domain (e.g. "kindle" → "קינדל", "balvenie" → "בלוויני").
 
-If you can provide a Hebrew transliteration, output ONLY the Hebrew text.
-If the query is generic (like "vodka", "wine", "red") or you're not confident, output "NO_TRANSLATION".`
+Output ONLY the Hebrew text.
+If the query is a generic word (wine, red, book) or you are not confident, output "NO_TRANSLATION".`
           },
           { role: "user", content: query },
         ],
@@ -8314,7 +8344,9 @@ app.get("/search/auto-load-more", async (req, res) => {
     const cleanedTextForSearch = removeHardFilterWords(cleanedText, hardFilters, categories, types);
 
     // Also get Hebrew translation for English brand names (e.g., "balvini" → "בלוויני")
-    const hebrewTranslation = await translateEnglishToHebrew(query, context);
+    const hebrewTranslation = requestStoreContext.getStore()?.hebrewTranslate
+      ? await translateEnglishToHebrew(query, context)
+      : null;
     if (hebrewTranslation) {
       console.log(`[${requestId}] 🔤 English→Hebrew translation: "${query}" → "${hebrewTranslation}"`);
     }
@@ -10750,7 +10782,7 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
  */
 async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false, translatedQuery = null) {
   const normalizedTranslation = String(translatedQuery || '').toLowerCase().trim();
-  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${normalizedTranslation}:${limit}`;
+  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${normalizedTranslation}:${limit}:he${store.hebrewTranslate ? 1 : 0}`;
   return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent, translatedQuery), 60);
 }
 
@@ -10801,6 +10833,71 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
             filterCheck,
             queryWords
           };
+        }
+        const fuzzyAuthorMatches = await findFuzzyAuthorMatches(collection, query, Math.max(limit, 20));
+        const anchoredAuthors = dropUnanchoredNameMatches(fuzzyAuthorMatches, query);
+        if (anchoredAuthors.length > 0) {
+          if (!silent) console.log(`[SIMPLE-SEARCH] Fuzzy author match: ${anchoredAuthors.length} results for "${query}"`);
+          return {
+            results: anchoredAuthors,
+            isPerfectFilterMatch: false,
+            isAuthorSearch: true,
+            filterCheck,
+            queryWords
+          };
+        }
+      }
+
+      // English query + store.hebrewTranslate: transliterate using merchant context
+      // (e.g. "tamir mandovsky" → "תמיר מנדובסקי") and search author + name in Hebrew.
+      if (store.hebrewTranslate && !detectHebrew(query)) {
+        try {
+          const hebrewQuery = await translateEnglishToHebrew(query, store.context || 'Israeli bookstore');
+          const hebrewNorm = normalizeQuoteCharacters(String(hebrewQuery || '').trim());
+          if (hebrewNorm && detectHebrew(hebrewNorm) && hebrewNorm.toLowerCase() !== query.toLowerCase()) {
+            if (!silent) console.log(`[SIMPLE-SEARCH] hebrewTranslate: "${query}" → "${hebrewNorm}"`);
+
+            const hebrewAuthorDirect = await findDirectAuthorMatches(collection, hebrewNorm, Math.max(limit, 20));
+            if (hebrewAuthorDirect.length > 0) {
+              if (!silent) console.log(`[SIMPLE-SEARCH] Hebrew author match: ${hebrewAuthorDirect.length} results for "${hebrewNorm}"`);
+              return {
+                results: hebrewAuthorDirect,
+                isPerfectFilterMatch: false,
+                isAuthorSearch: true,
+                filterCheck,
+                queryWords
+              };
+            }
+
+            if (includeAuthorSearch()) {
+              const hebrewAuthorFuzzy = await findFuzzyAuthorMatches(collection, hebrewNorm, Math.max(limit, 20));
+              const anchoredHebrewAuthors = dropUnanchoredNameMatches(hebrewAuthorFuzzy, hebrewNorm);
+              if (anchoredHebrewAuthors.length > 0) {
+                if (!silent) console.log(`[SIMPLE-SEARCH] Hebrew fuzzy author match: ${anchoredHebrewAuthors.length} results for "${hebrewNorm}"`);
+                return {
+                  results: anchoredHebrewAuthors,
+                  isPerfectFilterMatch: false,
+                  isAuthorSearch: true,
+                  filterCheck,
+                  queryWords
+                };
+              }
+            }
+
+            const hebrewNameMatches = await findDirectTranslatedNameMatches(collection, hebrewNorm, limit);
+            if (hebrewNameMatches.length > 0) {
+              if (!silent) console.log(`[SIMPLE-SEARCH] Hebrew name match: ${hebrewNameMatches.length} results for "${query}" → "${hebrewNorm}"`);
+              return {
+                results: hebrewNameMatches,
+                isPerfectFilterMatch: false,
+                isTranslatedTextMatch: true,
+                filterCheck,
+                queryWords
+              };
+            }
+          }
+        } catch (err) {
+          if (!silent) console.warn(`[SIMPLE-SEARCH] hebrewTranslate failed for "${query}":`, err.message);
         }
       }
 
@@ -11352,6 +11449,11 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         results = await directNameFallbackProducts(collection, query, searchLimit > 0 ? searchLimit : 10, 700);
       }
       if (!silent) console.log(`[SIMPLE-SEARCH] Atlas/Search fallback: ${results.length} results for "${query}"`);
+      const anchoredAtlas = dropUnanchoredNameMatches(results, query);
+      if (anchoredAtlas.length < results.length) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Dropped ${results.length - anchoredAtlas.length} weak fuzzy matches for "${query}" (${anchoredAtlas.length} anchored)`);
+        results = anchoredAtlas;
+      }
       results = filterAccessoriesForDeviceQuery(results, query, store, silent);
       return { results, isPerfectFilterMatch, filterCheck, queryWords };
     }
@@ -11628,6 +11730,7 @@ app.post("/fast-search", async (req, res) => {
       const strictExactInStockResults = simpleInStockResults.filter(product =>
         isExactTextMatch ||
         isModelNumberMatch ||
+        isAuthorSearch ||
         isStrictExactNameMatch(product.name, query) ||
         productNameHasNumericToken(product.name, query)
       );
@@ -11655,12 +11758,12 @@ app.post("/fast-search", async (req, res) => {
             onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
             ItemID: product.ItemID,
             profileBoost,
-            fastSearchMode: isModelNumberMatch ? 'model-number-match' : 'exact-text-match'
+            fastSearchMode: isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : 'exact-text-match')
           };
         });
 
         const executionTime = Date.now() - searchStartTime;
-        const exactSearchMode = isModelNumberMatch ? 'model-number-match' : 'exact-text-match';
+        const exactSearchMode = isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : 'exact-text-match');
         console.log(`[${requestId}] ⚡ FAST ${exactSearchMode.toUpperCase()} completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
 
         logQuery(querycollection, query, {}, exactProducts, false, { session_id }).catch(err =>
@@ -11696,7 +11799,7 @@ app.post("/fast-search", async (req, res) => {
     let preloadedValidation = null;
     let activeResults = simpleResults; // mutable reference (avoids const reassignment)
 
-    const needsLLM = !isPerfectFilterMatch && simpleResults.length > 0 && !relevanceScore?.isHighConfidence;
+    const needsLLM = !isPerfectFilterMatch && !isAuthorSearch && simpleResults.length > 0 && !relevanceScore?.isHighConfidence;
 
     if (needsLLM) {
       const unifiedStart = Date.now();
@@ -13003,17 +13106,17 @@ app.post("/search", async (req, res) => {
       let approvedProducts = [];
       let searchMode = '';
 
-      if (isPerfectFilterMatch || isBroadNameMatch) {
+      if (isPerfectFilterMatch || isBroadNameMatch || isAuthorSearch) {
         // 🎯 PERFECT MATCH: Return matching products (category-based search)
         // 🎯 MEMORY PROTECTION: Limit even perfect matches to prevent OOM
         const MAX_PERFECT_MATCH_RESULTS = MAX_FILTER_MATCH_RESULTS;
         approvedProducts = simpleResults.slice(0, MAX_PERFECT_MATCH_RESULTS);
-        searchMode = isBroadNameMatch ? 'broad-name-match' : 'perfect-filter-match';
+        searchMode = isAuthorSearch ? 'author-match' : (isBroadNameMatch ? 'broad-name-match' : 'perfect-filter-match');
 
         if (simpleResults.length > MAX_PERFECT_MATCH_RESULTS) {
-          console.log(`[${requestId}] 🎯 ${isBroadNameMatch ? 'Broad name' : 'Perfect filter'} match detected - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
+          console.log(`[${requestId}] 🎯 ${isAuthorSearch ? 'Author' : (isBroadNameMatch ? 'Broad name' : 'Perfect filter')} match detected - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
         } else {
-          console.log(`[${requestId}] 🎯 ${isBroadNameMatch ? 'Broad name' : 'Perfect filter'} match detected - returning ${approvedProducts.length} products`);
+          console.log(`[${requestId}] 🎯 ${isAuthorSearch ? 'Author' : (isBroadNameMatch ? 'Broad name' : 'Perfect filter')} match detected - returning ${approvedProducts.length} products`);
         }
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
@@ -13567,6 +13670,7 @@ app.post("/search", async (req, res) => {
         // fallback so the instant-search path also surfaces semantically-relevant products
         // (e.g. "silver ring pet") instead of returning empty.
         let vectorFallbackProducts = [];
+        let vectorFallbackAttempted = false;
         try {
           const fallbackStart = Date.now();
           const FALLBACK_VECTOR_LIMIT = 30;
@@ -13582,6 +13686,7 @@ app.post("/search", async (req, res) => {
           ]);
 
           if (queryEmbedding) {
+            vectorFallbackAttempted = true;
             const fb = extracted || {};
             const fbHardFilters = {};
             if (fb.category) fbHardFilters.category = Array.isArray(fb.category) ? fb.category : [fb.category];
@@ -13730,7 +13835,7 @@ app.post("/search", async (req, res) => {
           } : vectorFallbackProducts);
         }
 
-        if (phase === 'text-matches-only' || isFastSearchMode) {
+        if (phase === 'text-matches-only' || isFastSearchMode || vectorFallbackAttempted) {
           console.log(`[${requestId}] 📭 Vector fallback empty - returning empty ${fastEmptyMode} response`);
 
           const emptyResponse = [];
