@@ -4722,9 +4722,6 @@ function extractCategoriesFromProducts(products, options = {}) {
     .slice(0, 5) // Take top 5 soft categories max
     .map(([cat, _]) => cat);
 
-  // Log priority categories found
-  const priorityCatsFound = hardCategories.filter(cat => priorityHardCategories.includes(cat));
-  
   console.log(`[CATEGORIES] Result: hard=${JSON.stringify(hardCategories)}, soft=${JSON.stringify(softCategories)}`);
 
   return {
