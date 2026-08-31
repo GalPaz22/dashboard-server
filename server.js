@@ -4393,6 +4393,98 @@ async function findExpandedCatalogMatches(collection, terms, limit = 15) {
   return preferInStockThenAnyVisible(docs, rankTokens, limit);
 }
 
+async function findLastResortCatalogProducts(collection, limit = 12) {
+  try {
+    const docs = await collection.find({ $and: [HIDDEN_MONGO_FILTER] })
+      .sort({ boost: -1 })
+      .limit(Math.max(limit * 3, 30))
+      .maxTimeMS(800)
+      .toArray();
+    return preferInStockThenAnyVisible(docs, null, limit);
+  } catch (error) {
+    console.warn(`[LAST RESORT] Catalog fetch failed: ${error.message}`);
+    return [];
+  }
+}
+
+async function fillEmptySearchResults(collection, query, limit, context, requestId) {
+  const cap = Math.max(limit || 12, 8);
+  try {
+    const terms = await resolveCatalogSearchTerms(query, context).catch(() => []);
+    if (terms.length > 0) {
+      const hits = await findExpandedCatalogMatches(collection, terms, cap);
+      if (hits.length > 0) {
+        console.log(`[${requestId}] 🛟 Never-empty: catalog expansion "${query}" → [${terms.join(', ')}] (${hits.length})`);
+        return {
+          products: hits.map(product => formatFallbackProduct(product, query, 'llm-catalog-expansion')),
+          searchMode: 'llm-catalog-expansion'
+        };
+      }
+    }
+  } catch (error) {
+    console.warn(`[${requestId}] Never-empty catalog expansion failed: ${error.message}`);
+  }
+
+  try {
+    const relaxed = await findRelaxedTextAlternatives(collection, query, [], cap);
+    if (relaxed.length > 0) {
+      console.log(`[${requestId}] 🛟 Never-empty: relaxed alternatives ${relaxed.length} for "${query}"`);
+      return {
+        products: relaxed.map(product => formatFallbackProduct(product, query, 'relaxed-text-alternatives')),
+        searchMode: 'relaxed-text-alternatives'
+      };
+    }
+  } catch (error) {
+    console.warn(`[${requestId}] Never-empty relaxed search failed: ${error.message}`);
+  }
+
+  const lastResort = await findLastResortCatalogProducts(collection, cap);
+  if (lastResort.length > 0) {
+    console.log(`[${requestId}] 🛟 Never-empty: last-resort catalog ${lastResort.length} for "${query}"`);
+    return {
+      products: lastResort.map(product => formatFallbackProduct(product, query, 'last-resort-catalog')),
+      searchMode: 'last-resort-catalog'
+    };
+  }
+
+  return { products: [], searchMode: null };
+}
+
+function attachNeverEmptySearchResults(res, { collection, query, limit, context, requestId }) {
+  const _json = res.json.bind(res);
+  res.json = (payload) => {
+    const products = Array.isArray(payload) ? payload : payload?.products;
+    const isProductPayload = Array.isArray(payload) || (payload && Array.isArray(payload.products));
+    if (
+      !isProductPayload
+      || (Array.isArray(products) && products.length > 0)
+      || !query
+      || String(query).trim().length < 2
+    ) {
+      return _json(payload);
+    }
+
+    return fillEmptySearchResults(collection, query, limit, merchantContext(context), requestId)
+      .then(filled => {
+        if (!filled.products.length) return _json(payload);
+        if (Array.isArray(payload)) return _json(filled.products);
+        return _json({
+          ...payload,
+          products: filled.products,
+          metadata: {
+            ...(payload.metadata || {}),
+            searchMode: filled.searchMode || payload.metadata?.searchMode,
+            neverEmptyFallback: true
+          }
+        });
+      })
+      .catch(error => {
+        console.error(`[${requestId}] Never-empty fallback failed:`, error.message);
+        return _json(payload);
+      });
+  };
+}
+
 // Enhanced Gemini-based query classification function with learning
 async function classifyQueryComplexity(query, context, hasHighTextMatch = false, dbName = null) {
   const normalizedQuery = typeof query === 'string' ? query.trim() : '';
@@ -11601,6 +11693,13 @@ app.post("/fast-search", async (req, res) => {
     const db = client.db(req.store.dbName);
     const collection = db.collection(req.store.products);
     const querycollection = db.collection("queries");
+    attachNeverEmptySearchResults(res, {
+      collection,
+      query,
+      limit: FAST_LIMIT,
+      context: req.store?.context,
+      requestId
+    });
 
     const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, isModelNumberMatch, isAuthorSearch, filterCheck, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
@@ -12834,6 +12933,13 @@ app.post("/simple-search", async (req, res) => {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
+    attachNeverEmptySearchResults(res, {
+      collection,
+      query,
+      limit,
+      context: req.store?.context,
+      requestId
+    });
 
     // Use the reusable simple search logic
     const { results, isPerfectFilterMatch, isAuthorSearch, filterCheck, queryWords } = 
@@ -13060,6 +13166,13 @@ app.post("/search", async (req, res) => {
     const client = await getMongoClient();
     const db = client.db(dbName);
     const collection = db.collection(collectionName);
+    attachNeverEmptySearchResults(res, {
+      collection,
+      query,
+      limit: searchLimit,
+      context: context || req.store?.context,
+      requestId
+    });
 
     preliminaryTextSearchPromise = (() => {
       const pipeline = buildStandardSearchPipeline(query, query, {}, 50, false, false, [], {});
