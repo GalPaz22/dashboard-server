@@ -205,12 +205,18 @@ function includeOutOfStock() {
   return requestStoreContext.getStore()?.showOutOfStock === true;
 }
 
-// Steimatzky-only: also match the book author name in Atlas Search. Gated on
-// dbName because the "author" field is only mapped in Steimatzky's Atlas
-// Search index — every other store's index is dynamic:false without it, so
-// querying that path there would throw.
+// Atlas Search `author` path is only safe when this store opted in (the field
+// must exist on that store's search index). Set `searchAuthor: true` on the user.
 function includeAuthorSearch() {
-  return requestStoreContext.getStore()?.dbName === 'steimatzky';
+  return requestStoreContext.getStore()?.searchAuthor === true;
+}
+
+function merchantContext(explicit) {
+  const fromArg = typeof explicit === 'string' ? explicit.trim() : '';
+  if (fromArg) return fromArg;
+  const fromStore = requestStoreContext.getStore()?.context;
+  if (typeof fromStore === 'string' && fromStore.trim()) return fromStore.trim();
+  return 'e-commerce';
 }
 
 // Atlas $search `compound.filter` clause for in-stock; empty when the store shows out-of-stock
@@ -424,6 +430,16 @@ function isProductInStock(product = {}) {
   return true;
 }
 
+function preferInStockThenAnyVisible(docs, tokens, limit) {
+  const visible = (docs || []).filter(isProductVisible);
+  const inStock = visible.filter(isProductInStock);
+  const chosen = inStock.length > 0 ? inStock : visible;
+  if (tokens && tokens.length) {
+    return rankByNameTextRelevance(chosen, tokens).slice(0, limit);
+  }
+  return chosen.slice(0, limit);
+}
+
 function getExactNameQueryVariants(query) {
   const normalized = normalizeQuoteCharacters(String(query || '').trim());
   const lower = normalized.toLowerCase();
@@ -539,16 +555,6 @@ async function findBroadSingleTokenNameMatches(collection, query, limit = 75) {
 }
 
 function getDeterministicSearchTranslation(query) {
-  const normalized = normalizeQuoteCharacters(String(query || '').trim());
-  if (!normalized) return null;
-
-  // Common Hebrew spelling of the English beauty product line. Translating
-  // this locally keeps Phase 0 fast and prevents the numeric token ("12") from
-  // being searched on its own before the English product name is considered.
-  if (/הארד\s+בייס/iu.test(normalized)) {
-    return normalized.replace(/הארד\s+בייס/giu, 'hard base');
-  }
-
   return null;
 }
 
@@ -574,7 +580,6 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
     const docs = await collection.find({
       $and: [
         ...nameClauses,
-        ...stockMongoFilterClauses(),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -582,11 +587,51 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
       .maxTimeMS(600)
       .toArray();
 
-    const visible = docs.filter(product => isProductVisible(product) && isProductInStock(product));
-    return rankByNameTextRelevance(visible, tokens).slice(0, limit);
+    return preferInStockThenAnyVisible(docs, tokens, limit);
   } catch (error) {
     if (!isAtlasSearchIndexUnavailable(error)) {
       console.warn(`[TRANSLATED NAME] Direct lookup failed for "${translatedQuery}":`, error.message);
+    }
+    return [];
+  }
+}
+
+// English queries often live in description1 while the catalog name is Hebrew.
+async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
+  const tokens = getAuthorSearchTokens(query).filter(token => token.length >= 3);
+  if (tokens.length === 0) return [];
+  if (tokens.length === 1 && tokens[0].length < 4) return [];
+
+  const tokenClause = (token) => {
+    const escaped = escapeRegExp(token);
+    const pattern = detectHebrew(token)
+      ? new RegExp(escaped, 'iu')
+      : new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu');
+    return {
+      $or: [
+        { name: pattern },
+        { author: pattern },
+        { description1: pattern },
+        { description: pattern }
+      ]
+    };
+  };
+
+  try {
+    const docs = await collection.find({
+      $and: [
+        ...tokens.map(tokenClause),
+        HIDDEN_MONGO_FILTER
+      ]
+    })
+      .limit(Math.max(limit * 3, 20))
+      .maxTimeMS(700)
+      .toArray();
+
+    return preferInStockThenAnyVisible(docs, tokens, limit);
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[CATALOG FIELD] Direct lookup failed for "${query}":`, error.message);
     }
     return [];
   }
@@ -2755,6 +2800,8 @@ async function getStoreConfigByApiKey(apiKey) {
       showOutOfStock: userDoc.credentials?.showOutOfStock === true, // Admin toggle: include out-of-stock products in all search surfaces
       // English queries → Hebrew transliteration (authors/product names), then search name+author
       hebrewTranslate: userDoc.hebrewTranslate === true || userDoc.credentials?.hebrewTranslate === true,
+      searchAuthor: userDoc.searchAuthor === true || userDoc.credentials?.searchAuthor === true
+        || userDoc.hebrewTranslate === true || userDoc.credentials?.hebrewTranslate === true,
       // Concierge (shopper-facing chat). Gated on a top-level `concierge: true`
       // on the user doc — anything else (missing, false, nested) leaves the
       // store exactly as it was: no trigger on search responses, 403 on
@@ -2781,7 +2828,9 @@ async function authenticate(req, res, next) {
     requestStoreContext.run({
       showOutOfStock: store.showOutOfStock === true,
       dbName: store.dbName,
-      hebrewTranslate: store.hebrewTranslate === true
+      hebrewTranslate: store.hebrewTranslate === true,
+      searchAuthor: store.searchAuthor === true,
+      context: store.context || ''
     }, next);
   } catch (err) {
     console.error("[AUTH] ❌ Exception during authentication:", err);
@@ -2964,15 +3013,10 @@ app.use(async (req, res, next) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────
-// Author stamping (Steimatzky only)
-// Steimatzky products carry an `author` field (book author), but each of
-// the ~20 internal response builders enumerates its own field whitelist and
-// drops it. Rather than touching every one, stamp it onto outgoing products
-// post-hoc — same approach as specialLabel above — gated to this one store so
-// no other merchant's response shape changes.
+// Author stamping: products may carry `author`, but response builders often
+// drop it. Stamp it back when this store opted into author search.
 // ───────────────────────────────────────────────────────────────────────────
 const AUTHOR_SEARCH_PATHS = new Set(['/search', '/fast-search', '/search/load-more', '/search/auto-load-more']);
-const AUTHOR_STORE_DB = 'steimatzky';
 const AUTHOR_TTL_MS = 60 * 1000;
 const authorCache = new Map(); // `${dbName}.${collection}` -> { authors:Map, at:number }
 
@@ -3019,7 +3063,7 @@ function stampAuthorPayload(payload, authors) {
 }
 
 app.use(async (req, res, next) => {
-  if (!AUTHOR_SEARCH_PATHS.has(req.path) || !req.store || req.store.dbName !== AUTHOR_STORE_DB) return next();
+  if (!AUTHOR_SEARCH_PATHS.has(req.path) || !req.store || req.store.searchAuthor !== true) return next();
 
   let authors = new Map();
   try {
@@ -4235,18 +4279,6 @@ async function translateQuery(query, context) {
     const needsTranslation = await isHebrew(query);
     if (!needsTranslation) return query;
 
-    // These wine-domain hints only make sense for wine/beverage merchants — they used to
-    // apply unconditionally to every store on this server, which actively corrupted
-    // translations elsewhere. E.g. Garmin's "לילי" (the Lily watch line) was translated to
-    // "Lillet" (a French aperitif brand) because the model was primed to read ambiguous
-    // short Hebrew words as wine terms, regardless of what store was actually asking.
-    const isWineContext = /wine|winery|יין|יקב/i.test(context || '');
-    const wineHints = isWineContext
-      ? `\nPay attention to the word שכלי or שאבלי (which mean chablis) and מוסקדה for muscadet.
-Also:
-- "פלאם" or "פלם" should be translated as "Flam" (winery name), NOT "plum" or "flame".`
-      : '';
-
     const response = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0.1,
@@ -4258,8 +4290,9 @@ Also:
 Instructions:
 1. Translate the text from Hebrew to English.
 2. Remove any extraneous or stop words.
-3. Output only the essential keywords and phrases that will best represent the query context
-(remember: this is for e-commerce product searches in ${context} where details may be attached to product names and descriptions).${wineHints}`
+3. Use this store's domain to disambiguate brands, product lines, and terms: ${context || 'e-commerce'}.
+4. Output only the essential keywords and phrases that will best represent the query context
+(remember: this is for e-commerce product searches in ${context || 'e-commerce'} where details may be attached to product names and descriptions).`
         },
         { role: "user", content: query },
       ],
@@ -4289,12 +4322,14 @@ async function translateEnglishToHebrew(query, context) {
         messages: [
           {
             role: "system",
-            content: `You transliterate English search queries into Hebrew for this store: "${context || 'Israeli e-commerce'}".
+            content: `You map an English search query to the Hebrew string this store's catalog would actually contain.
 
-If the query is a person (author, writer, illustrator), output the Hebrew spelling used in Israeli bookstores — not a word-for-word translation.
-Examples: "tamir mandovsky" → "תמיר מנדובסקי", "dostoevsky" → "דוסטויבסקי", "spongebob" → "בוב ספוג".
+Store context: "${context || 'Israeli e-commerce'}". Use that domain knowledge (bookstore vs winery vs electronics) — do not follow a fixed list of pairs.
 
-If it is a brand or product line, use the common Israeli-commerce spelling for this store's domain (e.g. "kindle" → "קינדל", "balvenie" → "בלוויני").
+Rules:
+- Person (author, writer, illustrator, public figure): Hebrew spelling used in this market, not a literal translation of the name.
+- Famous book, theory, method, or English title: the Hebrew title or author name shoppers would type here. Prefer the work's common Hebrew title over a transliteration of a method/genre word.
+- Brand or product line: common Israeli-commerce spelling for this store's domain.
 
 Output ONLY the Hebrew text.
 If the query is a generic word (wine, red, book) or you are not confident, output "NO_TRANSLATION".`
@@ -4314,6 +4349,91 @@ If the query is a generic word (wine, red, book) or you are not confident, outpu
       return null;
   }
   }, 604800);
+}
+
+// Zero-hit recovery: map a misspelling / transliteration / trade name to catalog
+// strings using this store's context — never a hardcoded synonym list.
+async function resolveCatalogSearchTerms(query, context, categories, softCategories) {
+  const q = String(query || '').trim();
+  if (!q || q.length < 3) return [];
+
+  const cacheKey = generateCacheKey('catalog-expand-v2', q, context);
+  return withCache(cacheKey, async () => {
+    try {
+      const response = await openai.chat.completions.create({
+        model: "gpt-4o",
+        temperature: 0,
+        messages: [
+          {
+            role: "user",
+            content: `You recover a shopper query that found zero exact catalog hits.
+
+Store: ${context || 'e-commerce'}
+
+The typed string is often a phonetic Hebrew spelling, misspelling, transliteration, or a trade/medical/brand name used in this store.
+
+Return a JSON array of 1 to 4 SHORT search strings that would actually appear in this store's product names or descriptions (Hebrew and/or Latin). Prefer catalog spellings.
+
+Rules:
+- Sound Hebrew out as Latin/English terms used in THIS store's trade, then also give the common Hebrew catalog spelling.
+- Shoppers often add extra letters when transliterating; also try a shortened spelling and common loanwords in this vertical (including Latin medical/trade terms used on the floor).
+- Returned strings must be phonetic, spelling, or language variants of the typed query itself — do not substitute a nearby product type.
+- Use the store context to disambiguate.
+- Do not dump generic department names.
+- Return [] only if the query is clearly off-domain for this store.
+Output JSON only.
+
+Zero-hit query: "${q}"`
+          }
+        ]
+      });
+
+      const raw = (response.choices[0]?.message?.content || '').trim() || '[]';
+      const json = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
+      const parsed = JSON.parse(json);
+      if (!Array.isArray(parsed)) {
+        const empty = [];
+        empty.__skipCache = true;
+        return empty;
+      }
+      const original = q.toLowerCase();
+      const terms = [...new Set(
+        parsed
+          .map(term => String(term || '').trim())
+          .filter(term => term.length >= 2 && term.toLowerCase() !== original)
+      )].slice(0, 4);
+      if (terms.length === 0) {
+        terms.__skipCache = true;
+      }
+      return terms;
+    } catch (error) {
+      console.warn(`[CATALOG EXPAND] Failed for "${q}":`, error.message);
+      return [];
+    }
+  }, 604800);
+}
+
+async function findExpandedCatalogMatches(collection, terms, limit = 15) {
+  const uniqueTerms = [...new Set((terms || []).map(term => String(term || '').trim()).filter(Boolean))];
+  if (uniqueTerms.length === 0) return [];
+
+  const seen = new Set();
+  const docs = [];
+  for (const term of uniqueTerms) {
+    const hits = await Promise.all([
+      findDirectCatalogFieldMatches(collection, term, limit),
+      findDirectTranslatedNameMatches(collection, term, limit)
+    ]);
+    for (const product of hits.flat()) {
+      const id = product?._id?.toString?.();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      docs.push(product);
+    }
+  }
+
+  const rankTokens = uniqueTerms.flatMap(term => term.split(/\s+/).filter(Boolean));
+  return preferInStockThenAnyVisible(docs, rankTokens, limit);
 }
 
 // Enhanced Gemini-based query classification function with learning
@@ -4363,14 +4483,14 @@ async function classifyQueryComplexity(query, context, hasHighTextMatch = false,
 Context: ${context || "e-commerce product search"}
 
 SIMPLE queries are:
-- Exact product names or brand names (e.g., "Coca Cola", "iPhone 14", "יין כרמל")
-- vague names which probably related to the product name (e.g., "רגליים אוחזות ברום")
-- Simple brand + basic descriptor (e.g., "Nike shoes", "יין ברקן")
+- Exact product names or brand names
+- Vague names that are probably part of a product name
+- Simple brand + basic descriptor
 - Single product references without descriptive attributes
 
 COMPLEX queries are:
-- Descriptive searches with adjectives (e.g., "powerful wine", "יין עוצמתי")
-- Geographic or origin references (e.g., "wine from France", "יין מעמק הדורו")
+- Descriptive searches with adjectives
+- Geographic or origin references
 - Searches with multiple attributes or characteristics
 - Searches with prepositions indicating relationships (e.g., "for dinner", "עבור ארוחת ערב")
 - Questions or intent-based searches
@@ -4455,39 +4575,20 @@ function extractCategoriesFromProducts(products, options = {}) {
   const categoryCount = new Map();
   const softCategoryCount = new Map();
 
-  // Option to limit soft category extraction to top N products (default: use all)
   const softCategoryProductLimit = options.softCategoryProductLimit || products.length;
   const productsForSoftCategory = products.slice(0, softCategoryProductLimit);
 
-  // Hardcoded priority categories to always check for
-  const priorityHardCategories = [
-    'יין', 'יין אדום', 'יין לבן', 'יין מבעבע', 'יין כתום',
-    'וויסקי', 'וודקה', 'גין', 'סאקה', 'בירה', 'ברנדי',
-    'ורמוט', 'מארז', 'סיידר', 'דג׳סטיף', 'אפרטיף'
-  ];
-
-  // Debug: Log product count
   console.log(`[CATEGORIES] Extracting from ${products.length} products (soft from top ${softCategoryProductLimit})`);
 
-  // Count occurrences of each hard category across ALL products
   for (const product of products) {
-    // Hard categories
     if (product.category) {
       const cats = Array.isArray(product.category) ? product.category : [product.category];
       cats.forEach(cat => {
         categoryCount.set(cat, (categoryCount.get(cat) || 0) + 1);
-
-        // Boost priority categories (ensure they're always extracted if present)
-        // Normalize quote characters for comparison (Hebrew geresh → ASCII apostrophe)
-        const normalizedCat = normalizeQuoteCharacters(cat);
-        if (priorityHardCategories.some(pc => normalizeQuoteCharacters(pc) === normalizedCat)) {
-          categoryCount.set(cat, (categoryCount.get(cat) || 0) + 100);
-        }
       });
     }
-    }
+  }
 
-  // Count occurrences of soft categories only from top N products
   for (const product of productsForSoftCategory) {
     if (product.softCategory) {
       const softCats = Array.isArray(product.softCategory) ? product.softCategory : [product.softCategory];
@@ -4497,96 +4598,26 @@ function extractCategoriesFromProducts(products, options = {}) {
     }
   }
 
-  // FALLBACK: If no categories found, try to extract from product name/type/description
-  if (categoryCount.size === 0 && softCategoryCount.size === 0) {
-    console.log(`[CATEGORIES] No category fields found, using fallback extraction`);
-
-    // Wine type detection patterns
-    const winePatterns = {
-      'יין אדום': ['אדום', 'red', 'rouge', 'cabernet', 'merlot', 'שיראז', 'syrah', 'מלבק', 'malbec'],
-      'יין לבן': ['לבן', 'white', 'blanc', 'chardonnay', 'סוביניון', 'sauvignon', 'גוורץ', 'gewurz', 'ריזלינג', 'riesling', 'פסימנטו'],
-      'יין מבעבע': ['מבעבע', 'שמפניה', 'קאווה', 'prosecco', 'פרוסקו', 'sparkling', 'champagne', 'cava'],
-      'יין רוזה': ['רוזה', 'rose', 'rosé', 'רוזא'],
-      'יין': ['יין', 'wine', 'vin', 'vino', 'וינו', 'וין']
-    };
-
-    const otherPatterns = {
-      'וויסקי': ['וויסקי', 'whisky', 'whiskey', 'סינגל מולט', 'single malt'],
-      'וודקה': ['וודקה', 'vodka'],
-      'גין': ['גין', 'gin'],
-      'בירה': ['בירה', 'beer', 'ale', 'lager'],
-      'ברנדי': ['ברנדי', 'brandy', 'cognac', 'קוניאק'],
-      'ורמוט': ['ורמוט', 'vermouth'],
-      'סאקה': ['סאקה', 'sake']
-    };
-
-    const allPatterns = { ...winePatterns, ...otherPatterns };
-
-    for (const product of products) {
-      const searchText = `${product.name || ''} ${product.type || ''} ${product.description || ''}`.toLowerCase();
-
-      // Check each category pattern
-      for (const [category, keywords] of Object.entries(allPatterns)) {
-        for (const keyword of keywords) {
-          if (searchText.includes(keyword.toLowerCase())) {
-            const count = categoryCount.get(category) || 0;
-            categoryCount.set(category, count + 1);
-
-            // Boost if it's a priority category
-            if (priorityHardCategories.includes(category)) {
-              categoryCount.set(category, (categoryCount.get(category) || 0) + 100);
-            }
-
-            break; // Only count once per product per category
-          }
-        }
-      }
-    }
-
-  }
-
-  // Extract categories that appear in products
-  // For small LLM-selected sets (≤4 products): More lenient threshold
-  // - Priority categories: extract if they appear at least once
-  // - Other categories: extract most common (at least 2 occurrences for 4 products)
-  // For larger sets: require at least 25%
-
-  // Hard categories use all products
   const minOccurrencesHard = products.length <= 3
-    ? 1 // For 3 or fewer products, need at least 1 occurrence
+    ? 1
     : products.length <= 4
-      ? 2 // For 4 products, need at least 2 occurrences (50%)
-    : Math.max(2, Math.ceil(products.length * 0.25)); // For larger sets, 25% is enough
+      ? 2
+      : Math.max(2, Math.ceil(products.length * 0.25));
 
-  // Soft categories use only the limited subset (top 3 by default)
   const minOccurrencesSoft = productsForSoftCategory.length <= 3
-    ? 1 // For 3 or fewer products, need at least 1 occurrence
+    ? 1
     : Math.max(2, Math.ceil(productsForSoftCategory.length * 0.25));
 
-  const minOccurrencesForPriority = products.length <= 3 ? 1 : minOccurrencesHard; // Priority categories: 1 occurrence is enough for small sets
-
-
-  // Hard categories: Extract priority categories first, then common ones
   const sortedHardCategories = Array.from(categoryCount.entries())
-    .sort((a, b) => b[1] - a[1]); // Sort by count, most common first
+    .sort((a, b) => b[1] - a[1]);
 
   const hardCategories = [];
-
-  // First pass: Add priority categories that meet the lower threshold
   for (const [cat, count] of sortedHardCategories) {
-    if (priorityHardCategories.includes(cat) && count >= minOccurrencesForPriority && hardCategories.length < 3) {
+    if (count >= minOccurrencesHard && hardCategories.length < 3) {
       hardCategories.push(cat);
     }
   }
 
-  // Second pass: Add non-priority categories that meet the regular threshold
-  for (const [cat, count] of sortedHardCategories) {
-    if (!hardCategories.includes(cat) && count >= minOccurrencesHard && hardCategories.length < 3) {
-      hardCategories.push(cat);
-    }
-  }
-
-  // Fallback: If no categories extracted but we have categories, take the most common one
   if (hardCategories.length === 0 && sortedHardCategories.length > 0) {
     console.log(`[CATEGORIES] No categories met threshold, using most common`);
     hardCategories.push(sortedHardCategories[0][0]);
@@ -4807,32 +4838,12 @@ async function isSimpleProductNameQuery(query, filters, categories, types, softC
   // PRIORITY #3: Only if NO good text match was found, check for complex indicators
   // Multi-character complex indicators (reliable matching)
   const multiCharIndicators = [
-    // Hebrew prepositions and connectors (multi-char only to avoid false positives)
     'עבור', 'על', 'של', 'עם', 'ללא', 'בלי', 'אל', 'עד', 'או',
-
-      // Wine-specific complex terms (Hebrew)
-    'גפנים', 'בוגרות', 'בציר', 'מיישן', 'מאוחסן', 'יקב', 'כרם', 'טרואר',
-      'אלון', 'צרפתי', 'אמריקאי', 'בלגי', 'כבישה', 'תסיסה', 'יישון',
-
-      // Usage/pairing terms (Hebrew)
-      'לעל', 'האש', 'עוף', 'דגים', 'בשר', 'גבינות', 'פסטה', 'סלט', 'מרק',
-      'קינוח', 'חג', 'שבת', 'ארוחת', 'ערב', 'צהריים', 'בוקר',
-
-    // Seasonal/contextual terms (Hebrew)
-    'חורף', 'קיץ', 'אביב', 'סתיו', 'קר', 'חם', 'חמים', 'קרים', 'טריים',
-
-      // Taste descriptors (Hebrew)
-      'יבש', 'חריף', 'מתוק', 'קל', 'כבד', 'מלא', 'פירותי', 'פרחוני', 'עשבי',
-      'ווניל', 'שוקולד', 'עץ', 'בל', 'חלק', 'מחוספס', 'מאוזן', 'הרמוני',
-
-      // Quality/price terms (Hebrew)
-      'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד', 'נדיר', 'יוקרתי',
+    'ארוחת', 'ערב', 'צהריים', 'בוקר', 'חג', 'שבת',
+    'איכותי', 'זול', 'יקר', 'טוב', 'מעולה', 'מיוחד',
     'במחיר', 'שווה', 'משתלם',
-
-      // English terms (for mixed queries)
-      'vintage', 'reserve', 'grand', 'premium', 'organic', 'biodynamic',
-      'single', 'estate', 'vineyard', 'barrel', 'aged', 'matured'
-    ];
+    'from', 'for', 'under', 'above', 'cheap', 'expensive', 'premium', 'organic', 'gift'
+  ];
 
   // Single-letter prefixes (ל, ב, מ) - check only at word start for known patterns
   const singleLetterPrefixes = ['ל', 'ב', 'מ'];
@@ -5072,14 +5083,11 @@ async function extractFiltersFromQueryEnhanced(query, categories, types, softCat
     // Build example section only if example is a non-empty string
     const exampleSection = (example && typeof example === 'string' && example.trim()) ? `\n\nADDITIONAL EXAMPLES:\n${example}` : '';
 
-    const systemInstruction = customSystemInstruction || `You are an expert at extracting structured data from e-commerce search queries. The user's context/domain is: ${context || 'online wine and alcohol shop'}.
+    const systemInstruction = customSystemInstruction || `You are an expert at extracting structured data from e-commerce search queries. The user's context/domain is: ${context || 'e-commerce'}.
 
-DOMAIN KNOWLEDGE: You should use your knowledge of the domain specified in the context above. For example:
-- If working with wine/alcohol: wine brands, grape varieties, regions (Bordeaux, Tuscany, Mendoza, etc.), spirits types (Whisky, Vodka, Gin, etc.)
-- If working with food/bakery: dietary restrictions (gluten-free, vegan, kosher, etc.), ingredients, cuisine types, meal occasions
-- If working with other domains: apply relevant domain expertise from your knowledge base
+DOMAIN KNOWLEDGE: Use the store context above and the category/type/softCategory lists below. Do not assume a product vertical. Map query terms onto values that exist in those lists.
 
-When users mention brand names or domain-specific terms, USE YOUR KNOWLEDGE to extract relevant soft categories related to that term if they exist in the provided soft categories list.
+When users mention brand names or domain-specific terms, USE YOUR KNOWLEDGE of this store's domain to extract relevant soft categories related to that term if they exist in the provided soft categories list.
 
 CRITICAL RULE: ALL extracted values MUST exist in the provided lists. NEVER extract values that are not in the lists.
 
@@ -5089,33 +5097,23 @@ Extract the following filters from the query if they exist:
 3. maxPrice (maximum price, indicated by the word 'עד').
 4. category - STRICT MATCHING REQUIRED. Available categories: ${categories}
    - You MUST find a SOLID MATCH between the query and an existing category
-   - Look for exact or near-exact matches: "יין אדום" matches "יין אדום", "red wine" matches "יין אדום" if translated
-   - Partial word matching is allowed ONLY if it clearly identifies a unique category: "אדום" can match "יין אדום" if unambiguous
+   - Look for exact or near-exact matches, including translations of list values
+   - Partial word matching is allowed ONLY if it clearly identifies a unique category
    - DO NOT extract if the match is weak or ambiguous
    - The extracted category MUST be EXACTLY as it appears in the list: ${categories}
    - If no solid match exists, do NOT extract a category
 5. type - MUST ONLY select from this exact list: ${types}
-   - Types are SECONDARY characteristics (e.g., dry, sweet, sparkling)
    - The extracted type MUST exist EXACTLY in the provided list
-   - You may map synonyms intelligently (e.g., "dry" → "dry" if in list), but the final value MUST be in the list
+   - You may map synonyms intelligently, but the final value MUST be in the list
    - Do not ever make up a type that is not in the list
 6. softCategory - FLEXIBLE MATCHING ALLOWED with DOMAIN KNOWLEDGE. Available soft categories: ${softCategories}
-   - Extract contextual preferences (e.g., origins, grape varieties, food pairings, occasions, regions)
-   - You have MORE FLEXIBILITY here - you can intelligently map related terms
-   - SEMANTIC MATCHING: If the query implies a soft category without saying it literally, extract the closest matching soft category when it is appropriate and useful. Examples: "לפסטה" can imply pasta/Italian-pairing categories; "בורגון" can imply France/Pinot Noir/Chardonnay only if those exact values exist and the query context supports them.
-   - DO NOT over-infer: only add semantic soft categories that are directly supported by the user's words or strong domain knowledge. Do not add broad categories just because they are generally related.
-   - EXTRACT AGGRESSIVELY: Extract EVERY relevant attribute you can identify from the query. If a query has multiple characteristics, extract ALL of them.
-   - GEOGRAPHIC TERMS: "italian"/"איטלקי" → look for "Italy"/"איטליה" in list. "French"/"צרפתי" → "France"/"צרפת". "Spanish"/"ספרדי" → "Spain"/"ספרד". Always map adjective forms to country/region names in the list.
-   - FOOD PAIRING: "for pasta"/"לפסטה" → look for "pasta"/"פסטה" in list. "for steak"/"לסטייק" → "steak"/"סטייק" or "meat"/"בשר".
-   - GRAPE VARIETIES: Match the SPECIFIC variety mentioned. "cabernet franc"/"קברנה פרנק" → look for "קברנה פרנק" EXACTLY. "cabernet sauvignon"/"קברנה סוביניון" → look for "קברנה סוביניון". Only map bare "cabernet"/"קברנה" (no variety suffix) to "cabernet sauvignon"/"קברנה סוביניון". NEVER map "קברנה פרנק" to "קברנה סוביניון" — they are different grape varieties. "merlot"/"מרלו" → "merlot" in list.
-   - STYLE/CHARACTER: "fruity"/"פירותי" → look for "fruity" in list. "dry"/"יבש" could be type or soft category.
-   - OCCASIONS: "for a gift"/"למתנה" → "gift"/"מתנה". "for dinner"/"לארוחת ערב" → look for dinner/meal in list.
-   - USE YOUR WINE KNOWLEDGE: When users mention brand names, extract associated characteristics if they exist in the list
-     * Example: "אלאמוס"/"Alamos" wine brand → extract "malbec" and "mendoza" if in list
-     * Example: "שאטו מרגו"/"Chateau Margaux" → extract "bordeaux" and "cabernet sauvignon" if in list
-     * Example: "בארולו"/"Barolo" → extract "piedmont" and "nebbiolo" if in list
-   - General mapping: "Toscany" → "Italy" (if Italy is in list), "Rioja" → "Spain" (if Spain is in list)
-   - BUT: The final extracted value MUST exist in the provided list: ${softCategories}
+   - Extract contextual preferences that exist in the list (origin, style, occasion, material, audience, etc.)
+   - SEMANTIC MATCHING: If the query implies a soft category without saying it literally, extract the closest matching list value when it is appropriate
+   - DO NOT over-infer: only add semantic soft categories that are directly supported by the user's words or strong domain knowledge for THIS store
+   - EXTRACT AGGRESSIVELY: Extract EVERY relevant list value you can identify from the query
+   - GEOGRAPHIC TERMS: map adjective forms to country/region names if those names exist in the list
+   - USE STORE CONTEXT: when users mention brands or famous works, extract associated list values only if they exist in ${softCategories}
+   - The final extracted value MUST exist in the provided list: ${softCategories}
    - You can extract multiple soft categories as an array
 7. color - FLEXIBLE MATCHING ALLOWED. Available colors: ${colors}
    - Extract ANY color-related term from the query, including shades, synonyms, and translations
@@ -5143,12 +5141,7 @@ MATCHING STRICTNESS LEVELS:
 - color: FLEXIBLE - Same as softCategory. Map color synonyms and translations to values in the list.
 
 EXTRACTION EXAMPLES:
-Query: "italian red wine for pasta" → {"category": "יין אדום", "softCategory": ["Italy", "pasta"]} (map "italian" to country, "pasta" to food pairing)
-Query: "יין אדום איטלקי פירותי" → {"category": "יין אדום", "softCategory": ["איטליה", "fruity"]} (map "איטלקי" to "איטליה", "פירותי" to "fruity")
-Query: "dry white wine from France" → {"category": "יין לבן", "type": "dry", "softCategory": ["France"]}
-Query: "cabernet sauvignon under 100" → {"softCategory": ["cabernet sauvignon"], "maxPrice": 100}
-Query: "sweet sparkling wine for a gift" → {"type": "sweet", "softCategory": ["sparkling", "gift"]}
-Query: "יין רוזה ספרדי עד 80 שקל" → {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
+Query: "italian [category] for pasta" → map "italian" to a country/region in the softCategory list if present; map the product type to category only if it is in the category list
 Query: "כורסאת בד אדומה" → {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} (extract category, soft category AND color separately)
 Query: "כורסת בד בצבע חמרה" → {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} ("בצבע חמרה" means maroon color → map to "אדום" if "חמרה" is not in color list. "בד" is material → softCategory)
 Query: "ספה לבנה מעור" → {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material is softCategory, color is color — extract both)
@@ -5229,7 +5222,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
                   items: { type: Type.STRING }
                 }
               ],
-              description: `Soft filter - FLEXIBLE SEMANTIC MATCHING with DOMAIN KNOWLEDGE. Extract every appropriate geographic term, grape variety, region, food pairing, occasion, style, and character attribute from the query. Map wording and semantic intent to existing list values (e.g., "italian" → "Italy", "איטלקי" → "איטליה", "לפסטה" → pasta/Italian-pairing if listed). Do not over-infer speculative categories. Available soft categories: ${softCategories}. The final extracted value MUST exist in the provided list. Multiple values allowed as array.`
+              description: `Soft filter - FLEXIBLE SEMANTIC MATCHING with DOMAIN KNOWLEDGE from the store context. Extract attributes that exist in the list. Map wording and semantic intent to existing list values. Do not over-infer speculative categories. Available soft categories: ${softCategories}. The final extracted value MUST exist in the provided list. Multiple values allowed as array.`
             },
             color: {
               oneOf: [
@@ -5446,7 +5439,7 @@ async function extractFiltersBrief(query, categories, types, softCategories, con
         return extractFiltersFallback(query, categories, types, softCategories, colors);
       }
       
-      const systemInstruction = `You are a brief data extractor for an e-commerce ${context || 'wine and alcohol shop'}.
+      const systemInstruction = `You are a brief data extractor for this store: ${context || 'e-commerce'}.
 Extract relevant filters from the query. Be thorough — extract EVERY relevant filter you can identify.
 IMPORTANT: softCategory and color are INDEPENDENT fields. Always extract BOTH if the query contains material/style AND color.
 Hebrew feminine/plural forms are colors too: "אדומה"→"אדום", "לבנה"→"לבן", "שחורים"→"שחור".
@@ -5458,19 +5451,16 @@ EXTRACT FROM THESE LISTS:
 - color: ${colors}
 
 CRITICAL RULES:
-1. If the query is a BRAND NAME or PRODUCT NAME (like "פלטר", "Arini", "מטר"), DO NOT extract it as a category or softCategory.
-2. For brand/product queries, you MAY extract general category (like "יין") but NEVER add the brand name itself to softCategory.
-3. USE YOUR DOMAIN KNOWLEDGE: If a brand is mentioned, extract its characteristics ONLY if they exist in the lists (e.g. "Arini" -> region: "Sicily" if Sicily is in softCategory list).
+1. If the query is a BRAND NAME or PRODUCT NAME, DO NOT extract it as a category or softCategory.
+2. For brand/product queries you MAY extract a general category from the list, but NEVER add the brand name itself to softCategory.
+3. USE THE STORE CONTEXT: If a brand or famous work is mentioned, extract characteristics ONLY if they exist in the lists.
 4. Return JSON only. Return empty {} if nothing to extract.
-5. SYNONYM MATCHING: If a query word is a SYNONYM or semantically equivalent to a category in the list, map it to that category. For example, if the user searches "כיסא" and the category list contains "כורסא", extract "כורסא" as the category since they refer to similar products.
+5. SYNONYM MATCHING: If a query word is a SYNONYM or semantically equivalent to a category in the list, map it to that category.
 6. SOFT CATEGORY — EXTRACT AGGRESSIVELY:
-   - Semantic matching is allowed and desired when appropriate: infer store soft categories from meaning, domain knowledge, origin, grape variety, pairing, occasion, style, or region.
+   - Semantic matching is allowed when appropriate: infer store soft categories from meaning and this store's domain.
    - Only extract semantic categories that are clearly supported by the query. Do not add broad or speculative categories.
-   - Geographic adjectives → country/region names: "italian"/"איטלקי" → "Italy"/"איטליה", "French"/"צרפתי" → "France"/"צרפת", "Spanish"/"ספרדי" → "Spain"/"ספרד"
-   - Food pairings: "for pasta"/"לפסטה" → "pasta", "for steak" → "steak"/"meat"
-   - Grape varieties: "cabernet" → "cabernet sauvignon", "merlot" → "merlot"
-   - Occasions: "for a gift" → "gift"/"מתנה", "for dinner" → look in list
-   - Style: "fruity"/"פירותי" → "fruity", "full bodied" → "full body"
+   - Geographic adjectives → country/region names if those names exist in the list
+   - Occasions: "for a gift" → "gift"/"מתנה" if in list
    - Extract ALL matching soft categories, not just the first one
 7. COLOR — EXTRACT AGGRESSIVELY, MAP SHADES TO CLOSEST AVAILABLE COLOR:
    - "בצבע X" (in color X) → X is ALWAYS a color, extract it
@@ -5479,16 +5469,12 @@ CRITICAL RULES:
    - Even if exact shade not in list, ALWAYS extract the parent/base color that IS in the list
 
 EXAMPLES:
-Query: "פלטר" -> {"category": "יין"} (NOT {"softCategory": ["פלטר"]})
-Query: "יין אדום איטלקי" -> {"category": "יין אדום", "softCategory": ["איטליה"]}
-Query: "italian red wine for pasta" -> {"category": "יין אדום", "softCategory": ["Italy", "pasta"]}
-Query: "dry white wine from France" -> {"category": "יין לבן", "type": "dry", "softCategory": ["France"]}
-Query: "יין רוזה ספרדי עד 80" -> {"category": "יין רוזה", "softCategory": ["ספרד"], "maxPrice": 80}
+Query: a brand/product name with no category word -> {} or a general category from the list if unambiguous, never the brand as softCategory
 Query: "כורסאת בד אדומה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} (extract BOTH softCategory AND color)
-Query: "כורסת בד בצבע חמרה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]} ("בצבע חמרה" = maroon color → map to "אדום". "בד" = material → softCategory)
-Query: "ספה לבנה מעור" -> {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]} (material=softCategory, color=color)
+Query: "כורסת בד בצבע חמרה" -> {"category": "כורסא", "softCategory": ["בד"], "color": ["אדום"]}
+Query: "ספה לבנה מעור" -> {"category": "ספה", "softCategory": ["עור"], "color": ["לבן"]}
 Query: "שולחן עץ שחור" -> {"category": "שולחן", "softCategory": ["עץ"], "color": ["שחור"]}
-Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} (בורדו is a shade of red → map to "אדום")`;
+Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]}`;
 
       const extractFiltersBriefPromise = genAI.models.generateContent({
         model: "gemini-2.5-flash",
@@ -5507,7 +5493,7 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]} 
               type: { type: Type.STRING },
               softCategory: { 
                 oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }],
-                description: `Extract every appropriate semantic attribute — geographic terms, regions, grape varieties, food pairings, occasions, styles. Map query meaning to existing list values, but avoid speculative categories. Available: ${softCategories}`
+                description: `Extract every appropriate semantic attribute from the store lists — origin, style, occasion, material, audience. Map query meaning to existing list values, but avoid speculative categories. Available: ${softCategories}`
               },
               color: {
                 oneOf: [{ type: Type.STRING }, { type: Type.ARRAY, items: { type: Type.STRING } }],
@@ -5629,12 +5615,8 @@ function shouldUseOrLogicForCategories(query, categories) {
   ];
   
   const andIndicators = [
-    /\b(french|italian|spanish|greek|german|australian|israeli)\s+(red|white|rosé|sparkling)/gi,
-    /\b(יין|wine)\s+(צרפתי|איטלקי|ספרדי|יווני|גרמני|אוסטרלי|ישראלי)/gi,
-    /\b(cheap|expensive|premium|budget)\s+(red|white|wine)/gi,
-    /\b(זול|יקר|פרמיום|תקציבי)\s+(יין|אדום|לבן)/gi,
-    /\b(dry|sweet|semi-dry)\s+(red|white|wine)/gi,
-    /\b(יבש|מתוק|חצי.יבש)\s+(יין|אדום|לבן)/gi,
+    /\b(cheap|expensive|premium|budget)\s+/gi,
+    /\b(זול|יקר|פרמיום|תקציבי)\s+/gi,
   ];
   
   let orScore = 0;
@@ -6065,7 +6047,7 @@ function getExactMatchBonus(productName, query, cleanedQuery) {
     if (matchPercentage >= 0.75) {
       return 12000;
     }
-    // 🎯 LOWERED THRESHOLD: If 50-74% match (e.g., "רקנאטי אדום" → "רקנאטי מרלו כרם אודם")
+    // 🎯 LOWERED THRESHOLD: If 50-74% of query tokens match a product name
     // This helps when synonyms are used ("אדום" vs "אודם")
   /*  if (matchPercentage >= 0.5) {
       return 8000; // Good enough to be considered a text match (above 1000 threshold)
@@ -6304,7 +6286,7 @@ function sanitizeQueryForLLM(query) {
  * 
  * @param {Array} products - Products from simple regex search
  * @param {String} query - User's search query
- * @param {String} context - Search context (e.g., 'wine shop')
+ * @param {String} context - Search context from the merchant user document
  * @returns {Object} { isGoodMatch: boolean, validProducts: Array, reason: string }
  */
 async function validateSimpleSearchResults(products, query, context = "e-commerce") {
@@ -6331,39 +6313,28 @@ Context: ${context}
 Your task: Determine if the provided search results are GOOD ENOUGH to return to the user, or if we should run a more complex semantic search.
 
 DECISION CRITERIA:
-1. If query contains a BRAND NAME (e.g., "רקנאטי", "Jameson", "Glenmorangie"):
+1. If query contains a BRAND NAME:
    → AT LEAST ONE product must be from that exact brand
    → If no products match the brand, return isGoodMatch=false
 
-2. If query is purely DESCRIPTIVE (e.g., "יין אדום", "whisky", "vodka"):
+2. If query is purely DESCRIPTIVE (a category or attribute, no brand):
    → If most products match the description, return isGoodMatch=true
    → If most products are irrelevant, return isGoodMatch=false
 
-3. BRAND + ATTRIBUTES (e.g., "רקנאטי אדום", "Jameson whisky"):
+3. BRAND + ATTRIBUTES:
    → Must have products from that brand
    → Bonus if they also match the attributes
 
 EXAMPLES:
 
-Query: "רקנאטי לבן"
-Products: [רקנאטי סוביניון בלאן, רקנאטי שרדונה, ברקן סוביניון בלאן]
-→ isGoodMatch=TRUE (has רקנאטי products matching לבן)
+Query: a brand plus a descriptor, products include that brand matching the descriptor
+→ isGoodMatch=TRUE
 
-Query: "רקנאטי אדום"
-Products: [ברקן קברנה, ויתקין מרלו, כרם שבו אדום]
-→ isGoodMatch=FALSE (no רקנאטי products - need semantic search)
+Query: a brand, products are only other brands
+→ isGoodMatch=FALSE (need semantic search)
 
-Query: "יין אדום"
-Products: [כרם שבו אדום, ברקן קברנה, ויתקין מרלו]
-→ isGoodMatch=TRUE (all are red wines)
-
-Query: "whisky"
-Products: [Jameson, Glenfiddich, Glenmorangie]
-→ isGoodMatch=TRUE (all are whisky)
-
-Query: "Jameson"
-Products: [Glenmorangie, Glenfiddich, Jack Daniels]
-→ isGoodMatch=FALSE (no Jameson - need better search)
+Query: a category word, products are that category
+→ isGoodMatch=TRUE
 
 Return:
 1. isGoodMatch: boolean - true if results are good enough, false if need complex search
@@ -6510,7 +6481,7 @@ Given a user search query and the top results already retrieved from our databas
 Extract ONLY if clearly mentioned in the query:
 - category: Must exactly match one from: [${categoriesStr || 'any'}]
 - type: Must exactly match one from: [${typesStr || 'any'}]
-- softCategory: Match from: [${softCatList.join(', ') || 'any'}]. Extract geographic adjectives, regions, food pairings, styles, grape varieties, occasions. Use semantic/domain matching when appropriate, but only return values from this list.
+- softCategory: Match from: [${softCatList.join(', ') || 'any'}]. Extract attributes that exist in this list using the store context. Use semantic/domain matching when appropriate, but only return values from this list.
 - color: Extract if mentioned. Available: [${colorsStr || 'any'}]
 - minPrice / maxPrice: Extract numeric price bounds if explicitly mentioned
 
@@ -6525,7 +6496,7 @@ Return "return_results" when found products clearly satisfy the query, even with
 
 Return "full_search" when:
 • No relevant products found in the results
-• Query is complex with multiple product attributes (e.g., "יין אדום איטלקי פירותי")
+• Query is complex with multiple product attributes
 • User seeks alternatives or a non-existing product ("משהו דומה ל...", "כמו X אבל...")
 • Long descriptive queries (4+ meaningful attribute words, not just a product name + qualifier)
 • Results are a mix of relevant and irrelevant items needing semantic ranking
@@ -6651,14 +6622,14 @@ Extract filters from the query and decide the search path.`;
  * if any of the top results are actually semantically correct matches.
  * 
  * This prevents unnecessary expensive vector searches when the product exists but has
- * slightly different wording (e.g., "רקנאטי לבן" → "רקנאטי סוביניון בלאן").
+ * slightly different wording.
  * 
  * @param {Array} weakTextMatches - Top 10 text matches with low exactMatchBonus
  * @param {string} query - Original search query
  * @param {string} context - Store context
  * @returns {Object} { hasValidMatch: boolean, validProducts: Array, reason: string }
  */
-async function validateWeakTextMatchesWithLLM(weakTextMatches, query, context = "wine shop") {
+async function validateWeakTextMatchesWithLLM(weakTextMatches, query, context = "e-commerce") {
   if (!weakTextMatches || weakTextMatches.length === 0) {
     return { hasValidMatch: false, validProducts: [], reason: "No text matches to validate" };
   }
@@ -6690,21 +6661,17 @@ Context: ${context}
 Your task: Determine if ANY of the provided products are semantically valid matches for the user's query, even if the exact wording differs.
 
 CRITICAL RULES:
-1. If the query contains a BRAND NAME (e.g., "רקנאטי", "ברקן", "Glenmorangie"), the product MUST be from that brand to match
-2. If the query is ONLY descriptive (e.g., "יין אדום", "whisky"), any product matching the description is valid
+1. If the query contains a BRAND NAME, the product MUST be from that brand to match
+2. If the query is ONLY descriptive, any product matching the description is valid
 3. Check BOTH brand name AND product attributes when validating
 
 Examples of VALID matches:
-- Query: "רקנאטי לבן" → Product: "רקנאטי סוביניון בלאן" (✅ same brand, לבן = בלאן)
-- Query: "ברקן אדום" → Product: "ברקן מרלו" (✅ same brand, מרלו is red wine)
-- Query: "יין מתוק" → Product: "מוסקט פטיליה" (✅ no brand specified, מוסקט is sweet wine)
-- Query: "whisky" → Product: "Glenmorangie Original Single Malt" (✅ no brand specified, single malt is whisky)
+- Query: brand + descriptor → Product from that brand matching the descriptor
+- Query: a category/attribute with no brand → Product in that category
 
 Examples of INVALID matches:
-- Query: "רקנאטי אדום" → Product: "ברקן קברנה סוביניון" (❌ WRONG BRAND - query asks for רקנאטי, not ברקן)
-- Query: "רקנאטי לבן" → Product: "רקנאטי קברנה סוביניון" (❌ same brand, but קברנה is red, not white)
-- Query: "יין יבש" → Product: "מוסקט מתוק" (❌ opposite - sweet not dry)
-- Query: "Glenmorangie" → Product: "Glenfiddich 12" (❌ WRONG BRAND)
+- Query: brand A → Product from brand B
+- Query: an attribute → Product with the opposite attribute
 
 Return:
 1. hasValidMatch: true if at least one product is a semantically valid match
@@ -6846,10 +6813,9 @@ CRITICAL RULES:
 6. Return UP TO ${maxResults} products - you may return fewer if less are truly relevant
 
 Examples:
-- Query: "sweet red wine" → Prioritize red wines described as sweet/fruity/dessert
-- Query: "scotch whisky" → Prioritize scotch/single malt whiskies
-- Query: "budget wine" → Prioritize lower-priced wines
-- Query: "premium vodka" → Prioritize higher-end vodka brands
+- Query names a style/attribute → prioritize products with that attribute
+- Query names a brand → prioritize that brand
+- Query names a budget → prioritize matching price range
 
 Return:
 1. selectedIndices: Array of indices (0-${candidates.length - 1}) of the MOST relevant products (up to ${maxResults})
@@ -10466,13 +10432,11 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
  * (should return few exact matches) or a broad category (should return more).
  *
  * Examples:
- * - "glenmorangie" → specific_product (brand name) → return 1-3 exact matches
- * - "israeli whisky" → broad_category (attribute search) → return up to 10
- * - "coca cola" → specific_product → return 1-3 exact matches
- * - "organic wine" → broad_category → return up to 10
+ * - a brand name → specific_product → return 1-3 exact matches
+ * - a category + attribute → broad_category → return up to 10
  *
  * @param {string} query - The search query
- * @param {string} context - Store context (e.g., "wine shop")
+ * @param {string} context - Store context from the merchant user document
  * @returns {Object} { searchType: 'specific_product'|'broad_category', maxResults: number, reason: string }
  */
 async function classifyQuerySpecificity(query, context = "e-commerce") {
@@ -10491,17 +10455,17 @@ async function classifyQuerySpecificity(query, context = "e-commerce") {
 Context: ${context}
 
 SPECIFIC_PRODUCT queries are:
-- Brand names (e.g., "glenmorangie", "coca cola", "absolut vodka", "ברקן")
-- Specific product names or model numbers (e.g., "iPhone 14 Pro", "macallan 18")
-- Misspelled brand names (e.g., "glanmourangy" = Glenmorangie, "jonnie walker" = Johnnie Walker)
+- Brand names
+- Specific product names or model numbers
+- Misspelled brand names
 - When the user clearly wants ONE specific thing, not variety
 
 BROAD_CATEGORY queries are:
-- Category + attribute searches (e.g., "israeli whisky", "organic wine", "יין אדום")
-- Descriptive searches (e.g., "sweet wine", "strong coffee", "cheap beer")
-- Geographic/origin searches (e.g., "french wine", "scottish whisky")
-- Use-case searches (e.g., "wine for dinner", "gift whisky")
-- General categories (e.g., "red wine", "single malt")
+- Category + attribute searches
+- Descriptive searches
+- Geographic/origin searches
+- Use-case searches
+- General categories
 
 Return your classification. For specific_product, also estimate how many exact matches likely exist (usually 1-5).`;
 
@@ -10848,11 +10812,23 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         }
       }
 
-      // English query + store.hebrewTranslate: transliterate using merchant context
-      // (e.g. "tamir mandovsky" → "תמיר מנדובסקי") and search author + name in Hebrew.
+      const catalogFieldMatches = await findDirectCatalogFieldMatches(collection, query, limit);
+      if (catalogFieldMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Catalog field match: ${catalogFieldMatches.length} results for "${query}"`);
+        return {
+          results: catalogFieldMatches,
+          isPerfectFilterMatch: false,
+          isTranslatedTextMatch: true,
+          filterCheck,
+          queryWords
+        };
+      }
+
+      // English query + store.hebrewTranslate: map using merchant context
+      // and search author + name in Hebrew.
       if (store.hebrewTranslate && !detectHebrew(query)) {
         try {
-          const hebrewQuery = await translateEnglishToHebrew(query, store.context || 'Israeli bookstore');
+          const hebrewQuery = await translateEnglishToHebrew(query, store.context || merchantContext());
           const hebrewNorm = normalizeQuoteCharacters(String(hebrewQuery || '').trim());
           if (hebrewNorm && detectHebrew(hebrewNorm) && hebrewNorm.toLowerCase() !== query.toLowerCase()) {
             if (!silent) console.log(`[SIMPLE-SEARCH] hebrewTranslate: "${query}" → "${hebrewNorm}"`);
@@ -10889,6 +10865,18 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
               if (!silent) console.log(`[SIMPLE-SEARCH] Hebrew name match: ${hebrewNameMatches.length} results for "${query}" → "${hebrewNorm}"`);
               return {
                 results: hebrewNameMatches,
+                isPerfectFilterMatch: false,
+                isTranslatedTextMatch: true,
+                filterCheck,
+                queryWords
+              };
+            }
+
+            const hebrewCatalogMatches = await findDirectCatalogFieldMatches(collection, hebrewNorm, limit);
+            if (hebrewCatalogMatches.length > 0) {
+              if (!silent) console.log(`[SIMPLE-SEARCH] Hebrew catalog field match: ${hebrewCatalogMatches.length} results for "${query}" → "${hebrewNorm}"`);
+              return {
+                results: hebrewCatalogMatches,
                 isPerfectFilterMatch: false,
                 isTranslatedTextMatch: true,
                 filterCheck,
@@ -11292,7 +11280,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
           return filterCheck.matchedHardCategories.some(hc => {
             const h = hc.toLowerCase().trim();
             // Allow exact match OR the product category contains the hard category as substring
-            // e.g. "יין אדום קברנה" passes for hard "יין אדום", but "יין לבן" does NOT
+            // e.g. a more specific hard category passes; a sibling category does not
             return all.some(c => c === h || c.includes(h));
           });
         });
@@ -11812,7 +11800,7 @@ app.post("/fast-search", async (req, res) => {
         req.store.types || [],
         req.store.softCategories || '',
         req.store.colors || '',
-        'wine shop'
+        merchantContext(req.store?.context)
       );
 
       console.log(`[${requestId}] ⚡ Unified LLM done in ${Date.now() - unifiedStart}ms`);
@@ -11897,14 +11885,57 @@ app.post("/fast-search", async (req, res) => {
         const colorsForExtraction = Array.isArray(req.store?.colors)
           ? req.store.colors.join(', ')
           : (req.store?.colors || '');
-        const fallbackContext = req.store?.context || 'wine shop';
+        const fallbackContext = merchantContext(req.store?.context);
 
-        const [extracted, queryEmbedding] = await Promise.all([
+        const catalogExpandPromise = resolveCatalogSearchTerms(
+          query,
+          fallbackContext,
+          req.store.categories || [],
+          req.store.softCategories || []
+        ).then(async (terms) => {
+          if (!terms.length) return { terms, hits: [] };
+          const hits = await findExpandedCatalogMatches(collection, terms, FAST_LIMIT);
+          return { terms, hits };
+        }).catch(err => {
+          console.warn(`[${requestId}] Catalog expansion failed: ${err.message}`);
+          return { terms: [], hits: [] };
+        });
+
+        const [extracted, queryEmbedding, expanded] = await Promise.all([
           extractFiltersBrief(query, req.store.categories || '', req.store.types || '', req.store.softCategories || '', fallbackContext, colorsForExtraction).catch(() => ({})),
-          getQueryEmbedding(query).catch(() => null)
+          getQueryEmbedding(query).catch(() => null),
+          catalogExpandPromise
         ]);
 
-        if (queryEmbedding) {
+        if (expanded.hits.length > 0) {
+          console.log(`[${requestId}] 🔤 Catalog expansion "${query}" → [${expanded.terms.join(', ')}] → ${expanded.hits.length} products`);
+          let userProfile = null;
+          if (session_id) {
+            userProfile = await getUserProfileForBoosting(db, session_id).catch(() => null);
+          }
+          vectorFallbackProducts = expanded.hits.slice(0, FAST_LIMIT).map(product => {
+            const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+            return {
+              _id: product._id.toString(),
+              id: product.id,
+              name: product.name,
+              description: product.description,
+              price: product.price,
+              image: product.image,
+              url: product.url,
+              type: product.type,
+              category: product.category,
+              softCategory: product.softCategory,
+              specialSales: product.specialSales,
+              onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+              ItemID: product.ItemID,
+              stockStatus: product.stockStatus,
+              profileBoost,
+              fastSearchMode: 'llm-catalog-expansion'
+            };
+          });
+          console.log(`[${requestId}] ⚡ Catalog expansion produced ${vectorFallbackProducts.length} products in ${Date.now() - fallbackStart}ms`);
+        } else if (queryEmbedding) {
           const fb = extracted || {};
           const fbHardFilters = {};
           if (fb.category) fbHardFilters.category = Array.isArray(fb.category) ? fb.category : [fb.category];
@@ -11987,6 +12018,10 @@ app.post("/fast-search", async (req, res) => {
                 orderedResults = explicitSoftMatches;
                 console.log(`[${requestId}] 🎯 Vector fallback rerank returned empty; keeping ${explicitSoftMatches.length} explicit soft-category match(es)`);
               }
+              if (orderedResults.length === 0 && vectorResults.length > 0 && req.store?.conciergeEnabled !== true) {
+                orderedResults = vectorResults;
+                console.log(`[${requestId}] ⚡ Vector fallback rerank empty; concierge off — keeping ${orderedResults.length} semantic neighbour(s)`);
+              }
               console.log(`[${requestId}] 🎯 Vector fallback rerank kept ${rerankedProducts.length}/${vectorResults.length} (comprehensive=${reranked?.comprehensive ?? 'n/a'})`);
             } catch (rerankErr) {
               console.warn(`[${requestId}] ⚡ Vector fallback rerank failed (non-fatal), keeping raw vector order: ${rerankErr.message}`);
@@ -12037,7 +12072,7 @@ app.post("/fast-search", async (req, res) => {
             requestId,
             executionTime,
             isFastSearch: true,
-            searchMode: 'fast-vector-fallback',
+            searchMode: vectorFallbackProducts[0]?.fastSearchMode || 'fast-vector-fallback',
             personalizedResults: vectorFallbackProducts.some(p => (p.profileBoost || 0) > 0),
             personalizedCount: vectorFallbackProducts.filter(p => (p.profileBoost || 0) > 0).length,
             softCategoryExpansionCount: 0,
@@ -13098,7 +13133,7 @@ app.post("/search", async (req, res) => {
       }
     }
 
-    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, isAuthorSearch, filterCheck: fc, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, isAuthorSearch, isExactTextMatch, isTranslatedTextMatch, filterCheck: fc, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, searchLimit, false, precomputedTranslation);
     filterCheck = fc;
 
@@ -13106,17 +13141,21 @@ app.post("/search", async (req, res) => {
       let approvedProducts = [];
       let searchMode = '';
 
-      if (isPerfectFilterMatch || isBroadNameMatch || isAuthorSearch) {
+      if (isPerfectFilterMatch || isBroadNameMatch || isAuthorSearch || isExactTextMatch || isTranslatedTextMatch) {
         // 🎯 PERFECT MATCH: Return matching products (category-based search)
         // 🎯 MEMORY PROTECTION: Limit even perfect matches to prevent OOM
         const MAX_PERFECT_MATCH_RESULTS = MAX_FILTER_MATCH_RESULTS;
         approvedProducts = simpleResults.slice(0, MAX_PERFECT_MATCH_RESULTS);
-        searchMode = isAuthorSearch ? 'author-match' : (isBroadNameMatch ? 'broad-name-match' : 'perfect-filter-match');
+        searchMode = isAuthorSearch
+          ? 'author-match'
+          : (isBroadNameMatch
+            ? 'broad-name-match'
+            : (isTranslatedTextMatch ? 'translated-text-match' : (isExactTextMatch ? 'exact-text-match' : 'perfect-filter-match')));
 
         if (simpleResults.length > MAX_PERFECT_MATCH_RESULTS) {
-          console.log(`[${requestId}] 🎯 ${isAuthorSearch ? 'Author' : (isBroadNameMatch ? 'Broad name' : 'Perfect filter')} match detected - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
+          console.log(`[${requestId}] 🎯 ${searchMode} - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
         } else {
-          console.log(`[${requestId}] 🎯 ${isAuthorSearch ? 'Author' : (isBroadNameMatch ? 'Broad name' : 'Perfect filter')} match detected - returning ${approvedProducts.length} products`);
+          console.log(`[${requestId}] 🎯 ${searchMode} - returning ${approvedProducts.length} products`);
         }
       } else {
         // Only validate with LLM if it's NOT a perfect filter match
@@ -13184,7 +13223,7 @@ app.post("/search", async (req, res) => {
           
           // Step 1: Parallel extraction and embedding (fastest possible)
           const [extractedFilters, queryEmbedding] = await Promise.all([
-            extractFiltersBrief(query, categories, types, finalSoftCategories, 'wine shop', req.store?.colors || ''),
+            extractFiltersBrief(query, categories, types, finalSoftCategories, merchantContext(req.store?.context), req.store?.colors || ''),
             getQueryEmbedding(query)
           ]);
 
@@ -13219,7 +13258,7 @@ app.post("/search", async (req, res) => {
                 query,
                 [], // alreadyDelivered
                 false, // explain
-                'wine shop',
+                merchantContext(req.store?.context),
                 extractedFilters,
                 15, // maxResults 🎯 Allow more for emergency
                 true, // useFastLLM
@@ -13521,33 +13560,73 @@ app.post("/search", async (req, res) => {
 
             if (stockAlternatives.length > 0) {
               const stockSearchMode = hasRecommendationCategories ? 'stock-fallback-alternatives' : 'stock-relaxed-text-alternatives';
-              console.log(`[${requestId}] ⚡ [STOCK GATE] Fast stock fallback returned ${stockAlternatives.length} alternatives in ${Date.now() - stockFallbackStart}ms (${stockSearchMode})`);
+              const oosNameMatches = req.store?.conciergeEnabled !== true
+                ? [...finalProducts].filter(isProductVisible).slice(0, searchLimit).map(product => ({
+                    ...product,
+                    _id: product._id?.toString?.() || product._id,
+                    searchMode: 'out-of-stock-name-match'
+                  }))
+                : [];
+              const merged = [...oosNameMatches];
+              const seen = new Set(merged.map(p => String(p._id)));
+              for (const product of stockAlternatives) {
+                const id = String(product._id);
+                if (seen.has(id)) continue;
+                seen.add(id);
+                merged.push(product);
+              }
+              const returned = merged.slice(0, searchLimit);
+              console.log(`[${requestId}] ⚡ [STOCK GATE] Fast stock fallback returned ${returned.length} products (${oosNameMatches.length} OOS name match(es) + ${stockAlternatives.length} alternatives) in ${Date.now() - stockFallbackStart}ms (${stockSearchMode})`);
 
-              logBoostedProducts(stockAlternatives, requestId, "STOCK-FALLBACK");
+              logBoostedProducts(returned, requestId, "STOCK-FALLBACK");
 
               logQuery(db.collection("queries"), query, {
                 category: filterCheck?.matchedHardCategories?.length > 0 ? filterCheck.matchedHardCategories.join(', ') : undefined,
                 softCategory: filterCheck?.matchedSoftCategories?.length > 0 ? filterCheck.matchedSoftCategories : undefined,
                 color: filterCheck?.matchedColors?.length > 0 ? filterCheck.matchedColors : undefined
-              }, stockAlternatives, false, { session_id }).catch(err =>
+              }, returned, false, { session_id }).catch(err =>
                 console.error(`[${requestId}] Failed to log stock fallback query:`, err.message)
               );
 
               return res.json(isModernMode ? {
-                products: stockAlternatives,
+                products: returned,
                 metadata: {
                   query,
                   requestId,
                   executionTime: Date.now() - searchStartTime,
-                  searchMode: stockSearchMode,
+                  searchMode: oosNameMatches.length ? 'out-of-stock-name-match' : stockSearchMode,
                   stockFilteredCount: stockFiltered,
                   softCategoryExpansionCount: softCategoryExpansion.length,
                   aiRecommendationsCount: aiRecommendations.length
                 }
-              } : stockAlternatives);
+              } : returned);
             }
 
-            console.log(`[${requestId}] ⚠️ [STOCK GATE] Fast stock fallback found no alternatives in ${Date.now() - stockFallbackStart}ms - falling through to Phase 1`);
+            console.log(`[${requestId}] ⚠️ [STOCK GATE] Fast stock fallback found no alternatives in ${Date.now() - stockFallbackStart}ms`);
+            if (preStockTotal > 0 && req.store?.conciergeEnabled !== true) {
+              const oosKept = [...finalProducts, ...softCategoryExpansion]
+                .filter(isProductVisible)
+                .slice(0, searchLimit)
+                .map(product => ({
+                  ...product,
+                  _id: product._id?.toString?.() || product._id,
+                  searchMode: 'out-of-stock-name-match'
+                }));
+              if (oosKept.length > 0) {
+                console.log(`[${requestId}] ⚠️ [STOCK GATE] Concierge off — returning ${oosKept.length} out-of-stock name match(es) instead of empty`);
+                return res.json(isModernMode ? {
+                  products: oosKept,
+                  metadata: {
+                    query,
+                    requestId,
+                    executionTime: Date.now() - searchStartTime,
+                    searchMode: 'out-of-stock-name-match',
+                    stockFilteredCount: stockFiltered
+                  }
+                } : oosKept);
+              }
+            }
+            console.log(`[${requestId}] ⚠️ [STOCK GATE] Falling through to Phase 1`);
           } catch (stockFallbackError) {
             console.warn(`[${requestId}] ⚠️ [STOCK GATE] Fast stock fallback failed - falling through to Phase 1:`, stockFallbackError.message);
           }
@@ -13671,21 +13750,68 @@ app.post("/search", async (req, res) => {
         // (e.g. "silver ring pet") instead of returning empty.
         let vectorFallbackProducts = [];
         let vectorFallbackAttempted = false;
+        let vectorFallbackMode = 'fast-vector-fallback';
         try {
           const fallbackStart = Date.now();
           const FALLBACK_VECTOR_LIMIT = 30;
           const colorsForExtraction = Array.isArray(req.store?.colors)
             ? req.store.colors.join(', ')
             : (req.store?.colors || '');
-          const fallbackContext = req.store?.context || context || 'wine shop';
+          const fallbackContext = merchantContext(context || req.store?.context);
 
-          const [extracted, queryEmbedding, fallbackTranslation] = await Promise.all([
+          const catalogExpandPromise = resolveCatalogSearchTerms(
+            query,
+            fallbackContext,
+            categories,
+            finalSoftCategories
+          ).then(async (terms) => {
+            console.log(`[${requestId}] 🔤 Catalog expansion terms for "${query}": ${JSON.stringify(terms)}`);
+            if (!terms.length) return { terms, hits: [] };
+            const hits = await findExpandedCatalogMatches(collection, terms, searchLimit);
+            return { terms, hits };
+          }).catch(err => {
+            console.warn(`[${requestId}] Catalog expansion failed: ${err.message}`);
+            return { terms: [], hits: [] };
+          });
+
+          const [extracted, queryEmbedding, fallbackTranslation, expanded] = await Promise.all([
             extractFiltersBrief(query, categories, types, finalSoftCategories, fallbackContext, colorsForExtraction).catch(() => ({})),
             withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)).catch(() => null),
-            translateQuery(query, fallbackContext).catch(() => null)
+            translateQuery(query, fallbackContext).catch(() => null),
+            catalogExpandPromise
           ]);
 
-          if (queryEmbedding) {
+          if (expanded.hits.length > 0) {
+            vectorFallbackAttempted = true;
+            vectorFallbackMode = 'llm-catalog-expansion';
+            console.log(`[${requestId}] 🔤 Catalog expansion "${query}" → [${expanded.terms.join(', ')}] → ${expanded.hits.length} products`);
+            let fbUserProfile = null;
+            if (session_id) {
+              fbUserProfile = await getUserProfileForBoosting(db, session_id).catch(() => null);
+            }
+            vectorFallbackProducts = expanded.hits.slice(0, searchLimit).map(product => {
+              const profileBoost = fbUserProfile ? calculateProfileBoost(product, fbUserProfile) : 0;
+              return {
+                _id: product._id.toString(),
+                id: product.id,
+                name: product.name,
+                description: product.description,
+                price: product.price,
+                image: product.image,
+                url: product.url,
+                type: product.type,
+                category: product.category,
+                softCategory: product.softCategory,
+                specialSales: product.specialSales,
+                onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+                ItemID: product.ItemID,
+                stockStatus: product.stockStatus,
+                profileBoost,
+                searchMode: vectorFallbackMode
+              };
+            });
+            console.log(`[${requestId}] ⚡ Catalog expansion produced ${vectorFallbackProducts.length} products in ${Date.now() - fallbackStart}ms`);
+          } else if (queryEmbedding) {
             vectorFallbackAttempted = true;
             const fb = extracted || {};
             const fbHardFilters = {};
@@ -13764,9 +13890,25 @@ app.post("/search", async (req, res) => {
                 orderedResults = Array.isArray(reranked)
                   ? reranked.map(r => byId.get(r._id)).filter(Boolean)
                   : [];
+                // Only keep inferred soft-category products when the shopper actually
+                // typed that category (or an occasion). An inferred genre from a
+                // specific term must not dump random products after empty rerank.
                 if (orderedResults.length === 0 && explicitSoftMatches.length > 0) {
-                  orderedResults = explicitSoftMatches;
-                  console.log(`[${requestId}] 🎯 Vector fallback rerank returned empty; keeping ${explicitSoftMatches.length} explicit soft-category match(es)`);
+                  const queryLower = String(query || '').toLowerCase();
+                  const queryTouchesSoft = (fbSoftFilters.softCategory || []).some(sc => {
+                    const label = String(sc || '').toLowerCase().trim();
+                    return label.length >= 3 && (queryLower.includes(label) || label.includes(queryLower));
+                  });
+                  if (queryTouchesSoft || inferredOccasionSoftCategories.length > 0) {
+                    orderedResults = explicitSoftMatches;
+                    console.log(`[${requestId}] 🎯 Vector fallback rerank empty; keeping ${explicitSoftMatches.length} query-anchored soft-category match(es)`);
+                  } else {
+                    console.log(`[${requestId}] 🎯 Vector fallback rerank empty; dropping ${explicitSoftMatches.length} inferred soft-category dump`);
+                  }
+                }
+                if (orderedResults.length === 0 && vectorResults.length > 0 && req.store?.conciergeEnabled !== true) {
+                  orderedResults = vectorResults;
+                  console.log(`[${requestId}] ⚡ Vector fallback rerank empty; concierge off — keeping ${orderedResults.length} semantic neighbour(s)`);
                 }
                 if (inferredOccasionSoftCategories.length > 0 && explicitSoftMatches.length > orderedResults.length) {
                   const orderedIds = new Set(orderedResults.map(product => product._id.toString()));
@@ -13828,15 +13970,34 @@ app.post("/search", async (req, res) => {
               query,
               requestId,
               executionTime: Date.now() - searchStartTime,
-              searchMode: 'fast-vector-fallback',
+              searchMode: vectorFallbackMode,
               personalizedResults: vectorFallbackProducts.some(p => (p.profileBoost || 0) > 0),
               personalizedCount: vectorFallbackProducts.filter(p => (p.profileBoost || 0) > 0).length
             }
           } : vectorFallbackProducts);
         }
 
-        if (phase === 'text-matches-only' || isFastSearchMode || vectorFallbackAttempted) {
+        if (phase === 'text-matches-only' || isFastSearchMode) {
           console.log(`[${requestId}] 📭 Vector fallback empty - returning empty ${fastEmptyMode} response`);
+
+          const emptyResponse = [];
+          logQuery(db.collection("queries"), query, {}, emptyResponse, false, { session_id }).catch(err =>
+            console.error(`[${requestId}] Failed to log empty ${fastEmptyMode} query:`, err.message)
+          );
+
+          return res.json(isModernMode ? {
+            products: emptyResponse,
+            metadata: {
+              query,
+              requestId,
+              executionTime: Date.now() - searchStartTime,
+              searchMode: fastEmptyMode
+            }
+          } : emptyResponse);
+        }
+
+        if (vectorFallbackAttempted && req.store?.conciergeEnabled === true) {
+          console.log(`[${requestId}] 📭 Vector fallback empty - concierge on, returning empty ${fastEmptyMode} response`);
 
           const emptyResponse = [];
           logQuery(db.collection("queries"), query, {}, emptyResponse, false, { session_id }).catch(err =>
@@ -13866,7 +14027,7 @@ app.post("/search", async (req, res) => {
         : (req.store?.colors || '');
 
       const [earlyExtractedFilters, earlyEmbed, earlyTranslate] = await Promise.all([
-        extractFiltersBrief(query, categories, types, finalSoftCategories, 'wine shop', colorsForExtraction).catch(() => ({})),
+        extractFiltersBrief(query, categories, types, finalSoftCategories, merchantContext(req.store?.context), colorsForExtraction).catch(() => ({})),
         withCache(generateCacheKey('embedding', query), () => getQueryEmbedding(query)),
         translateQuery(query, context).catch(() => null)
       ]);
@@ -14231,8 +14392,8 @@ app.post("/search", async (req, res) => {
 
     // 🛡️ SOFT CATEGORY HALLUCINATION GUARD: Drop any extracted softCategory whose
     // distinguishing words do not appear in the original query.
-    // Example: query "קברנה פרנק ישראלי" → LLM extracts "קברנה סוביניון" because the prompt
-    // used to say "קברנה → cabernet sauvignon". "סוביניון" is NOT in the query → drop it.
+    // Drop extracted soft categories whose extra tokens were not in the query.
+    // The extractor sometimes expands a short query into a longer list value.
     // This prevents wrong-variety matches and short accidental stems like
     // "רון" from "ברונלו", while preserving supported mappings like "ישראל" for "ישראלי".
     if (enhancedFilters && enhancedFilters.softCategory) {
@@ -14248,8 +14409,8 @@ app.post("/search", async (req, res) => {
         if (scWords.length === 1) {
           return false;
         }
-        // Multi-word soft category (e.g. "קברנה סוביניון"): ALL words must appear in the query.
-        // This prevents "קברנה פרנק" query from extracting "קברנה סוביניון" because "סוביניון" ∉ query.
+        // Multi-word soft category: ALL words must appear in the query.
+        // This prevents expanding a short query into a longer list synonym.
         return scWords.every(scWord =>
           queryWords.some(qw => qw.includes(scWord) || scWord.includes(qw))
         );
@@ -15962,7 +16123,7 @@ app.post("/search", async (req, res) => {
               const semanticMatches = personalizedTextual.filter(p => (p.exactMatchBonus || 0) === 0);
               
               // Define text match quality tiers (for TRUE text matches only)
-              const EXACT_MATCH_THRESHOLD = 50000; // Very strong exact matches (e.g., "פלטר" when searching "פלטר")
+              const EXACT_MATCH_THRESHOLD = 50000; // Very strong exact name matches
               const STRONG_MATCH_THRESHOLD = 20000; // Strong matches
               const GOOD_MATCH_THRESHOLD = 5000;   // Good matches
               
@@ -18891,7 +19052,7 @@ async function trackUserProfileInteraction(db, sessionId, productId, interaction
  * This learns from what users SEARCH FOR, not just what they click/buy
  * @param {Object} db - MongoDB database instance
  * @param {string} sessionId - User session ID
- * @param {Array|string} hardCategories - Hard categories extracted from query (e.g., "wine", "whisky")
+ * @param {Array|string} hardCategories - Hard categories extracted from query
  * @param {Array|string} softCategories - Soft categories extracted from query (e.g., "italian", "red wine", "malbec")
  */
 async function trackQueryCategories(db, sessionId, hardCategories = null, softCategories = null) {
