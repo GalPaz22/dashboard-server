@@ -20117,11 +20117,32 @@ function buildSKUSearchPipeline(skuQuery, limit = 65) {
 // Function to execute SKU search
 async function executeSKUSearch(collection, skuQuery) {
   console.log(`Executing SKU search for: ${skuQuery}`);
-  
+
   try {
     const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 65)).toArray();
-    const visibleSkuResults = skuResults.filter(isProductVisible);
-    
+    let visibleSkuResults = skuResults.filter(isProductVisible);
+
+    // Fallback: some stores' Atlas Search index doesn't map sku/ItemID/id/barcode
+    // (only fields explicitly listed in the search index are queryable via $search),
+    // which silently drops every match on those paths. Fall back to a direct,
+    // index-independent Mongo lookup on the same fields so an exact SKU is still
+    // found even when the Atlas Search index hasn't been updated to include them.
+    if (visibleSkuResults.length === 0) {
+      const exactPattern = new RegExp(`^${escapeRegExp(skuQuery)}$`, 'i');
+      const exactMatches = await collection.find({
+        $or: [
+          { sku: exactPattern },
+          { ItemID: exactPattern },
+          { id: exactPattern },
+          { barcode: exactPattern }
+        ]
+      }).limit(65).toArray();
+      visibleSkuResults = exactMatches.filter(isProductVisible);
+      if (visibleSkuResults.length > 0) {
+        console.log(`SKU search: Atlas $search found nothing for "${skuQuery}", direct Mongo fallback found ${visibleSkuResults.length}`);
+      }
+    }
+
     // Add SKU-specific scoring and metadata
     const processedResults = visibleSkuResults.map((product, index) => ({
       ...product,
