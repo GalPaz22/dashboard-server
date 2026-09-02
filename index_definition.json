@@ -58,6 +58,22 @@
         "type": "string",
         "analyzer": "lucene.standard"
       },
+      "sku": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "ItemID": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "id": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
+      "barcode": {
+        "type": "string",
+        "analyzer": "lucene.standard"
+      },
       "stockStatus": {
         "type": "string",
         "analyzer": "lucene.keyword"
