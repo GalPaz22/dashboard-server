@@ -3131,14 +3131,56 @@ app.post("/site-config", async (req, res) => {
     }
 
     console.log(`[SITE-CONFIG] ✅ Retrieved config for dbName: ${user.dbName}`);
-    
+
+    // Wine House only: expose a powered-by badge config. Other merchants
+    // never receive this key, so a storefront engine that ignores unknown
+    // fields stays unchanged. Explicit `poweredBy.enabled: false` in the
+    // stored siteConfig still wins if we need to kill it without a deploy.
+    let payload = siteConfig;
+    if (user.dbName === "wineHouse") {
+      const stored = (siteConfig && typeof siteConfig.poweredBy === "object" && siteConfig.poweredBy)
+        ? siteConfig.poweredBy
+        : {};
+      payload = {
+        ...siteConfig,
+        poweredBy: {
+          enabled: true,
+          href: "https://www.semantix-ai.com",
+          logoUrl: "https://api.semantix-ai.com/cdn/powered-by-semantix.png",
+          scriptSrc: "https://api.semantix-ai.com/cdn/semantix-powered-by.js",
+          ...stored,
+        },
+      };
+    }
+
     // Return only what the client needs
-    return res.json(siteConfig);
+    return res.json(payload);
 
   } catch (err) {
     console.error("[SITE-CONFIG] Error:", err);
     return res.status(500).json({ error: "Internal server error" });
   }
+});
+
+// Public storefront assets (logo + isolated powered-by badge). No auth —
+// the Wine House page loads these after siteConfig says enabled:true.
+function sendCdnFile(res, filePath, contentType) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Cache-Control", "public, max-age=300");
+  if (contentType) res.type(contentType);
+  return res.sendFile(filePath);
+}
+
+app.get("/cdn/powered-by-semantix.png", (req, res) => {
+  sendCdnFile(res, path.join(__dirname, "public", "powered-by-semantix.png"), "image/png");
+});
+
+app.get("/cdn/semantix-powered-by.js", (req, res) => {
+  sendCdnFile(
+    res,
+    path.join(__dirname, "cdn", "semantix-powered-by.js"),
+    "application/javascript"
+  );
 });
 
 // Apply authentication to all routes except test endpoints, health, cache management, and webhooks
@@ -3152,7 +3194,8 @@ app.use((req, res, next) => {
       // is typed into the page at runtime. A browser opening it can't send an
       // X-API-Key header, so gating it just makes it a 401.
       req.path === '/demo-concierge' ||
-      req.path === '/site-config') { // 🔧 Allow /site-config to handle its own auth
+      req.path === '/site-config' || // 🔧 Allow /site-config to handle its own auth
+      req.path.startsWith('/cdn/')) { // public logo + powered-by script
     return next();
   }
   return authenticate(req, res, next);
@@ -20570,6 +20613,7 @@ async function executeSKUSearch(collection, skuQuery) {
     return [];
   }
 }
+
 // Shared SKU entry point for the search endpoints. Returns [] when the query is
 // not a SKU or matches nothing, so callers just fall through to normal search.
 async function resolveSkuQueryProducts(collection, query, requestId) {
