@@ -138,6 +138,19 @@ function includesWholeWord(text, word) {
   return new RegExp(`(^|\\s)${escaped}(\\s|$)`).test(text);
 }
 
+// Morphological extra letters only — ישראל→ישראלי, אדום→אדומה.
+// Arbitrary +1/+2 made "חציל" look like a variant of "חצי" (→ "חצי מתוק").
+const HEBREW_INFLECTION_SUFFIXES = new Set(['י', 'ה', 'ת', 'ים', 'ות', 'ית', 'ן', 'ם']);
+
+function isHebrewInflectionVariant(a, b) {
+  const left = String(a || '');
+  const right = String(b || '');
+  if (!left || !right || left === right) return false;
+  const [longer, shorter] = left.length >= right.length ? [left, right] : [right, left];
+  if (shorter.length < 3 || !longer.startsWith(shorter)) return false;
+  return HEBREW_INFLECTION_SUFFIXES.has(longer.slice(shorter.length));
+}
+
 function normalizeSessionId(...values) {
   for (const value of values) {
     if (value !== undefined && value !== null && String(value).trim()) {
@@ -558,28 +571,47 @@ function getDeterministicSearchTranslation(query) {
   return null;
 }
 
+const CATALOG_STOPWORDS = new Set([
+  'the', 'a', 'an', 'of', 'for', 'and', 'or', 'to', 'in', 'on', 'with', 'from', 'by',
+  'machine', 'device', 'product', 'item', 'shop', 'store', 'cleaner',
+  'מכונת', 'מכונה', 'מכשיר', 'מוצר', 'של', 'את', 'עם', 'על', 'אל', 'או', 'זה', 'זו'
+]);
+
+function getDistinctiveSearchTokens(query) {
+  const all = [...new Set(
+    (normalizeQuoteCharacters(String(query || '').toLowerCase()).match(/[\p{L}\p{N}]+/gu) || [])
+      .filter(token => token.length >= 2 || /^\d+$/.test(token))
+  )];
+  const distinctive = all.filter(token => /^\d+$/.test(token) || (token.length >= 3 && !CATALOG_STOPWORDS.has(token)));
+  return distinctive.length > 0 ? distinctive : all;
+}
+
+function catalogTokenClause(token) {
+  const escaped = diacriticInsensitivePattern(token);
+  const pattern = /^\d+$/.test(token)
+    ? new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu')
+    : new RegExp(escaped, 'iu');
+  return {
+    $or: [
+      { name: pattern },
+      { description: pattern },
+      { description1: pattern }
+    ]
+  };
+}
+
 async function findDirectTranslatedNameMatches(collection, translatedQuery, limit = 15) {
-  const translatedTokens = normalizeQuoteCharacters(String(translatedQuery || '').toLowerCase())
-    .match(/[\p{L}\p{N}]+/gu) || [];
-  const tokens = [...new Set(translatedTokens.filter(token => token.length >= 2 || /^\d+$/.test(token)))];
+  const tokens = getDistinctiveSearchTokens(translatedQuery);
   // A single translated token is enough — this is only reached after exact/broad name
   // matching already failed, for a query that translated cleanly (e.g. Hebrew "לילי" →
   // English "Lily", a single-word brand name that would never otherwise match the
   // Latin-script product name). Requiring 2+ tokens silently excluded exactly this case.
   if (tokens.length < 1) return [];
 
-  const nameClauses = tokens.map(token => {
-    const escaped = diacriticInsensitivePattern(token);
-    const pattern = /^\d+$/.test(token)
-      ? new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu')
-      : new RegExp(escaped, 'iu');
-    return { name: pattern };
-  });
-
   try {
     const docs = await collection.find({
       $and: [
-        ...nameClauses,
+        ...tokens.map(catalogTokenClause),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -603,7 +635,7 @@ async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
   if (tokens.length === 1 && tokens[0].length < 4) return [];
 
   const tokenClause = (token) => {
-    const escaped = escapeRegExp(token);
+    const escaped = diacriticInsensitivePattern(token);
     const pattern = detectHebrew(token)
       ? new RegExp(escaped, 'iu')
       : new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu');
@@ -635,6 +667,232 @@ async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
     }
     return [];
   }
+}
+
+async function findHeadCollocationNameMatches(collection, query, limit = 15) {
+  const words = tokenizeLabel(query).filter(word => word.length >= 2 || /^\d+$/.test(word));
+  // Need a product head plus a 2-word tail collocation ("יוגורט" + "פירות יער").
+  if (words.length < 3) return [];
+  const head = words[0];
+  const tail = words.slice(-2);
+  if (head === tail[0] || tail.some(token => token === head)) return [];
+
+  const phrasePattern = new RegExp(
+    `${diacriticInsensitivePattern(tail[0])}[\\s\\-]+${diacriticInsensitivePattern(tail[1])}`,
+    'iu'
+  );
+
+  try {
+    const docs = await collection.find({
+      $and: [
+        catalogTokenClause(head),
+        {
+          $or: [
+            { name: phrasePattern },
+            { description: phrasePattern },
+            { description1: phrasePattern }
+          ]
+        },
+        HIDDEN_MONGO_FILTER
+      ]
+    })
+      .limit(Math.max(limit * 3, 20))
+      .maxTimeMS(700)
+      .toArray();
+    return preferInStockThenAnyVisible(docs, words, limit);
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[HEAD COLLOCATION] Lookup failed for "${query}":`, error.message);
+    }
+    return [];
+  }
+}
+
+async function resolveQueryTranslation(query, context, existing = null) {
+  const existingNorm = normalizeQuoteCharacters(String(existing || '').trim());
+  if (existingNorm && existingNorm.toLowerCase() !== String(query || '').toLowerCase().trim()) {
+    return existingNorm;
+  }
+  try {
+    if (detectHebrew(query)) {
+      const translated = await translateQuery(query, context || 'product catalog');
+      return normalizeQuoteCharacters(String(translated || '').trim());
+    }
+    const hebrew = await translateEnglishToHebrew(query, context || merchantContext());
+    return normalizeQuoteCharacters(String(hebrew || '').trim());
+  } catch (error) {
+    console.warn(`[TRANSLATE] Query translation failed for "${query}":`, error.message);
+    return '';
+  }
+}
+
+function shouldIgnoreDepartmentFilters(query, extracted = {}, translation = '', filterCheck = null) {
+  if (leftoverQueryTokens(query, extracted, translation).length > 0) return true;
+  return Array.isArray(filterCheck?.unmatchedWords) && filterCheck.unmatchedWords.length > 0;
+}
+
+function leftoverQueryTokens(query, extracted = {}, translation = '') {
+  const tokens = [...new Set([
+    ...getDistinctiveSearchTokens(query),
+    ...getDistinctiveSearchTokens(translation)
+  ])];
+  const covered = new Set();
+  for (const val of [
+    ...normalizeConfigList(extracted.category),
+    ...normalizeConfigList(extracted.type),
+    ...normalizeConfigList(extracted.softCategory),
+    ...normalizeConfigList(extracted.color)
+  ]) {
+    const norm = normalizeQuoteCharacters(String(val).toLowerCase());
+    if (!norm) continue;
+    covered.add(norm);
+    tokenizeLabel(norm).forEach(token => covered.add(token));
+  }
+  return tokens.filter(token => {
+    if (covered.has(token)) return false;
+    for (const label of covered) {
+      if (label.length >= 3 && (token.includes(label) || label.includes(token))) return false;
+    }
+    return true;
+  });
+}
+
+function extractedFiltersHavePrecision(extracted = {}) {
+  const categories = normalizeConfigList(extracted.category)
+    .map(value => normalizeQuoteCharacters(String(value).toLowerCase()));
+  const types = normalizeConfigList(extracted.type);
+  // "פירות" as both category and softCategory is the same aisle, not extra precision.
+  const soft = normalizeConfigList(extracted.softCategory).filter(value => {
+    const norm = normalizeQuoteCharacters(String(value).toLowerCase());
+    return !categories.some(category =>
+      norm === category ||
+      (category.length >= 3 && (norm.includes(category) || category.includes(norm)))
+    );
+  });
+  const hasPrice = extracted.minPrice != null || extracted.maxPrice != null || extracted.price != null;
+  const colors = normalizeConfigList(extracted.color);
+  if (soft.length > 0 || types.length > 0 || hasPrice) return true;
+  if (categories.length > 0 && colors.length > 0) return true;
+  return false;
+}
+
+async function findPreciseFilterCatalogMatches(collection, extracted, store, limit = 25, query = '', translation = '') {
+  if (!extracted || typeof extracted !== 'object' || !extractedFiltersHavePrecision(extracted)) return [];
+  // Distinctive product words ("אננס") that the LLM collapsed into a parent
+  // department ("פירות") must not dump that aisle. Those tokens already failed
+  // name/description matching — the catalog simply does not have them.
+  if (leftoverQueryTokens(query, extracted, translation).length > 0) return [];
+
+  const categories = normalizeConfigList(extracted.category);
+  const types = normalizeConfigList(extracted.type);
+  const requestedSoft = normalizeConfigList(extracted.softCategory);
+  const expandedSoft = expandSoftCategoryTerms(requestedSoft, store?.softCategories || []);
+  const colors = normalizeConfigList(extracted.color);
+
+  const conditions = [
+    HIDDEN_MONGO_FILTER,
+    ...stockMongoFilterClauses()
+  ];
+
+  if (categories.length > 0) {
+    conditions.push({
+      $or: [
+        { category: { $in: categories } },
+        { type: { $in: categories } }
+      ]
+    });
+  }
+  if (types.length > 0) {
+    conditions.push({ type: { $in: types } });
+  }
+  if (requestedSoft.length > 1) {
+    conditions.push({ softCategory: { $all: requestedSoft } });
+  } else if (expandedSoft.length > 0) {
+    conditions.push({ softCategory: { $in: expandedSoft } });
+  }
+  if (colors.length > 0) {
+    conditions.push({ colors: { $in: colors } });
+  }
+  if (extracted.minPrice != null || extracted.maxPrice != null) {
+    const priceFilter = {};
+    if (extracted.minPrice != null) priceFilter.$gte = Number(extracted.minPrice);
+    if (extracted.maxPrice != null) priceFilter.$lte = Number(extracted.maxPrice);
+    conditions.push({ price: priceFilter });
+  } else if (extracted.price != null) {
+    const price = Number(extracted.price);
+    const priceRange = price * 0.15;
+    conditions.push({
+      price: { $gte: Math.max(0, price - priceRange), $lte: price + priceRange }
+    });
+  }
+
+  try {
+    const docs = await collection.find({ $and: conditions })
+      .limit(Math.max(limit * 2, 20))
+      .maxTimeMS(800)
+      .toArray();
+    const rankTokens = [
+      ...requestedSoft,
+      ...categories,
+      ...types,
+      ...colors
+    ].flatMap(value => String(value).split(/\s+/)).filter(Boolean);
+    return preferInStockThenAnyVisible(docs, rankTokens, limit);
+  } catch (error) {
+    if (!isAtlasSearchIndexUnavailable(error)) {
+      console.warn(`[LLM FILTER CATALOG] Lookup failed:`, error.message);
+    }
+    return [];
+  }
+}
+
+async function recoverUnmatchedQuery(collection, {
+  query,
+  store,
+  limit = 15,
+  requestId,
+  extracted = {},
+  fallbackTranslation = ''
+} = {}) {
+  const collocationHits = await findHeadCollocationNameMatches(collection, query, limit);
+  if (collocationHits.length > 0) {
+    console.log(`[${requestId}] 🧩 Head+collocation catalog match: ${collocationHits.length} for "${query}"`);
+    return { products: collocationHits, searchMode: 'head-collocation-match' };
+  }
+
+  const translation = String(fallbackTranslation || '').trim();
+  if (translation && translation.toLowerCase() !== String(query || '').toLowerCase().trim()) {
+    const translatedHits = await findDirectTranslatedNameMatches(collection, translation, limit);
+    if (translatedHits.length > 0) {
+      console.log(`[${requestId}] 🔤 Translated catalog match: "${query}" → "${translation}" → ${translatedHits.length}`);
+      return { products: translatedHits, searchMode: 'translated-catalog-match' };
+    }
+    const fieldHits = await findDirectCatalogFieldMatches(collection, translation, limit);
+    if (fieldHits.length > 0) {
+      console.log(`[${requestId}] 🔤 Translated description match: "${query}" → "${translation}" → ${fieldHits.length}`);
+      return { products: fieldHits, searchMode: 'translated-catalog-match' };
+    }
+  }
+
+  const filterHits = await findPreciseFilterCatalogMatches(
+    collection,
+    extracted,
+    store,
+    limit,
+    query,
+    translation
+  );
+  if (filterHits.length > 0) {
+    console.log(`[${requestId}] 🎯 LLM filter catalog match: ${filterHits.length} for "${query}" ← ${JSON.stringify({
+      category: extracted?.category || null,
+      type: extracted?.type || null,
+      softCategory: extracted?.softCategory || null,
+      color: extracted?.color || null
+    })}`);
+    return { products: filterHits, searchMode: 'llm-filter-catalog-match' };
+  }
+
+  return { products: [], searchMode: null };
 }
 
 function getAuthorSearchTokens(query) {
@@ -10985,35 +11243,59 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         };
       }
 
+      // Optional middle modifiers ("עזים") should not hide a product whose name
+      // is the head noun plus a tail collocation ("יוגורט פירות יער").
+      const collocationMatches = await findHeadCollocationNameMatches(collection, query, limit);
+      if (collocationMatches.length > 0) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Head+collocation name match: ${collocationMatches.length} results for "${query}"`);
+        return {
+          results: collocationMatches,
+          isPerfectFilterMatch: false,
+          isExactTextMatch: true,
+          filterCheck,
+          queryWords
+        };
+      }
+
       let normalizedTranslatedQuery = normalizeQuoteCharacters(String(translatedQuery || '').trim());
 
-      // The caller only pre-translates Hebrew queries that contain a numeric model token
-      // (e.g. "פניקס 8"), so a pure brand/product-name query in Hebrew with no digits
-      // (e.g. "לילי" for the English-named product "Lily") never gets a translation and
-      // therefore never reaches findDirectTranslatedNameMatches below — even though that
-      // lookup would find the product correctly once it has the English name. Exact/broad
-      // name matching (above) already had its shot and found nothing, so it's worth the
-      // one-off translation call here (cached 7 days) before falling through to fuzzy
-      // matching, which can return unrelated same-edit-distance Hebrew words instead.
-      if (!normalizedTranslatedQuery && detectHebrew(query)) {
-        try {
-          const lazyTranslation = await translateQuery(query, store.context || 'product catalog');
-          normalizedTranslatedQuery = normalizeQuoteCharacters(String(lazyTranslation || '').trim());
-        } catch (err) {
-          if (!silent) console.warn(`[SIMPLE-SEARCH] Lazy translation failed for "${query}":`, err.message);
-        }
+      // No exact/broad name hit: translate the query and cross it against name +
+      // description. Hebrew shoppers type "מכונת אולטרהסוניק" for products named
+      // "ultrasonic cleaner"; Latin queries get the Hebrew catalog spelling.
+      if (!normalizedTranslatedQuery || normalizedTranslatedQuery.toLowerCase() === query.toLowerCase()) {
+        normalizedTranslatedQuery = await resolveQueryTranslation(
+          query,
+          store.context || merchantContext(),
+          translatedQuery
+        );
       }
 
       if (normalizedTranslatedQuery && normalizedTranslatedQuery.toLowerCase() !== query.toLowerCase()) {
+        if (!silent) console.log(`[SIMPLE-SEARCH] Translation: "${query}" → "${normalizedTranslatedQuery}"`);
         const translatedNameMatches = await findDirectTranslatedNameMatches(
           collection,
           normalizedTranslatedQuery,
           limit
         );
         if (translatedNameMatches.length > 0) {
-          if (!silent) console.log(`[SIMPLE-SEARCH] Translated name match: ${translatedNameMatches.length} results for "${query}" → "${normalizedTranslatedQuery}"`);
+          if (!silent) console.log(`[SIMPLE-SEARCH] Translated catalog match: ${translatedNameMatches.length} results for "${query}" → "${normalizedTranslatedQuery}"`);
           return {
             results: translatedNameMatches,
+            isPerfectFilterMatch: false,
+            isTranslatedTextMatch: true,
+            filterCheck,
+            queryWords
+          };
+        }
+        const translatedFieldMatches = await findDirectCatalogFieldMatches(
+          collection,
+          normalizedTranslatedQuery,
+          limit
+        );
+        if (translatedFieldMatches.length > 0) {
+          if (!silent) console.log(`[SIMPLE-SEARCH] Translated description match: ${translatedFieldMatches.length} results for "${query}" → "${normalizedTranslatedQuery}"`);
+          return {
+            results: translatedFieldMatches,
             isPerfectFilterMatch: false,
             isTranslatedTextMatch: true,
             filterCheck,
@@ -11038,6 +11320,51 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
           filterCheck,
           queryWords
         };
+      }
+
+      // Translation vs name/description missed. Ask the LLM which catalog
+      // filters the query implies, then search those fields directly.
+      try {
+        const extracted = await extractFiltersBrief(
+          query,
+          store.categories || '',
+          store.types || '',
+          store.softCategories || '',
+          store.context || merchantContext(),
+          store.colors || ''
+        );
+        const filterMatches = filterAccessoriesForDeviceQuery(
+          await findPreciseFilterCatalogMatches(
+            collection,
+            extracted,
+            store,
+            Math.max(limit, 15),
+            query,
+            normalizedTranslatedQuery
+          ),
+          query,
+          store,
+          silent
+        );
+        if (filterMatches.length > 0) {
+          if (!silent) {
+            console.log(`[SIMPLE-SEARCH] LLM filter catalog match: ${filterMatches.length} results for "${query}" ← ${JSON.stringify({
+              category: extracted?.category || null,
+              type: extracted?.type || null,
+              softCategory: extracted?.softCategory || null,
+              color: extracted?.color || null
+            })}`);
+          }
+          return {
+            results: filterMatches,
+            isPerfectFilterMatch: false,
+            isLlmFilterMatch: true,
+            filterCheck,
+            queryWords
+          };
+        }
+      } catch (err) {
+        if (!silent) console.warn(`[SIMPLE-SEARCH] LLM filter catalog match failed for "${query}":`, err.message);
       }
     }
 
@@ -11698,7 +12025,27 @@ app.post("/fast-search", async (req, res) => {
       requestId
     });
 
-    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, isModelNumberMatch, isAuthorSearch, filterCheck, queryWords } =
+    // 🔢 SKU LOOKUP: same reasoning as /search — an exact identifier must win
+    // before any fuzzy/semantic stage gets a chance to answer instead.
+    {
+      const skuProducts = await resolveSkuQueryProducts(collection, query, requestId);
+      if (skuProducts.length > 0) {
+        logQuery(querycollection, query, {}, skuProducts, false, { session_id }).catch(err =>
+          console.error(`[${requestId}] Failed to log SKU query:`, err.message)
+        );
+        return res.json({
+          products: skuProducts,
+          metadata: {
+            query,
+            requestId,
+            searchMode: 'sku-match',
+            executionTime: Date.now() - searchStartTime
+          }
+        });
+      }
+    }
+
+    const { results: simpleResults, isPerfectFilterMatch, isExactTextMatch, isModelNumberMatch, isAuthorSearch, isTranslatedTextMatch, isLlmFilterMatch, filterCheck, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, FAST_LIMIT);
 
     // ============================================================
@@ -11772,6 +12119,8 @@ app.post("/fast-search", async (req, res) => {
         isExactTextMatch ||
         isModelNumberMatch ||
         isAuthorSearch ||
+        isTranslatedTextMatch ||
+        isLlmFilterMatch ||
         isStrictExactNameMatch(product.name, query) ||
         productNameHasNumericToken(product.name, query)
       );
@@ -11799,12 +12148,12 @@ app.post("/fast-search", async (req, res) => {
             onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
             ItemID: product.ItemID,
             profileBoost,
-            fastSearchMode: isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : 'exact-text-match')
+            fastSearchMode: isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : (isLlmFilterMatch ? 'llm-filter-catalog-match' : (isTranslatedTextMatch ? 'translated-text-match' : 'exact-text-match')))
           };
         });
 
         const executionTime = Date.now() - searchStartTime;
-        const exactSearchMode = isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : 'exact-text-match');
+        const exactSearchMode = isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : (isLlmFilterMatch ? 'llm-filter-catalog-match' : (isTranslatedTextMatch ? 'translated-text-match' : 'exact-text-match')));
         console.log(`[${requestId}] ⚡ FAST ${exactSearchMode.toUpperCase()} completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
 
         logQuery(querycollection, query, {}, exactProducts, false, { session_id }).catch(err =>
@@ -11954,13 +12303,37 @@ app.post("/fast-search", async (req, res) => {
           return { terms: [], hits: [] };
         });
 
-        const [extracted, queryEmbedding, expanded] = await Promise.all([
+        const [extracted, queryEmbedding, fallbackTranslation, expanded] = await Promise.all([
           extractFiltersBrief(query, req.store.categories || '', req.store.types || '', req.store.softCategories || '', fallbackContext, colorsForExtraction).catch(() => ({})),
           getQueryEmbedding(query).catch(() => null),
+          translateQuery(query, fallbackContext).catch(() => null),
           catalogExpandPromise
         ]);
 
-        if (expanded.hits.length > 0) {
+        const recovered = await recoverUnmatchedQuery(collection, {
+          query,
+          store: req.store,
+          limit: FAST_LIMIT,
+          requestId,
+          extracted,
+          fallbackTranslation: await resolveQueryTranslation(query, fallbackContext, fallbackTranslation)
+        });
+        if (recovered.products.length > 0) {
+          let userProfile = null;
+          if (session_id) {
+            userProfile = await getUserProfileForBoosting(db, session_id).catch(() => null);
+          }
+          vectorFallbackProducts = recovered.products.slice(0, FAST_LIMIT).map(product => {
+            const profileBoost = userProfile ? calculateProfileBoost(product, userProfile) : 0;
+            return {
+              ...formatFallbackProduct(product, query, recovered.searchMode),
+              stockStatus: product.stockStatus,
+              profileBoost,
+              fastSearchMode: recovered.searchMode
+            };
+          });
+          console.log(`[${requestId}] ⚡ ${recovered.searchMode} produced ${vectorFallbackProducts.length} products in ${Date.now() - fallbackStart}ms`);
+        } else if (expanded.hits.length > 0) {
           console.log(`[${requestId}] 🔤 Catalog expansion "${query}" → [${expanded.terms.join(', ')}] → ${expanded.hits.length} products`);
           let userProfile = null;
           if (session_id) {
@@ -12007,6 +12380,12 @@ app.post("/fast-search", async (req, res) => {
             ],
             req.store?.softCategories || []
           );
+          // Flavor words that coincide with an aisle name ("פירות" in "פירות יער")
+          // must not dump that department when other product tokens remain.
+          if (shouldIgnoreDepartmentFilters(query, fb, fallbackTranslation, filterCheck)) {
+            delete fbHardFilters.category;
+            fbSoftFilters.softCategory = [];
+          }
           let explicitSoftMatches = [];
 
           const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
@@ -12536,11 +12915,8 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
     const catQuotesNorm = normalizeQuotes(catNorm);
     if (wordQuotesNorm === catQuotesNorm) return true;
 
-    if (wordNorm.startsWith(catNorm) && wordNorm.length <= catNorm.length + 2) return true;
-    if (wordQuotesNorm.startsWith(catQuotesNorm) && wordQuotesNorm.length <= catQuotesNorm.length + 2) return true;
-
-    if (catNorm.startsWith(wordNorm) && catNorm.length <= wordNorm.length + 2) return true;
-    if (catQuotesNorm.startsWith(wordQuotesNorm) && catQuotesNorm.length <= wordQuotesNorm.length + 2) return true;
+    if (isHebrewInflectionVariant(wordNorm, catNorm)) return true;
+    if (isHebrewInflectionVariant(wordQuotesNorm, catQuotesNorm)) return true;
 
     if (wordNorm.length >= 3 && includesWholeWord(catNorm, wordNorm)) return true;
     if (catNorm.length >= 3 && includesWholeWord(wordNorm, catNorm)) return true;
@@ -12594,6 +12970,12 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   const matchedHardCategories = [];
   const matchedSoftCategories = [];
   const matchedWordIndices = new Set();
+  const hasUnmatchedLeadingTokens = (startIndex) => {
+    for (let j = 0; j < startIndex; j++) {
+      if (!matchedWordIndices.has(j)) return true;
+    }
+    return false;
+  };
   
   // Sort categories by word count (longest first) to prefer multi-word matches
   const sortedHardCategories = [...normalizedHardCategories].sort((a, b) => {
@@ -12622,6 +13004,9 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       );
       
       if (allMatch) {
+        // A department word in the middle of a product query is a flavor/attribute,
+        // not an aisle: "יוגורט עזים פירות יער" must not bind hard category "פירות".
+        if (hasUnmatchedLeadingTokens(i)) continue;
         // Check if these indices haven't been matched yet
         const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
         const alreadyMatched = sliceIndices.some(idx => matchedWordIndices.has(idx));
@@ -12741,6 +13126,7 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       );
 
       if (allMatch) {
+        if (hasUnmatchedLeadingTokens(i)) continue;
         const sliceIndices = Array.from({ length: catWords.length }, (_, idx) => i + idx);
         // Only check if already matched by hard categories or colors — NOT by other soft categories
         const alreadyMatchedByNonSoft = sliceIndices.some(idx => matchedWordIndices.has(idx) && !softMatchedIndices.has(idx));
@@ -12784,7 +13170,7 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
   // Fallback for soft categories using the shared resolver. This catches query
   // variants that are not simple prefix/suffix matches, e.g. "איטלה" → "איטליה".
   for (let i = 0; i < queryWords.length; i++) {
-    if (matchedWordIndices.has(i)) continue;
+    if (matchedWordIndices.has(i) || hasUnmatchedLeadingTokens(i)) continue;
     const resolvedSoftCategory = resolveFlexibleListValue(queryWords[i], normalizedSoftCategories, 'softCategory');
     if (resolvedSoftCategory && !matchedSoftCategories.includes(resolvedSoftCategory)) {
       matchedSoftCategories.push(resolvedSoftCategory);
@@ -13113,6 +13499,37 @@ app.post("/search", async (req, res) => {
     }
   }
 
+  // 🔢 SKU LOOKUP: has to run before Phase 0. A pasted SKU is an exact request for
+  // one product, and every path below it (simple match, vector fallback, rerank)
+  // always produces *something*, so a lookup placed later never gets reached.
+  if (looksLikeSkuQuery(query)) {
+    try {
+      const skuClient = await getMongoClient();
+      const skuDb = skuClient.db(dbName);
+      const skuProducts = await resolveSkuQueryProducts(
+        skuDb.collection(collectionName),
+        query,
+        requestId
+      );
+      if (skuProducts.length > 0) {
+        logQuery(skuDb.collection("queries"), query, {}, skuProducts, false, { session_id }).catch(err =>
+          console.error(`[${requestId}] Failed to log SKU query:`, err.message)
+        );
+        return res.json(isModernMode ? {
+          products: skuProducts,
+          metadata: {
+            query,
+            requestId,
+            searchMode: 'sku-match',
+            executionTime: Date.now() - searchStartTime
+          }
+        } : skuProducts);
+      }
+    } catch (error) {
+      console.error(`[${requestId}] SKU lookup error for "${query}":`, error.message);
+    }
+  }
+
   // Use limit from user config (via API key), fallback to 5 if invalid
   const parsedLimit = userLimit ? parseInt(userLimit, 10) : 5;
   const searchLimit = (!isNaN(parsedLimit) && parsedLimit > 0) ? parsedLimit : 5;
@@ -13200,7 +13617,7 @@ app.post("/search", async (req, res) => {
       }
     }
 
-    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, isAuthorSearch, isExactTextMatch, isTranslatedTextMatch, filterCheck: fc, queryWords } =
+    const { results: simpleResults, isPerfectFilterMatch, isBroadNameMatch, isAuthorSearch, isExactTextMatch, isTranslatedTextMatch, isLlmFilterMatch, filterCheck: fc, queryWords } =
       await performSimpleSearch(db, collection, query, req.store, searchLimit, false, precomputedTranslation);
     filterCheck = fc;
 
@@ -13208,7 +13625,7 @@ app.post("/search", async (req, res) => {
       let approvedProducts = [];
       let searchMode = '';
 
-      if (isPerfectFilterMatch || isBroadNameMatch || isAuthorSearch || isExactTextMatch || isTranslatedTextMatch) {
+      if (isPerfectFilterMatch || isBroadNameMatch || isAuthorSearch || isExactTextMatch || isTranslatedTextMatch || isLlmFilterMatch) {
         // 🎯 PERFECT MATCH: Return matching products (category-based search)
         // 🎯 MEMORY PROTECTION: Limit even perfect matches to prevent OOM
         const MAX_PERFECT_MATCH_RESULTS = MAX_FILTER_MATCH_RESULTS;
@@ -13217,7 +13634,9 @@ app.post("/search", async (req, res) => {
           ? 'author-match'
           : (isBroadNameMatch
             ? 'broad-name-match'
-            : (isTranslatedTextMatch ? 'translated-text-match' : (isExactTextMatch ? 'exact-text-match' : 'perfect-filter-match')));
+            : (isLlmFilterMatch
+              ? 'llm-filter-catalog-match'
+              : (isTranslatedTextMatch ? 'translated-text-match' : (isExactTextMatch ? 'exact-text-match' : 'perfect-filter-match'))));
 
         if (simpleResults.length > MAX_PERFECT_MATCH_RESULTS) {
           console.log(`[${requestId}] 🎯 ${searchMode} - limiting to ${MAX_PERFECT_MATCH_RESULTS} of ${simpleResults.length} products for memory safety`);
@@ -13280,6 +13699,7 @@ app.post("/search", async (req, res) => {
       const shouldTriggerEmergencyExpansion = (approvedProducts.length < 5 || simpleResults.length < 5) &&
                                               filterCheck.matchedHardCategories &&
                                               filterCheck.matchedHardCategories.length > 0 &&
+                                              !(filterCheck.unmatchedWords && filterCheck.unmatchedWords.length > 0) &&
                                               !isFastSearchMode;
 
       if (shouldTriggerEmergencyExpansion) {
@@ -13368,7 +13788,9 @@ app.post("/search", async (req, res) => {
       // that don't match. This is the ultimate safety net - hard categories are sacred.
       // e.g., search "ליקר שוקולד" with hardCat="ליקר" → remove any "יין שוקולד" that leaked through.
       // EXCEPTION: Perfect exact matches (100% name match to query) can bypass category filtering
-      if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0 && approvedProducts.length > 0) {
+      if (filterCheck.matchedHardCategories && filterCheck.matchedHardCategories.length > 0 &&
+          !(filterCheck.unmatchedWords && filterCheck.unmatchedWords.length > 0) &&
+          approvedProducts.length > 0) {
         const beforeCount = approvedProducts.length;
         approvedProducts = approvedProducts.filter(product => {
           // Check for TRUE perfect exact match - only these can bypass category filtering
@@ -13848,7 +14270,31 @@ app.post("/search", async (req, res) => {
             catalogExpandPromise
           ]);
 
-          if (expanded.hits.length > 0) {
+          const recovered = await recoverUnmatchedQuery(collection, {
+            query,
+            store: req.store,
+            limit: searchLimit,
+            requestId,
+            extracted,
+            fallbackTranslation: await resolveQueryTranslation(query, fallbackContext, fallbackTranslation)
+          });
+          if (recovered.products.length > 0) {
+            vectorFallbackAttempted = true;
+            vectorFallbackMode = recovered.searchMode;
+            let fbUserProfile = null;
+            if (session_id) {
+              fbUserProfile = await getUserProfileForBoosting(db, session_id).catch(() => null);
+            }
+            vectorFallbackProducts = recovered.products.slice(0, searchLimit).map(product => {
+              const profileBoost = fbUserProfile ? calculateProfileBoost(product, fbUserProfile) : 0;
+              return {
+                ...formatFallbackProduct(product, query, recovered.searchMode),
+                stockStatus: product.stockStatus,
+                profileBoost
+              };
+            });
+            console.log(`[${requestId}] ⚡ ${recovered.searchMode} produced ${vectorFallbackProducts.length} products in ${Date.now() - fallbackStart}ms`);
+          } else if (expanded.hits.length > 0) {
             vectorFallbackAttempted = true;
             vectorFallbackMode = 'llm-catalog-expansion';
             console.log(`[${requestId}] 🔤 Catalog expansion "${query}" → [${expanded.terms.join(', ')}] → ${expanded.hits.length} products`);
@@ -13903,6 +14349,10 @@ app.post("/search", async (req, res) => {
               ],
               finalSoftCategories
             );
+            if (shouldIgnoreDepartmentFilters(query, fb, fallbackTranslation, filterCheck)) {
+              delete fbHardFilters.category;
+              fbSoftFilters.softCategory = [];
+            }
             let explicitSoftMatches = [];
 
             const vectorPipeline = buildStandardVectorSearchPipeline(queryEmbedding, fbHardFilters, FALLBACK_VECTOR_LIMIT, false);
@@ -14234,71 +14684,6 @@ app.post("/search", async (req, res) => {
   // which then filters out all products without "לבן" in softCategory field
   // TODO: Only extract filters if query contains filter keywords (price, "until", "for", etc.)
   let earlySoftFilters = null;
-
-  // Check if this is a SKU-like query (digits, or numbers + dashes) for SKU search
-  if (looksLikeSkuQuery(query)) {
-    console.log(`[${requestId}] SKU-like query detected: "${query}" - activating SKU search`);
-    
-    try {
-      const client = await connectToMongoDB(mongodbUri);
-      const db = client.db(dbName);
-      const collection = db.collection(collectionName);
-      
-      // Execute SKU search
-      const skuResults = await executeSKUSearch(collection, query.trim());
-      
-      // Format SKU results for response
-      const formattedSKUResults = skuResults
-        .filter(product => isProductVisible(product) && isProductInStock(product))
-        .map((product) => ({
-        _id: product._id.toString(),
-        id: product.id, // Keep for backward compatibility if needed, but _id is primary
-        name: product.name,
-        description: product.description,
-        price: product.price,
-        image: product.image,
-        url: product.url,
-        type: product.type,
-        specialSales: product.specialSales,
-        onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
-        ItemID: product.ItemID,
-        explanation: null,
-        softFilterMatch: false,
-        softCategoryMatches: 0,
-        simpleSearch: false,
-        skuSearch: true,
-        searchRank: product.searchRank
-      }));
-      
-      console.log(`[${requestId}] SKU search completed: ${formattedSKUResults.length} results found`);
-
-      // 🔁 Single perfect SKU match → signal an immediate redirect to the product page.
-      // The result still carries the full product payload, so a front-end that ignores
-      // these flags keeps rendering it normally; one that checks `redirect` can navigate
-      // straight to `redirectUrl` without any other change.
-      if (formattedSKUResults.length === 1 && formattedSKUResults[0].url) {
-        formattedSKUResults[0].redirect = true;
-        formattedSKUResults[0].redirectUrl = formattedSKUResults[0].url;
-        console.log(`[${requestId}] Single SKU match for "${query}" → redirect to ${formattedSKUResults[0].url}`);
-      }
-
-      if (formattedSKUResults.length > 0) {
-        // 📊 LOG SKU QUERY TO DATABASE (fire-and-forget)
-        logQuery(db.collection("queries"), query, {}, formattedSKUResults, false, { session_id }).catch(err =>
-          console.error(`[${requestId}] Failed to log SKU query:`, err.message)
-        );
-
-        return res.json(formattedSKUResults);
-      } else {
-        console.log(`[${requestId}] No SKU results found for "${query}", falling back to normal search.`);
-      }
-      
-    } catch (error) {
-      console.error(`[${requestId}] SKU search failed:`, error);
-      // If SKU search fails, log and fall back to normal search instead of returning 500
-      console.log(`[${requestId}] SKU search error for "${query}", falling back to normal search.`);
-    }
-  }
 
   try {
     const client = await connectToMongoDB(mongodbUri);
@@ -20071,32 +20456,180 @@ function buildSKUSearchPipeline(skuQuery, limit = 65) {
   return pipeline;
 }
 
+// Deterministic identifier lookup, tried before Atlas Search. A SKU is an exact
+// token, but the `default` index analyzes most paths with lucene.standard, which
+// splits "010-02980-03H" into 010 / 02980 / 03h and then ORs them — one pasted
+// SKU would score every product in the same numbering family. Mongo also covers
+// the identifier fields (`id`, `ItemID`, `barcode`) that stores commonly leave
+// out of their search index.
+async function findSkuIdentifierMatches(collection, skuQuery) {
+  const trimmed = String(skuQuery || '').trim();
+  if (!trimmed) return [];
+
+  const exact = new RegExp(`^${escapeRegExp(trimmed)}$`, 'i');
+  const clauses = [
+    { sku: exact },
+    { ItemID: exact },
+    { barcode: exact }
+  ];
+
+  const numeric = Number(trimmed);
+  if (/^\d+$/.test(trimmed) && Number.isSafeInteger(numeric)) {
+    // Merchant identifiers only. The internal `id` is deliberately excluded for
+    // bare numbers: "540" or "970" is a model name to a shopper, and matching it
+    // against a platform post id would hijack those searches with a random product.
+    clauses.push({ sku: numeric }, { ItemID: numeric }, { barcode: numeric });
+  } else {
+    clauses.push({ id: exact });
+    if (Number.isSafeInteger(numeric)) clauses.push({ id: numeric });
+  }
+
+  try {
+    const docs = await collection.find({ $or: clauses, ...HIDDEN_MONGO_FILTER })
+      .limit(65)
+      .maxTimeMS(500)
+      .toArray();
+    return docs;
+  } catch (error) {
+    console.warn(`[SKU] Identifier lookup failed for "${trimmed}":`, error.message);
+    return [];
+  }
+}
+
+// A shopper who pastes a partial SKU ("010-02980") wants the whole variant
+// family, not a semantic guess. Only prefixes that already look like a SKU stem
+// qualify, so short numbers can't sweep the catalog.
+async function findSkuPrefixMatches(collection, skuQuery) {
+  const trimmed = String(skuQuery || '').trim();
+  if (trimmed.length < 5 || !trimmed.includes('-')) return [];
+
+  try {
+    const docs = await collection.find({
+      sku: new RegExp(`^${escapeRegExp(trimmed)}`, 'i'),
+      ...HIDDEN_MONGO_FILTER
+    })
+      .limit(65)
+      .maxTimeMS(500)
+      .toArray();
+    return docs;
+  } catch (error) {
+    console.warn(`[SKU] Prefix lookup failed for "${trimmed}":`, error.message);
+    return [];
+  }
+}
+
 // Function to execute SKU search
 async function executeSKUSearch(collection, skuQuery) {
   console.log(`Executing SKU search for: ${skuQuery}`);
-  
-  try {
-    const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 65)).toArray();
-    const visibleSkuResults = skuResults.filter(isProductVisible);
-    
-    // Add SKU-specific scoring and metadata
-    const processedResults = visibleSkuResults.map((product, index) => ({
+
+  const decorate = (docs, matchType) => {
+    const visible = (docs || []).filter(isProductVisible);
+    // An exact SKU hit must still be shown when it's out of stock — the shopper
+    // asked for that specific product. Prefer in-stock, then fall back.
+    const inStock = visible.filter(isProductInStock);
+    const chosen = inStock.length > 0 ? inStock : visible;
+    return chosen.map((product, index) => ({
       ...product,
       rrf_score: 2000 - index, // High base scores for SKU matches, decreasing by rank
       softFilterMatch: false,
       softCategoryMatches: 0,
       skuSearch: true, // Mark as SKU search result
+      skuMatchType: matchType,
       searchRank: index + 1
     }));
-    
-    console.log(`SKU search found ${processedResults.length} results`);
-    return processedResults;
-    
+  };
+
+  try {
+    const identifierMatches = decorate(await findSkuIdentifierMatches(collection, skuQuery), 'identifier');
+    if (identifierMatches.length > 0) {
+      console.log(`SKU search found ${identifierMatches.length} exact identifier match(es)`);
+      return identifierMatches;
+    }
+
+    const prefixMatches = decorate(await findSkuPrefixMatches(collection, skuQuery), 'prefix');
+    if (prefixMatches.length > 0) {
+      console.log(`SKU search found ${prefixMatches.length} prefix match(es)`);
+      return prefixMatches;
+    }
+
+    // Atlas last, and only as an index-assisted identifier lookup: the pipeline's
+    // low-boost `name` clause would otherwise turn an unknown SKU into a pile of
+    // loosely-scored products instead of letting the normal search path run.
+    const skuResults = await collection.aggregate(buildSKUSearchPipeline(skuQuery, 65)).toArray();
+    const needle = String(skuQuery || '').trim().toLowerCase();
+    const identifierHits = skuResults.filter(product =>
+      [product.sku, product.ItemID, product.barcode, product.id]
+        .some(value => value != null && String(value).toLowerCase().includes(needle))
+    );
+    const atlasMatches = decorate(identifierHits, 'search');
+    console.log(`SKU search found ${atlasMatches.length} results`);
+    return atlasMatches;
+
   } catch (error) {
     console.error("Error in SKU search:", error);
     return [];
   }
 }
+// Shared SKU entry point for the search endpoints. Returns [] when the query is
+// not a SKU or matches nothing, so callers just fall through to normal search.
+async function resolveSkuQueryProducts(collection, query, requestId) {
+  if (!looksLikeSkuQuery(query)) return [];
+  console.log(`[${requestId}] SKU-like query detected: "${query}" - activating SKU search`);
+
+  let skuResults = [];
+  try {
+    skuResults = await executeSKUSearch(collection, String(query).trim());
+  } catch (error) {
+    // Never turn a SKU lookup failure into a failed search — fall through.
+    console.error(`[${requestId}] SKU search failed for "${query}":`, error.message);
+    return [];
+  }
+
+  const formatted = skuResults.map(product => ({
+    _id: product._id.toString(),
+    id: product.id, // Keep for backward compatibility if needed, but _id is primary
+    name: product.name,
+    description: product.description,
+    price: product.price,
+    image: product.image,
+    url: product.url,
+    type: product.type,
+    category: product.category,
+    softCategory: product.softCategory,
+    sku: product.sku,
+    specialSales: product.specialSales,
+    onSale: !!(product.specialSales && Array.isArray(product.specialSales) && product.specialSales.length > 0),
+    ItemID: product.ItemID,
+    stockStatus: product.stockStatus,
+    explanation: null,
+    softFilterMatch: false,
+    softCategoryMatches: 0,
+    simpleSearch: false,
+    skuSearch: true,
+    searchMode: 'sku-match',
+    skuMatchType: product.skuMatchType,
+    searchRank: product.searchRank
+  }));
+
+  console.log(`[${requestId}] SKU search completed: ${formatted.length} results found`);
+
+  // 🔁 Single perfect SKU match → signal an immediate redirect to the product page.
+  // The result still carries the full product payload, so a front-end that ignores
+  // these flags keeps rendering it normally; one that checks `redirect` can navigate
+  // straight to `redirectUrl` without any other change.
+  if (formatted.length === 1 && formatted[0].url) {
+    formatted[0].redirect = true;
+    formatted[0].redirectUrl = formatted[0].url;
+    console.log(`[${requestId}] Single SKU match for "${query}" → redirect to ${formatted[0].url}`);
+  }
+
+  if (formatted.length === 0) {
+    console.log(`[${requestId}] No SKU results found for "${query}", falling back to normal search.`);
+  }
+
+  return formatted;
+}
+
 const zeroSearchIndexedDbs = new Set();
 
 // ───────────────────────────────────────────────────────────────────────────
