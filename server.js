@@ -634,25 +634,18 @@ async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
   if (tokens.length === 0) return [];
   if (tokens.length === 1 && tokens[0].length < 4) return [];
 
-  const tokenClause = (token) => {
+  const tokenClause = (fields) => (token) => {
     const escaped = diacriticInsensitivePattern(token);
     const pattern = detectHebrew(token)
       ? new RegExp(escaped, 'iu')
       : new RegExp(`(^|[^\\p{L}\\p{N}])${escaped}([^\\p{L}\\p{N}]|$)`, 'iu');
-    return {
-      $or: [
-        { name: pattern },
-        { author: pattern },
-        { description1: pattern },
-        { description: pattern }
-      ]
-    };
+    return { $or: fields.map(field => ({ [field]: pattern })) };
   };
 
-  try {
+  const lookup = async (fields) => {
     const docs = await collection.find({
       $and: [
-        ...tokens.map(tokenClause),
+        ...tokens.map(tokenClause(fields)),
         HIDDEN_MONGO_FILTER
       ]
     })
@@ -661,6 +654,17 @@ async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
       .toArray();
 
     return preferInStockThenAnyVisible(docs, tokens, limit);
+  };
+
+  try {
+    // A word in the name is the product's identity ("Strong" the nail-drill brand);
+    // the same word in a description is usually a generic adjective ("strong
+    // pigmentation") that hundreds of unrelated products share. Descriptions only
+    // get to answer the query when nothing carries the word in its name.
+    const nameMatches = await lookup(['name', 'author']);
+    if (nameMatches.length > 0) return nameMatches;
+
+    return await lookup(['name', 'author', 'description1', 'description']);
   } catch (error) {
     if (!isAtlasSearchIndexUnavailable(error)) {
       console.warn(`[CATALOG FIELD] Direct lookup failed for "${query}":`, error.message);
