@@ -630,8 +630,15 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
 
 // English queries often live in description1 while the catalog name is Hebrew.
 async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
-  const tokens = getAuthorSearchTokens(query).filter(token => token.length >= 3);
+  // Hebrew product nouns are routinely two letters ("לק"), and dropping them by
+  // length turned "לק סגול" into a plain search for "סגול" — which answers with
+  // every purple drill bit and bed sheet in the catalog instead of purple polish.
+  // Short words still have to earn their place, so they survive only when they
+  // carry meaning rather than joining words like "של" or "עם".
+  const tokens = getAuthorSearchTokens(query)
+    .filter(token => token.length >= 3 || !CATALOG_STOPWORDS.has(token));
   if (tokens.length === 0) return [];
+  // A single short token on its own is too generic to be a product identity.
   if (tokens.length === 1 && tokens[0].length < 4) return [];
 
   const tokenClause = (fields) => (token) => {
@@ -11709,6 +11716,33 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
         }
       }
 
+      // 🎨 A colour in the query is a constraint, not a preference: someone asking for
+      // "לק סגול" wants purple polish, and every other shade is a wrong answer rather
+      // than a lower-ranked one. The $search clause above can only boost colours, and
+      // the soft-category supplements re-add the whole aisle regardless of shade, so
+      // the constraint has to be applied here, once, over the assembled set. Stores
+      // that don't tag colours would be left with an empty page, so a filter that
+      // matches nothing yields to the colour-boosted ordering instead.
+      if (results.length > 0 && filterCheck.matchedColors?.length > 0) {
+        const wantedColors = new Set(
+          getSimilarColors(filterCheck.matchedColors).map(color => String(color).toLowerCase().trim())
+        );
+        const colorMatches = results.filter(product => {
+          const productColors = Array.isArray(product.colors)
+            ? product.colors : (product.colors ? [product.colors] : []);
+          return productColors.some(color => wantedColors.has(String(color).toLowerCase().trim()));
+        });
+
+        if (colorMatches.length > 0) {
+          if (!silent && colorMatches.length !== results.length) {
+            console.log(`[SIMPLE-SEARCH] 🎨 Colour filter [${filterCheck.matchedColors.join(', ')}]: ${results.length} → ${colorMatches.length}`);
+          }
+          results = colorMatches;
+        } else if (!silent) {
+          console.log(`[SIMPLE-SEARCH] 🎨 Colour filter [${filterCheck.matchedColors.join(', ')}] matched no tagged product — keeping colour-boosted order`);
+        }
+      }
+
       // 🎯 Prioritise textual name matches. A soft-category match (e.g. "טריינר") returns
       // every product tagged with that category — the device model, its parts, services —
       // with roughly flat Atlas scoring. Re-rank so the product whose NAME is the query
@@ -13223,6 +13257,36 @@ function detectPerfectFilterMatch(query, hardCategories = [], softCategories = [
       matchedSoftCategories.push(resolvedSoftCategory);
       matchedWordIndices.add(i);
       softMatchedIndices.add(i);
+    }
+  }
+
+  // Shoppers type the head of an aisle, not its full label: "לק סגול" means the
+  // "לק ג'ל" aisle in purple. Bind such a word to the category it heads, but only
+  // when the mapping is unambiguous — a head shared by several categories ("שעון"
+  // over two dozen watch lines) names no single aisle, and guessing one would be
+  // worse than falling through. It also has to be the last word standing between
+  // this query and a clean filter match, with something else already resolved to a
+  // filter, so open-ended queries still reach the full search.
+  {
+    const stillUnmatched = queryWords
+      .map((_, idx) => idx)
+      .filter(idx => !matchedWordIndices.has(idx));
+
+    if (stillUnmatched.length === 1 &&
+        (matchedColors.length > 0 || matchedHardCategories.length > 0 || matchedSoftCategories.length > 0)) {
+      const idx = stillUnmatched[0];
+      const headedCategories = normalizedSoftCategories.filter(cat => {
+        const catWords = cat.split(/\s+/);
+        return catWords.length > 1 && isVariationMatch(queryWords[idx], catWords[0]);
+      });
+
+      if (headedCategories.length === 1) {
+        if (!matchedSoftCategories.includes(headedCategories[0])) {
+          matchedSoftCategories.push(headedCategories[0]);
+        }
+        matchedWordIndices.add(idx);
+        softMatchedIndices.add(idx);
+      }
     }
   }
 
