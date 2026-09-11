@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 import { AsyncLocalStorage } from 'async_hooks';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
 import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
+import { searchBeautics } from './tenants/beautics/search.mjs';
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -266,6 +267,12 @@ function isAtlasSearchIndexUnavailable(error) {
   const codeName = String(error?.codeName || error?.errorResponse?.codeName || '');
   return message.includes('cannot query search index') ||
     message.includes('while in state UNKNOWN') ||
+    // A store whose index omits a path the pipeline queries is, for this query,
+    // as good as having no index: Atlas refuses the whole aggregation. Treating
+    // it as unavailable routes the shopper to the direct-name fallback instead
+    // of a 500, and markFieldAsMissing above still records the gap to fix.
+    message.includes('needs to be indexed as') ||
+    message.includes('index field definition not present') ||
     message.includes('operation exceeded time limit') ||
     message.includes('localhost:28000') ||
     codeName === 'MaxTimeMSExpired' ||
@@ -13565,6 +13572,26 @@ app.post("/search", async (req, res) => {
   let { query, example, noWord, noHebrewWord, context, modern, phase, extractedCategories, useFastLLM, fastSearchMode, session_id } = req.body;
   session_id = normalizeSessionId(session_id, req.body?.sessionId);
   const { dbName, products: collectionName, categories, types, softCategories, syncMode, explain, limit: userLimit } = req.store;
+
+  // Tenant-specific v2 search. It is deliberately feature-flagged so the
+  // existing production pipeline remains the instant rollback path.
+  if (process.env.BEAUTICS_SEARCH_V2 === 'true' && dbName === 'woo-beautics-shop-co-il') {
+    try {
+      const db = await getMongoClient();
+      const catalog = await db.db(dbName).collection(collectionName || 'products')
+        .find({}, {projection: {_id: 0}, maxTimeMS: 15000}).limit(10000).toArray();
+      if (catalog.length >= 10000) throw new Error('Beautics catalog exceeds v2 safety limit');
+      const result = await searchBeautics({products: catalog, request: {query, cursor: req.body.cursor, limit: Math.min(Number(req.body.limit || 12), 50)}});
+      // The v2 response is opt-in via modern=true; preserve the legacy array
+      // contract for existing storefront scripts during the rollout.
+      if (req.body.modern === true || req.body.modern === 'true') return res.json(result);
+      return res.json(result.matches || []);
+    } catch (error) {
+      console.error('[BEAUTICS V2] Search failed; falling back to legacy:', error.message);
+      // Continue into the existing route below for a safe rollback on any
+      // catalog, provider, or validation failure.
+    }
+  }
   
   // Fast LLM mode for /fast-search - use lighter model
   const shouldUseFastLLM = useFastLLM === true;
