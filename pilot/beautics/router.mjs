@@ -23,8 +23,24 @@ DATA ${JSON.stringify({query,catalogVocabulary:vocabulary})}`}),new Promise((_,r
       if(r.route==='clarify'&&r.message)return {result:{status:'clarify',matches:[],message:r.message,metadata:{...metadata,mode:'llm-router',llmUsed:true}},metadata};
       if(r.route!=='lexical')return {metadata};
       const original=planQuery(query,client),numbers=query.match(/\d+(?:\.\d+)?/g)||[];
+      const originalTokens=normalize(query).split(/\s+/).filter(t=>t.length>=3);
       const found=new Map(),accepted=[];
-      for(const rewrite of [...new Set(r.rewrites)]){
+      const deterministicRewrites=[];
+      // Common Hebrew construct-state inflection used by the store catalog:
+      // shoppers type "השלמת ציפורן" while WooCommerce titles use "ג׳ל
+      // השלמה". Keep this as a narrow catalog-aware normalization, not a
+      // general synonym expansion.
+      if (/\bהשלמת\b/.test(normalize(query))) {
+        deterministicRewrites.push('השלמה');
+        deterministicRewrites.push(normalize(query).replace(/\bהשלמת\b/g,'השלמה'));
+      }
+      for(const rewrite of [...new Set([...r.rewrites,...deterministicRewrites])]){
+        // A lexical rewrite may transliterate a token, but it must not silently
+        // collapse a multi-word product request into a broad single word (for
+        // example "השלמת ציפורן" -> "ציפורן"). Preserve the original query
+        // for the deep semantic stage when the router drops a meaningful term.
+        const rewriteTokens=normalize(rewrite).split(/\s+/).filter(t=>t.length>=3);
+        if(originalTokens.length>1&&rewriteTokens.length<originalTokens.length&&!deterministicRewrites.includes(rewrite))continue;
         const rewrittenNumbers=rewrite.match(/\d+(?:\.\d+)?/g)||[];
         if(numbers.length!==rewrittenNumbers.length||!numbers.every((n,i)=>n===rewrittenNumbers[i]))continue;
         let page=search(products,client,{query:rewrite,limit:50});
