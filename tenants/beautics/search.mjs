@@ -9,7 +9,16 @@ export async function searchBeautics({products, request}) {
   const key = `${client.tenantId}:${products.length}`;
   let service = services.get(key);
   if (!service) {
-    const normalized = products.map(p => processProduct(p, client, [], new Date().toISOString()));
+    const normalized = products.map(raw => {
+      const product = processProduct(raw, client, [], new Date().toISOString());
+      // Search must expose the persisted merchant/source badges. The source
+      // observer is an enrichment concern; this adapter never drops badges
+      // already written by sync or the tenant processor.
+      const persisted = Array.isArray(raw.badges) ? raw.badges : [];
+      product.badges = persisted.length ? persisted : product.badges;
+      product.specialLabel = raw.specialLabel ?? false;
+      return product;
+    });
     service = createSearchService(normalized, client, generate, {maxCandidates:100});
     services.clear();
     services.set(key, service);
