@@ -14,6 +14,7 @@ import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from 
 import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
 import { searchBeautics } from './tenants/beautics/search.mjs';
 import { storefrontResponse } from './tenants/beautics/response.mjs';
+import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -9010,7 +9011,7 @@ app.get("/search/auto-load-more", async (req, res) => {
 });
 */
 
-app.get("/search/load-more", async (req, res) => {
+app.get("/search/load-more", createBeauticsLoadMore(request => searchBeautics({request})), async (req, res) => {
   const { token, limit = 20 } = req.query;
   const requestId = `load-more-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   
@@ -13583,6 +13584,7 @@ app.post("/search", async (req, res) => {
         ? {cursor:req.body.cursor,limit:Math.min(Number(req.body.limit || 12),50)}
         : {query,limit:Math.min(Number(req.body.limit || 12),50)};
       const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),request});
+      if (result.nextCursor) res.setHeader('X-Next-Token', `beautics-v2:${result.nextCursor}`);
       // The v2 response is opt-in via modern=true; preserve the legacy array
       // contract for existing storefront scripts during the rollout.
       return res.json(storefrontResponse(result, req.body.modern === true || req.body.modern === 'true'));

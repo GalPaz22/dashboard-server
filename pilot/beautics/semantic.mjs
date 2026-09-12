@@ -151,7 +151,7 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
         return routing.result;
       }
       const result=await semantic(query,literal);
-      result.metadata={...result.metadata,phase:'deep-llm',storeContext:{tenant:client.tenantId,platform:client.platform,domain:'beauty/nail-supply',schemaVersion:client.version}};
+      result.metadata={...result.metadata,phase:'deep-llm',storeContext:{tenant:client.tenantId,platform:client.platform,domain:client.domain||'retail',schemaVersion:client.version}};
       if(routing){const m=result.metadata;result.metadata={...m,...routing.metadata,mode:m.mode,llmCalls:m.llmCalls+1,usage:[...routing.metadata.usage,...m.usage],elapsedMs:m.elapsedMs+routing.metadata.routerMs};}
       return result;
     })().then(result=>{const id=save(key,result);if(result.status==='degraded')cache.delete(key);return id;}).finally(()=>{active--;pending.delete(key);});

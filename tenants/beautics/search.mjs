@@ -8,7 +8,10 @@ const loadCatalog=createCatalogLoader();
 let lastProducts, service;
 
 export async function searchBeautics({collection, request}) {
-  if(request.cursor && service)return service(request);
+  if(request.cursor) {
+    if(!service)throw Error('Search expired; start a new search');
+    return service(request);
+  }
   let products;
   try { products=await loadCatalog(collection); }
   catch(error) {

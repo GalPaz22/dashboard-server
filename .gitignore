@@ -31,3 +31,9 @@ test.js
 *.html
 index.html
 
+
+# Eval snapshots (regenerate with eval/search-eval.mjs)
+eval/snapshots/
+
+# Beautics pilot: local catalog and public-page snapshots (do not commit)
+outputs/beautics-pilot/
