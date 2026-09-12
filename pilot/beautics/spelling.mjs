@@ -1,4 +1,4 @@
-import {normalize,planQuery} from './core.mjs';
+import {normalize,planQuery,search} from './core.mjs';
 
 const tokens=text=>normalize(text).match(/[\p{L}\p{N}]+/gu)||[];
 export function distance(a,b){
@@ -22,6 +22,13 @@ export function createSpellingResolver(products,client){
     }
   }
   return query=>{
+    const corrected=normalize(query).split(' ').map(word=>client.queryAliases?.[word] || word).join(' ');
+    if(corrected!==normalize(query)){
+      let page=search(products,client,{query:corrected,limit:50});
+      const matches=[...page.matches];
+      while(page.nextCursor){page=search(products,client,{cursor:page.nextCursor,limit:50});matches.push(...page.matches);}
+      if(matches.length)return {status:'matched',matches,metadata:{mode:'spelling',llmUsed:false,llmCalls:0,correction:{from:query,to:corrected,source:'tenant-alias'}}};
+    }
     const plan=planQuery(query,client),words=tokens(plan.terms.join(' '));
     if(!words.length||words.length>3)return null;
     const compact=words.join('');if(compact.length<6||compact.length>24||/\d/.test(compact))return null;

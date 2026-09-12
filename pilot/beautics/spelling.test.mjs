@@ -28,3 +28,8 @@ test('HTTP service path uses correction without model calls and retains paginati
  const first=await run({query:'אולטרה סוני',limit:1});const next=await run({cursor:first.nextCursor,limit:1});
  assert.equal(first.metadata.mode,'spelling');assert.equal(first.total,3);assert.notEqual(first.matches[0].id,next.matches[0].id);assert.equal(calls,0);
 });
+test('Beautics short alias finds base products, preserves budget and paginates without LLM',async()=>{
+ const run=createSearchService([make('a','בייס שקוף',{price:30}),make('b','בייס ורוד',{price:40}),make('c','בייס יקר',{price:100}),make('d','בייס חסר',{stockStatus:'outofstock'})],client,async()=>{throw Error('unexpected LLM');});
+ const r=await run({query:'ביס עד 50',limit:1});assert.equal(r.total,2);assert.equal(r.metadata.correction.to,'בייס עד 50');assert.equal(r.metadata.llmCalls,0);
+ const next=await run({cursor:r.nextCursor,limit:1});assert.notEqual(next.matches[0].id,r.matches[0].id);
+});

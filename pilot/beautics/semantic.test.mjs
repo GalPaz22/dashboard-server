@@ -51,7 +51,20 @@ test('duplicate requests share work and foreign/expired cursors are rejected',as
  const [a,b]=await Promise.all([run({query:'לאסוף אבק',limit:1}),run({query:'לאסוף אבק',limit:1})]);assert.equal(m.calls.length,2);assert.equal(b.total,2);
  await assert.rejects(run({cursor:a.nextCursor,query:'changed'}));await assert.rejects(run({cursor:'fake'}));now=101;await assert.rejects(run({cursor:a.nextCursor}));
 });
-test('ambiguous request can clarify without a candidate call',async()=>{
+test('ambiguous request returns marked alternatives without a candidate call',async()=>{
  const m=mock({...interpretation,requirements:[],clarification:'איזה סוג מוצר מחפשים?'});const result=await createSearchService([make('1')],client,m.generate)({query:'משהו טוב'});
- assert.equal(result.status,'clarify');assert.equal(m.calls.length,1);
+ assert.equal(result.status,'matched');assert.equal(result.matches.length,1);assert.equal(result.metadata.exactMatch,false);assert.equal(result.matches[0].matchQuality,'alternative');assert.equal(m.calls.length,1);
+});
+
+test('final boundary supplies alternatives on cache hits, preserves visibility and limit',async()=>{
+ const m=mock({...interpretation,requirements:[],clarification:'איזה מוצר?'});
+ const hidden={...make('hidden'),hidden:true};
+ const foreign={...make('foreign'),tenantId:'other'};
+ const out={...make('out'),stockStatus:'outofstock'};
+ const run=createSearchService([make('1'),make('2'),hidden,foreign,out],client,m.generate);
+ for(let i=0;i<2;i++){
+   const result=await run({query:'משהו טוב',limit:1});
+   assert.equal(result.matches.length,1);assert.equal(result.total,2);
+   assert.equal(result.metadata.exactMatch,false);assert.ok(['1','2'].includes(result.matches[0].id));
+ }
 });

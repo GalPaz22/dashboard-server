@@ -13587,9 +13587,8 @@ app.post("/search", async (req, res) => {
       // contract for existing storefront scripts during the rollout.
       return res.json(storefrontResponse(result, req.body.modern === true || req.body.modern === 'true'));
     } catch (error) {
-      console.error('[BEAUTICS V2] Search failed; falling back to legacy:', error.message);
-      // Continue into the existing route below for a safe rollback on any
-      // catalog, provider, or validation failure.
+      console.error('[BEAUTICS V2] Search failed:', error.message);
+      return res.status(503).json({error:'Search temporarily unavailable',retryable:true,metadata:{searchEngine:'beautics-v2'}});
     }
   }
   
