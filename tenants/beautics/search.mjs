@@ -9,7 +9,13 @@ let lastProducts, service;
 
 export async function searchBeautics({collection, request}) {
   if(request.cursor && service)return service(request);
-  const products=await loadCatalog(collection);
+  let products;
+  try { products=await loadCatalog(collection); }
+  catch(error) {
+    if(!service)throw error;
+    const result=await service(request);
+    return {...result,metadata:{...result.metadata,catalogStale:true}};
+  }
   if (lastProducts !== products) {
     const normalized = products.map(raw => {
       const product = processProduct(raw, client, [], new Date().toISOString());

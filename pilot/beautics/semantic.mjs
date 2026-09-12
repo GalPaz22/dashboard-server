@@ -126,7 +126,7 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
       return neverEmptyFallback(query,null,'llm-failure',meta({failure:controller.signal.aborted?'timeout':'provider-or-validation'}));
     }finally{clearTimeout(timer);}
   }
-  return async function run(request={}){
+  const run=async function(request={}){
     if(!request||typeof request!=='object'||Array.isArray(request)||Object.keys(request).some(k=>!['query','cursor','limit'].includes(k)))throw Error('Invalid request');
     const {query,cursor,limit=12}=request;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');sweep();
     if(cursor){if(query!==undefined||typeof cursor!=='string'||!cursors.has(cursor))throw Error('Invalid cursor');const c=cursors.get(cursor);return page(c.id,c.offset,limit,true);}
@@ -157,4 +157,14 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     })().then(result=>{const id=save(key,result);if(result.status==='degraded')cache.delete(key);return id;}).finally(()=>{active--;pending.delete(key);});
     pending.set(key,work);return page(await work,0,limit);
   };
+  // Final boundary shared by preview and production. Invalid requests/cursors
+  // still throw; an exhausted page must never restart with unrelated products.
+  return async function searchWithAlternatives(request={}) {
+    const result=await run(request);
+    if(request.cursor || result.matches?.length)return result;
+    const fallback=neverEmptyFallback(request.query || '',planQuery(request.query || '',client),'empty-result',result.metadata);
+    const limit=request.limit ?? 12;
+    return page(save((request.query || '').trim(),fallback),0,limit,result.metadata?.cached === true);
+  };
+
 }
