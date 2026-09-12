@@ -13,6 +13,7 @@ import { AsyncLocalStorage } from 'async_hooks';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
 import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
 import { searchBeautics } from './tenants/beautics/search.mjs';
+import { storefrontResponse } from './tenants/beautics/response.mjs';
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -13584,8 +13585,7 @@ app.post("/search", async (req, res) => {
       const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),request});
       // The v2 response is opt-in via modern=true; preserve the legacy array
       // contract for existing storefront scripts during the rollout.
-      if (req.body.modern === true || req.body.modern === 'true') return res.json(result);
-      return res.json(result.matches || []);
+      return res.json(storefrontResponse(result, req.body.modern === true || req.body.modern === 'true'));
     } catch (error) {
       console.error('[BEAUTICS V2] Search failed; falling back to legacy:', error.message);
       // Continue into the existing route below for a safe rollback on any
