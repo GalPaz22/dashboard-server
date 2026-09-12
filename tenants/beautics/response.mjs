@@ -4,6 +4,6 @@ export function storefrontResponse(result, modern) {
   if(!modern)return products;
   return {...result,matches:products,products,metadata:{...result.metadata,searchEngine:'beautics-v2'},
     pagination:{totalAvailable:result.total,returned:products.length,batchNumber:1,
-      hasMore:!!result.nextCursor,nextToken:null,nextCursor:result.nextCursor,
+      hasMore:!!result.nextCursor,nextToken:result.nextCursor ? `beautics-v2:${result.nextCursor}` : null,nextCursor:result.nextCursor,
       secondBatchToken:null,categoryFilterToken:null,hasCategoryFiltering:false}};
 }
