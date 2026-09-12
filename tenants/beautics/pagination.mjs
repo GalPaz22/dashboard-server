@@ -15,7 +15,7 @@ export function createBeauticsLoadMore(search) {
     const cursor = token.slice('beautics-v2:'.length);
     if (!cursor) return res.status(400).json({error:'Invalid pagination token'});
     try {
-      const result = await search({cursor, limit:pageSize});
+      const result = await search({cursor, limit:pageSize}, req.store);
       return res.json(storefrontResponse(result, true));
     } catch (error) {
       if (error.message === 'Invalid cursor' || error.message === 'Search expired; start a new search') {

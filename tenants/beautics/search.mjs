@@ -4,20 +4,37 @@ import { createSearchService } from '../../pilot/beautics/semantic.mjs';
 import { generate } from '../../pilot/beautics/gemini.mjs';
 
 import { createCatalogLoader } from './catalog.mjs';
+import { createSearchSessions } from './sessions.mjs';
 const loadCatalog=createCatalogLoader();
 let lastProducts, service;
 
-export async function searchBeautics({collection, request}) {
+export async function searchBeautics({collection, sessions, request}) {
+  const limit = request.limit ?? 12;
+  if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw Error('Invalid limit');
+  if (request.cursor && sessions) {
+    if (request.query !== undefined) throw Error('Invalid request');
+    return createSearchSessions(sessions).read(request.cursor, limit);
+  }
+  const result = await searchLocal({collection,request});
+  // Use the service that produced this result even if another request has
+  // refreshed the catalog and replaced the current service in the meantime.
+  if (!sessions) return result.result;
+  return createSearchSessions(sessions).save(result.result,result.search,limit);
+}
+
+async function searchLocal({collection, request}) {
   if(request.cursor) {
     if(!service)throw Error('Search expired; start a new search');
-    return service(request);
+    const search = service;
+    return {result:await search(request),search};
   }
   let products;
   try { products=await loadCatalog(collection); }
   catch(error) {
     if(!service)throw error;
-    const result=await service(request);
-    return {...result,metadata:{...result.metadata,catalogStale:true}};
+    const search = service;
+    const result=await search(request);
+    return {result:{...result,metadata:{...result.metadata,catalogStale:true}},search};
   }
   if (lastProducts !== products) {
     const normalized = products.map(raw => {
@@ -33,7 +50,8 @@ export async function searchBeautics({collection, request}) {
     service = createSearchService(normalized, client, generate, {maxCandidates:100,maxEntries:30});
     lastProducts=products;
   }
-  return service(request);
+  const search = service;
+  return {result:await search(request),search};
 }
 
 export {client as beauticsProfile};

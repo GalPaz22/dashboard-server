@@ -9011,7 +9011,10 @@ app.get("/search/auto-load-more", async (req, res) => {
 });
 */
 
-app.get("/search/load-more", createBeauticsLoadMore(request => searchBeautics({request})), async (req, res) => {
+app.get("/search/load-more", createBeauticsLoadMore(async (request, store) => {
+  const db = (await getMongoClient()).db(store.dbName);
+  return searchBeautics({sessions:db.collection('beautics_search_sessions'),request});
+}), async (req, res) => {
   const { token, limit = 20 } = req.query;
   const requestId = `load-more-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
   
@@ -13583,7 +13586,7 @@ app.post("/search", async (req, res) => {
       const request = req.body.cursor
         ? {cursor:req.body.cursor,limit:Math.min(Number(req.body.limit || 12),50)}
         : {query,limit:Math.min(Number(req.body.limit || 12),50)};
-      const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),request});
+      const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),sessions:db.db(dbName).collection('beautics_search_sessions'),request});
       if (result.nextCursor) res.setHeader('X-Next-Token', `beautics-v2:${result.nextCursor}`);
       // The v2 response is opt-in via modern=true; preserve the legacy array
       // contract for existing storefront scripts during the rollout.
