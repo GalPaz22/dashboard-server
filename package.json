@@ -6,9 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "start": "node server.js",
-    "demo": "node serve-demo.mjs",
-    "studio": "node studio/server.mjs",
-    "test:studio": "node --test studio/*.test.mjs"
+    "demo": "node serve-demo.mjs"
   },
   "keywords": [],
   "author": "",
