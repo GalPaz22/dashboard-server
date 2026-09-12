@@ -13578,10 +13578,10 @@ app.post("/search", async (req, res) => {
   if (process.env.BEAUTICS_SEARCH_V2 === 'true' && dbName === 'woo-beautics-shop-co-il') {
     try {
       const db = await getMongoClient();
-      const catalog = await db.db(dbName).collection(collectionName || 'products')
-        .find({}, {projection: {_id: 0}, maxTimeMS: 15000}).limit(10000).toArray();
-      if (catalog.length >= 10000) throw new Error('Beautics catalog exceeds v2 safety limit');
-      const result = await searchBeautics({products: catalog, request: {query, cursor: req.body.cursor, limit: Math.min(Number(req.body.limit || 12), 50)}});
+      const request = req.body.cursor
+        ? {cursor:req.body.cursor,limit:Math.min(Number(req.body.limit || 12),50)}
+        : {query,limit:Math.min(Number(req.body.limit || 12),50)};
+      const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),request});
       // The v2 response is opt-in via modern=true; preserve the legacy array
       // contract for existing storefront scripts during the rollout.
       if (req.body.modern === true || req.body.modern === 'true') return res.json(result);
