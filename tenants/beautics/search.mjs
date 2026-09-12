@@ -3,12 +3,14 @@ import { processProduct } from '../../pilot/beautics/core.mjs';
 import { createSearchService } from '../../pilot/beautics/semantic.mjs';
 import { generate } from '../../pilot/beautics/gemini.mjs';
 
-const services = new Map();
+import { createCatalogLoader } from './catalog.mjs';
+const loadCatalog=createCatalogLoader();
+let lastProducts, service;
 
-export async function searchBeautics({products, request}) {
-  const key = `${client.tenantId}:${products.length}`;
-  let service = services.get(key);
-  if (!service) {
+export async function searchBeautics({collection, request}) {
+  if(request.cursor && service)return service(request);
+  const products=await loadCatalog(collection);
+  if (lastProducts !== products) {
     const normalized = products.map(raw => {
       const product = processProduct(raw, client, [], new Date().toISOString());
       // Search must expose the persisted merchant/source badges. The source
@@ -19,9 +21,8 @@ export async function searchBeautics({products, request}) {
       product.specialLabel = raw.specialLabel ?? false;
       return product;
     });
-    service = createSearchService(normalized, client, generate, {maxCandidates:100});
-    services.clear();
-    services.set(key, service);
+    service = createSearchService(normalized, client, generate, {maxCandidates:100,maxEntries:30});
+    lastProducts=products;
   }
   return service(request);
 }
