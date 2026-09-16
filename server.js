@@ -15,6 +15,8 @@ import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
 import { searchBeautics } from './tenants/beautics/search.mjs';
 import { storefrontResponse } from './tenants/beautics/response.mjs';
 import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
+import {createGarminRoutes} from './tenants/garmin/routes.mjs';
+const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).db('garmin')});
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -3366,7 +3368,11 @@ const conciergeDeps = {
   getQueryEmbedding: (text) => getQueryEmbedding(text),
   getRedis: () => (redisClient && redisReady ? redisClient : null),
 };
-app.use(conciergeSearchTrigger(conciergeDeps));
+const defaultConciergeTrigger=conciergeSearchTrigger(conciergeDeps);
+app.use((req,res,next)=>{
+  if(process.env.GARMIN_SEARCH_V2==='true'&&req.store?.dbName==='garmin'&&req.method==='POST'&&req.path==='/search')return next();
+  return defaultConciergeTrigger(req,res,next);
+});
 mountConcierge(app, conciergeDeps);
 
 async function connectToMongoDB(mongodbUri) {
@@ -9011,7 +9017,7 @@ app.get("/search/auto-load-more", async (req, res) => {
 });
 */
 
-app.get("/search/load-more", createBeauticsLoadMore(async (request, store) => {
+app.get("/search/load-more", garminRoutes.loadMore, createBeauticsLoadMore(async (request, store) => {
   const db = (await getMongoClient()).db(store.dbName);
   return searchBeautics({sessions:db.collection('beautics_search_sessions'),request});
 }), async (req, res) => {
@@ -13569,7 +13575,7 @@ app.post("/simple-search", async (req, res) => {
   }
 });
 
-app.post("/search", async (req, res) => {
+app.post("/search", garminRoutes.search, async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
   console.log(`[${requestId}] SEARCH "${req.body.query}" | db:${req.store?.dbName}`);
