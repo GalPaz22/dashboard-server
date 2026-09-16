@@ -4,9 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { autocomplete } from './core.mjs';
 import { createSearchService } from './semantic.mjs';
 import { generate } from './gemini.mjs';
+import { createTopSearch } from '../../tenants/beautics/top-search.mjs';
 const client = JSON.parse(await readFile(new URL('./client.json',import.meta.url)));
 const products = JSON.parse(await readFile(new URL('../../outputs/beautics-pilot/products.json',import.meta.url)));
-const runSearch=createSearchService(products,client,generate);
+const runSearch=createSearchService(products,client,generate,{catalogSearch:createTopSearch(products,client)});
 const assets = new Map(await Promise.all([['/','preview.htm','text/html'],['/preview.css','preview.css','text/css'],['/preview.mjs','preview.mjs','text/javascript']].map(async([path,file,type])=>[path,{body:await readFile(new URL(file,import.meta.url)),type}])));
 const server=createServer(async(req,res)=>{
   res.setHeader('Content-Type','application/json; charset=utf-8');

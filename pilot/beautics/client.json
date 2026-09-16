@@ -90,6 +90,17 @@
     ],
     "semantic": "deferred-until-labeled-evaluation"
   },
+  "topSearch": {
+    "queryAliases": ["טופ קוט", "טופקוט", "top coat", "טופים", "טופ", "tops", "top"],
+    "titleTerms": ["טופ", "טופים", "טופקוט", "top", "topcoat"],
+    "categories": ["טופים", "טופים מנצנצים"],
+    "brandPhrases": ["טופ נייל", "טופ ניייל", "טופ ספא", "top nail", "top spa"],
+    "conflictingTitleTerms": ["בייס", "בייסים", "base", "פריימר", "primer", "נייל פרש", "nail fresh", "מקשר"],
+    "spreading": {
+      "queryAliases": ["מתפשט", "מתפשטים", "splash", "blooming"],
+      "titlePhrases": ["ג'ל מתפשט", "טופ מתפשט", "splash gel", "blooming gel"]
+    }
+  },
   "queryAliases": {
     "ביס": "בייס"
   }
