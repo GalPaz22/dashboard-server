@@ -18,7 +18,7 @@ export const selectionSchema = objectSchema({matches:{type:'array',maxItems:20,i
   id:str, evidence:{type:'array',items:objectSchema({requirement:{type:'integer'},field:{type:'string',enum:['title','categories','colors','finishes']},quote:str})},
 })}});
 
-export function createSearchService(products, client, generate, {ttlMs=600000,maxEntries=100,maxCandidates=100,timeoutMs=30000,now=Date.now,lightweightRouter=true,routerTimeoutMs=10000}={}) {
+export function createSearchService(products, client, generate, {ttlMs=600000,maxEntries=100,maxCandidates=100,timeoutMs=30000,now=Date.now,lightweightRouter=true,routerTimeoutMs=10000,catalogSearch}={}) {
   const visible=products.filter(p=>p.tenantId===client.tenantId&&!p.hidden&&p.stockStatus==='instock');
   const categories=[...new Set(visible.flatMap(p=>p.categories))].sort();
   const byId=new Map(visible.map(p=>[p.id,p]));
@@ -133,6 +133,8 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     if(typeof query!=='string'||query.length>300)throw Error('Invalid query');
     const key=query.trim();if(cache.has(key))return page(cache.get(key),0,limit,true);
     if(pending.has(key))return page(await pending.get(key),0,limit,true);
+    const catalogResult = catalogSearch?.(query);
+    if(catalogResult)return page(save(key,catalogResult),0,limit);
     const literal=search(products,client,{query,limit:50});
     if(literal.matches.length||!normalize(query)){
       const all=[...literal.matches];let token=literal.nextCursor;
@@ -161,7 +163,7 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
   // still throw; an exhausted page must never restart with unrelated products.
   return async function searchWithAlternatives(request={}) {
     const result=await run(request);
-    if(request.cursor || result.matches?.length)return result;
+    if(request.cursor || result.matches?.length || result.metadata?.authoritative)return result;
     const fallback=neverEmptyFallback(request.query || '',planQuery(request.query || '',client),'empty-result',result.metadata);
     const limit=request.limit ?? 12;
     return page(save((request.query || '').trim(),fallback),0,limit,result.metadata?.cached === true);

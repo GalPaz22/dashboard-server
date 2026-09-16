@@ -5,6 +5,7 @@ import { generate } from '../../pilot/beautics/gemini.mjs';
 
 import { createCatalogLoader } from './catalog.mjs';
 import { createSearchSessions } from './sessions.mjs';
+import { createTopSearch } from './top-search.mjs';
 const loadCatalog=createCatalogLoader();
 let lastProducts, service;
 
@@ -47,7 +48,7 @@ async function searchLocal({collection, request}) {
       product.specialLabel = raw.specialLabel ?? false;
       return product;
     });
-    service = createSearchService(normalized, client, generate, {maxCandidates:100,maxEntries:30});
+    service = createSearchService(normalized, client, generate, {maxCandidates:100,maxEntries:30,catalogSearch:createTopSearch(normalized,client)});
     lastProducts=products;
   }
   const search = service;
