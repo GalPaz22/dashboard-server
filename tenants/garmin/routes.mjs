@@ -9,7 +9,7 @@ export function createGarminRoutes({getDb,search=searchGarmin,enabled=()=>proces
   const limit=Number(request.limit??12);
   if(!Number.isInteger(limit)||limit<1||limit>50)return res.status(400).json({error:'Invalid limit'});
   if(request.cursor?typeof request.cursor!=='string'||!request.cursor:typeof request.query!=='string'||!request.query.trim()||request.query.length>300)return res.status(400).json({error:'Invalid request'});
-  try{const db=await getDb();const result=await search({collection:db.collection(req.store.products||'products'),sessions:db.collection('garmin_search_sessions'),request:{...request,limit}});if(result.nextCursor)res.setHeader('X-Next-Token','garmin-v2:'+result.nextCursor);return res.json(storefrontResponse(result,modern));}
+  try{const db=await getDb();const result=await search({collection:db.collection(req.store.products||'products'),sessions:db.collection('garmin_search_sessions'),request:{...request,limit}});res.setHeader('X-Search-Engine','garmin-v2');if(result.nextCursor)res.setHeader('X-Next-Token','garmin-v2:'+result.nextCursor);return res.json(storefrontResponse(result,modern));}
   catch(error){if(error.message==='Search expired; start a new search'||error.message==='Invalid cursor')return res.status(410).json({error:'Search expired; start a new search'});console.error('[GARMIN V2]',error.message);return res.status(503).json({error:'Search temporarily unavailable',retryable:true,metadata:{searchEngine:'garmin-v2'}});}
  }
  return {

@@ -32,6 +32,7 @@
 
 import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
+import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
    Config
@@ -223,6 +224,7 @@ const PRODUCT_PROJECTION = {
   id: 1, name: 1, description: 1, price: 1, image: 1, url: 1,
   type: 1, category: 1, softCategory: 1, colors: 1, stockStatus: 1,
   stock_status: 1, specialSales: 1, ItemID: 1,
+  categories: 1, tags: 1, status: 1, hidden: 1,
 };
 
 function shapeProduct(product) {
@@ -231,8 +233,8 @@ function shapeProduct(product) {
     name: product.name || null,
     price: typeof product.price === "number" ? product.price : null,
     in_stock: productInStock(product),
-    categories: asArray(product.category),
-    tags: asArray(product.softCategory),
+    categories: [...new Set([...asArray(product.category), ...asArray(product.categories)])],
+    tags: [...new Set([...asArray(product.softCategory), ...asArray(product.tags)])],
     colors: asArray(product.colors),
     type: product.type || null,
     on_sale: Array.isArray(product.specialSales) && product.specialSales.length > 0,
@@ -264,6 +266,7 @@ async function getCollection(ctx) {
 async function textCandidates(ctx, query, { inStock }) {
   if (!query || !query.trim()) return [];
   const collection = await getCollection(ctx);
+  const taxonomyPaths = isBeautics(ctx.store) ? ['categories','tags'] : ['category','softCategory'];
 
   const filter = [{ compound: { mustNot: [{ equals: { path: "hidden", value: true } }] } }];
   if (inStock) {
@@ -291,12 +294,12 @@ async function textCandidates(ctx, query, { inStock }) {
           should: [
             { text: { query, path: "name", score: { boost: { value: 5 } } } },
             { text: { query, path: "name", fuzzy: { maxEdits: 1 }, score: { boost: { value: 3 } } } },
-            { text: { query, path: "category", score: { boost: { value: 2 } } } },
-            { text: { query, path: "softCategory", score: { boost: { value: 2 } } } },
+            { text: { query, path: taxonomyPaths[0], score: { boost: { value: 2 } } } },
+            { text: { query, path: taxonomyPaths[1], score: { boost: { value: 2 } } } },
             // Hebrew catalogs often spell the same word several ways.
             // A fuzzy pass over the taxonomy fields catches the variant the
             // shopper typed against the spelling the merchant catalogued.
-            { text: { query, path: ["category", "softCategory"], fuzzy: { maxEdits: 1 }, score: { boost: { value: 2 } } } },
+            { text: { query, path: taxonomyPaths, fuzzy: { maxEdits: 1 }, score: { boost: { value: 2 } } } },
             { text: { query, path: "description" } },
           ],
           filter,
@@ -362,20 +365,20 @@ function passesPostFilters(product, args) {
 
   const wantCategories = asArray(args.categories).map((c) => c.toLowerCase());
   if (wantCategories.length) {
-    const have = asArray(product.category).map((c) => String(c).toLowerCase());
+    const have = [...asArray(product.category), ...asArray(product.categories)].map((c) => String(c).toLowerCase());
     if (!have.some((c) => wantCategories.some((w) => c.includes(w) || w.includes(c)))) return false;
   }
 
   const wantTags = asArray(args.tags).map((t) => t.toLowerCase());
   if (wantTags.length) {
-    const have = asArray(product.softCategory).map((t) => String(t).toLowerCase());
+    const have = [...asArray(product.softCategory), ...asArray(product.tags)].map((t) => String(t).toLowerCase());
     if (!have.some((t) => wantTags.some((w) => t.includes(w) || w.includes(t)))) return false;
   }
 
   return true;
 }
 
-async function searchCatalog(args, ctx) {
+export async function searchCatalog(args, ctx) {
   const inStock = args.in_stock !== false;
   const limit = Math.min(Math.max(Number(args.limit) || 12, 1), 25);
   const query = typeof args.query === "string" ? args.query.trim() : "";
@@ -411,6 +414,11 @@ async function searchCatalog(args, ctx) {
     // Filter-only browsing: no free text, so go straight to Mongo.
     const collection = await getCollection(ctx);
     const match = { hidden: { $ne: true } };
+    if (isBeautics(ctx.store)) {
+      match.status = {$in:['ACTIVE','publish']};
+      if (asArray(args.categories).length) match.categories = {$in:asArray(args.categories)};
+      if (asArray(args.tags).length) match.tags = {$in:asArray(args.tags)};
+    }
     // Missing stockStatus means sellable here, same as isProductInStock() in
     // server.js — a strict equality match would empty the catalog on stores
     // whose sync doesn't write the field.
@@ -428,6 +436,7 @@ async function searchCatalog(args, ctx) {
   }
 
   let results = pool.filter((p) => p && passesPostFilters(p, args));
+  if (isBeautics(ctx.store)) results = results.filter(p=>p.hidden!==true && ['ACTIVE','publish'].includes(p.status));
   if (inStock) results = results.filter(productInStock);
 
   if (args.sort === "price_asc") results.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
@@ -469,7 +478,8 @@ async function getProduct(args, ctx) {
   }
   if (!or.length) return { error: "יש לספק product_id או name." };
 
-  const product = await collection.findOne({ $or: or, hidden: { $ne: true } }, { projection: PRODUCT_PROJECTION });
+  const product = await collection.findOne({ $or: or, hidden: { $ne: true },
+    ...(isBeautics(ctx.store) ? {status:{$in:['ACTIVE','publish']}} : {}) }, { projection: PRODUCT_PROJECTION });
   if (!product) return { found: false, message: "לא נמצא מוצר תואם בקטלוג." };
 
   return {
@@ -480,7 +490,7 @@ async function getProduct(args, ctx) {
 
 const facetCache = new Map(); // dbName.collection -> { at, value }
 
-async function catalogFacets(args, ctx) {
+export async function catalogFacets(args, ctx) {
   const inStock = args.in_stock_only !== false;
   const key = `${ctx.store.dbName}.${ctx.store.products}.${inStock}`;
   const cached = facetCache.get(key);
@@ -488,17 +498,20 @@ async function catalogFacets(args, ctx) {
 
   const collection = await getCollection(ctx);
   const match = { hidden: { $ne: true } };
+  if (isBeautics(ctx.store)) match.status = {$in:['ACTIVE','publish']};
+  const categoryField = isBeautics(ctx.store) ? '$categories' : '$category';
+  const tagField = isBeautics(ctx.store) ? '$tags' : '$softCategory';
   if (inStock) match.stockStatus = "instock";
 
   const [categories, tags, priceStats] = await Promise.all([
     collection.aggregate([
-      { $match: match }, { $unwind: "$category" },
-      { $group: { _id: "$category", count: { $sum: 1 } } },
+      { $match: match }, { $unwind: categoryField },
+      { $group: { _id: categoryField, count: { $sum: 1 } } },
       { $sort: { count: -1 } }, { $limit: 60 },
     ]).toArray(),
     collection.aggregate([
-      { $match: match }, { $unwind: "$softCategory" },
-      { $group: { _id: "$softCategory", count: { $sum: 1 } } },
+      { $match: match }, { $unwind: tagField },
+      { $group: { _id: tagField, count: { $sum: 1 } } },
       { $sort: { count: -1 } }, { $limit: 80 },
     ]).toArray(),
     collection.aggregate([
@@ -721,7 +734,11 @@ function extractProducts(result) {
    System prompt — Hebrew only
 \* --------------------------------------------------------------------------- */
 
-function buildSystemPrompt(store) {
+export function buildSystemPrompt(store) {
+  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store);
+}
+
+function buildBaseSystemPrompt(store) {
   // Always expose merchant `context` so the model knows this store's domain,
   // even when the merchant also supplies concierge-specific guidance.
   const shopContext = typeof store.context === "string" ? store.context.trim() : "";
@@ -1061,12 +1078,16 @@ export async function decideTrigger({ payload, query, store, ctx }) {
 
   const products = productsFromPayload(payload);
   if (products === null) return null;
+  const tenantDecision = beauticsTriggerDecision(payload, store);
+  if (tenantDecision === 'resolved') return null;
 
   const isComplex = !Array.isArray(payload) && payload?.metadata?.isComplex === true;
   const hasLiteral = hasLiteralResult(payload, products, query);
 
   let reason = null;
-  if (products.length === 0) {
+  if (tenantDecision === 'consultative') {
+    reason = 'non_literal';
+  } else if (products.length === 0) {
     reason = "no_results";
   } else if (products.every((p) => p && !productInStock(p))) {
     reason = "out_of_stock";

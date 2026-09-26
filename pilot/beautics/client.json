@@ -91,6 +91,7 @@
     "semantic": "deferred-until-labeled-evaluation"
   },
   "topSearch": {
+    "consultativePhrases": ["איזה", "איזו", "מה עדיף", "מה ההבדל", "מה ההבדלים", "מתאים", "מתאימה", "מומלץ", "מומלצת", "ממליצים", "איך", "המלצה", "לעומת", "כדאי", "למתחילה", "למתחיל"],
     "queryAliases": ["טופ קוט", "טופקוט", "top coat", "טופים", "טופ", "tops", "top"],
     "titleTerms": ["טופ", "טופים", "טופקוט", "top", "topcoat"],
     "categories": ["טופים", "טופים מנצנצים"],
