@@ -5,14 +5,14 @@
   "tenantId": "eeaf130e-06b6-4600-93de-d288ecf6848d",
   "name": "garmin",
   "url": "https://garmin.matat.io",
-  "platform": "custom",
+  "platform": "woocommerce",
   "dbName": "garmin",
   "collection": "products",
   "tokenPrefix": "garmin-semantix-v3:",
   "revision": 11,
   "profileHash": "e19c667effc15318dca3f6488ed29c48149a03f37887affedca6799495e573be",
   "products": 1169,
-  "builtAt": "2026-09-25T14:44:04.688Z",
+  "builtAt": "2026-09-26T09:14:08.499Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {
