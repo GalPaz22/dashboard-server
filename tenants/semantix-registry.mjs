@@ -1,7 +1,7 @@
 import {readdir,readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-export const REGISTRY_VERSION=3;
+export const REGISTRY_VERSION=4;
 // Mounts every tenants/<slug>/ folder that has a semantix.module.json. Modules load lazily on the first request.
 // Whether a module answers is a field on the merchant's user document (users.users), which dashboard-server copies into
 // req.store.semantix:  {module:"<slug>", enabled:true, percent:100}
@@ -22,7 +22,17 @@ export function createSemantixTenants({getDb,dir=new URL('./',import.meta.url),n
   return {on:sw.enabled,percent:sw.percent,source:'user'};
  }
  const bucket=req=>{const key=String(req.body?.session_id||req.body?.sessionId||req.query?.session_id||req.get?.('X-Session-Id')||req.ip||'');return parseInt(createHash('sha1').update(key).digest('hex').slice(0,8),16)%100;};
- function allowed(manifest,req){const d=decide(manifest,req.store),t=tenant(manifest.slug);if(!d.on||t.openUntil>now())return false;return d.percent>=100||bucket(req)<d.percent;}
+ // Every decision for the module's own store is visible: X-Semantix-Decision on the response, and a log line per
+ // module per minute (so "why is the old search answering?" is answered from DevTools or the server log).
+ const logged=new Map();
+ function explain(manifest,req,verdict){
+  if(req.store?.dbName!==manifest.dbName)return;if(!req.res?.headersSent)req.res?.setHeader('X-Semantix-Decision',manifest.slug+' '+verdict);
+  const key=manifest.slug+verdict,at=now();if(at-(logged.get(key)||0)<60000)return;logged.set(key,at);
+  console.log('[SEMANTIX '+manifest.slug+'] decision',verdict,'| user field',JSON.stringify(req.store?.semantix??null));
+ }
+ function allowed(manifest,req){const d=decide(manifest,req.store),t=tenant(manifest.slug);
+  const verdict=!d.on?'off:'+(d.source==='user'?'enabled-false':d.source):t.openUntil>now()?'off:circuit-open':d.percent>=100||bucket(req)<d.percent?'on':'off:rollout-'+d.percent+'%';
+  explain(manifest,req,verdict);return verdict==='on';}
  function failed(slug,error){const t=tenant(slug),at=now();t.lastError={message:error.message,at:new Date(at).toISOString()};t.fellBack++;t.failures=[...t.failures.filter(x=>at-x<breaker.windowMs),at];
   if(t.failures.length>=breaker.failures){t.openUntil=at+breaker.coolMs;t.failures=[];console.error('[SEMANTIX] circuit open for',slug,'until',new Date(t.openUntil).toISOString());}}
  const load=()=>loading??=(async()=>{const routes=[];
