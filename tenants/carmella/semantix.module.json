@@ -1,0 +1,17 @@
+{
+  "kind": "semantix-tenant-module",
+  "version": 1,
+  "slug": "carmella",
+  "tenantId": "f9100ae3-1498-4d25-b3fe-68c6ea8a1767",
+  "name": "carmella",
+  "url": "https://www.carmella.co.il",
+  "platform": "custom",
+  "dbName": "carmella",
+  "collection": "products",
+  "tokenPrefix": "carmella-v3:",
+  "revision": 9,
+  "profileHash": "d4673b7bb0147d38d09606859ea6bb3b7b3609a1a5af115a73ad907af28f0374",
+  "products": 8355,
+  "builtAt": "2026-09-25T07:55:48.663Z",
+  "flag": "SEMANTIX_TENANTS contains \"carmella\""
+}

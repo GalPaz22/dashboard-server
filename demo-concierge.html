@@ -31,7 +31,11 @@
     background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
     border-radius:8px; padding:7px 10px; font-size:12.5px; direction:ltr; text-align:left;
   }
-  .cfg input.base{width:210px} .cfg input.key{width:250px}
+  .cfg input.base{width:210px}
+  .cfg select.store{
+    background:var(--panel-2); border:1px solid var(--line); color:var(--ink);
+    border-radius:8px; padding:7px 10px; font-size:12.5px; min-width:220px; max-width:280px;
+  }
   .cfg label{font-size:12px;color:var(--ink-dim)}
   .status{font-size:12px;padding:4px 11px;border-radius:99px;border:1px solid var(--line);white-space:nowrap}
   .status.wait{color:var(--ink-dim)}
@@ -194,7 +198,7 @@
   <div class="cfg">
     <span class="status wait" id="status">…</span>
     <label>שרת</label><input class="base" id="cfgBase" spellcheck="false">
-    <label>API key</label><input class="key" id="cfgKey" spellcheck="false">
+    <label>חנות</label><select class="store" id="cfgStore" disabled><option>טוען חנויות…</option></select>
     <label style="display:flex;gap:5px;align-items:center"><input type="checkbox" id="cfgModern" checked style="width:auto"> modern</label>
   </div>
 </header>
@@ -280,18 +284,69 @@ function defaultBase() {
 }
 const DEFAULTS = {
   base: defaultBase(),
-  key: "semantix_688736e523c0352ad78525fe_1753691812345",
 };
 const cfg = {
   base: localStorage.getItem("cx_base") || DEFAULTS.base,
-  key:  localStorage.getItem("cx_key")  || DEFAULTS.key,
+  dbName: localStorage.getItem("cx_db") || "",
   modern: true,
 };
+function authHeaders(extra = {}) {
+  if (!cfg.dbName) return extra;
+  return { ...extra, "X-Demo-Db": cfg.dbName };
+}
 $("cfgBase").value = cfg.base;
-$("cfgKey").value  = cfg.key;
-$("cfgBase").oninput = (e) => { localStorage.setItem("cx_base", cfg.base = e.target.value.trim()); checkConnectionSoon(); };
-$("cfgKey").oninput  = (e) => { localStorage.setItem("cx_key",  cfg.key  = e.target.value.trim()); checkConnectionSoon(); };
+$("cfgBase").oninput = (e) => {
+  localStorage.setItem("cx_base", cfg.base = e.target.value.trim());
+  loadStores();
+};
+$("cfgStore").onchange = (e) => {
+  localStorage.setItem("cx_db", cfg.dbName = e.target.value);
+  checkConnectionSoon();
+};
 $("cfgModern").onchange = (e) => (cfg.modern = e.target.checked);
+
+async function loadStores() {
+  const select = $("cfgStore");
+  select.disabled = true;
+  select.textContent = "";
+  const loading = document.createElement("option");
+  loading.textContent = "טוען חנויות…";
+  select.appendChild(loading);
+  try {
+    const res = await fetch(cfg.base.replace(/\/$/, "") + "/demo/stores");
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const stores = data.stores || [];
+    select.textContent = "";
+    if (!stores.length) {
+      const empty = document.createElement("option");
+      empty.textContent = "אין חנויות";
+      select.appendChild(empty);
+      return;
+    }
+    if (!stores.some(store => store.dbName === cfg.dbName)) {
+      cfg.dbName = stores[0].dbName;
+      localStorage.setItem("cx_db", cfg.dbName);
+    }
+    for (const store of stores) {
+      const option = document.createElement("option");
+      option.value = store.dbName;
+      option.textContent = store.name === store.dbName
+        ? store.dbName
+        : store.name + " (" + store.dbName + ")";
+      if (store.dbName === cfg.dbName) option.selected = true;
+      select.appendChild(option);
+    }
+    select.disabled = false;
+    checkConnectionSoon();
+  } catch (err) {
+    select.textContent = "";
+    const failed = document.createElement("option");
+    failed.textContent = "לא ניתן לטעון חנויות";
+    select.appendChild(failed);
+    setStatus("bad", "רשימת החנויות נכשלה: " + err.message);
+  }
+}
 
 /* ------------------------------------------------------- connection status
    Local setups fail in three boring ways — server not running, wrong key, or
@@ -335,10 +390,11 @@ async function checkConnection() {
   try {
     const res = await fetch(cfg.base + "/concierge/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": cfg.key },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ stream: false, message: "!!!" }),
     });
-    if (res.status === 401) return setStatus("bad", "מפתח API לא תקין" + suffix);
+    if (!cfg.dbName) return setStatus("bad", "בחרו חנות" + suffix);
+    if (res.status === 401) return setStatus("bad", "החנות לא זוהתה — רעננו את הרשימה" + suffix);
     if (res.status === 403) return setStatus("warn", "השרת עובד, אבל הקונסיירז׳ כבוי לחנות הזו — צריך concierge: true במסמך המשתמש" + suffix);
     if (!res.ok) return setStatus("warn", "השרת החזיר " + res.status + suffix);
     setStatus(degraded ? "warn" : "ok", "מחובר — הקונסיירז׳ פעיל" + suffix);
@@ -377,7 +433,7 @@ async function runSearch(query) {
   try {
     const res = await fetch(cfg.base + "/search", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": cfg.key },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify({ query, session_id: SESSION, modern: cfg.modern }),
     });
     if (!res.ok) throw new Error("HTTP " + res.status + " — " + (await res.text()).slice(0, 200));
@@ -610,7 +666,7 @@ async function send(message, trigger) {
   try {
     const res = await fetch(cfg.base + "/concierge/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-API-Key": cfg.key },
+      headers: authHeaders({ "Content-Type": "application/json" }),
       body: JSON.stringify(body),
     });
 
@@ -752,7 +808,7 @@ $("cxSend").onclick = () => {
 };
 $("cxInput").onkeydown = (e) => { if (e.key === "Enter") $("cxSend").click(); };
 
-checkConnection();
+loadStores();
 
 document.querySelectorAll("[data-atk]").forEach((b) => {
   b.onclick = () => {

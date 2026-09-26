@@ -20,6 +20,8 @@ export function createTopSearch(products, client) {
   });
   return query => {
     const original = words(query);
+    // Advice belongs to the model router, not an exhaustive product filter.
+    if ((rules.consultativePhrases || []).some(phrase=>has(original,phrase))) return null;
     // A request for Top Nail / Top Spa is a brand request, not a top-coat filter.
     const alias = aliases.find(term=>has(withoutBrands(original),term));
     if (!alias) return null;

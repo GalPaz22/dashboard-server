@@ -17,6 +17,11 @@ import { storefrontResponse } from './tenants/beautics/response.mjs';
 import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
 import {createGarminRoutes} from './tenants/garmin/routes.mjs';
 const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).db('garmin')});
+// Semantix tenant modules (tenants/<slug>/, exported by Tenant Studio). A module answers only when the merchant's user
+// document switches it on (users.users → semantix:{module,enabled,percent}); failures fall through to the existing routes.
+import {createSemantixTenants} from './tenants/semantix-registry.mjs';
+import {createV2SearchLogger} from './search-logging.mjs';
+const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoClient()).db(name)});
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -2759,6 +2764,7 @@ app.use(bodyParser.json({ limit: '1mb' }));
 // array) search responses have nowhere else to carry the signal.
 app.use(cors({
   origin: "*",
+  allowedHeaders: ["Content-Type", "X-API-Key", "X-Demo-Db"],
   exposedHeaders: ["X-Concierge-Trigger", "X-Concierge-Conversation", "X-Concierge-Display"],
 }));
 
@@ -3078,6 +3084,8 @@ async function getStoreConfigByApiKey(apiKey) {
       colors: userDoc.credentials?.colors || "",
       pinnedResults: Array.isArray(userDoc.credentials?.pinnedResults) ? userDoc.credentials.pinnedResults : [], // Merchandising: [{ query, productIds: [] }] — promoted products pinned to the top for matching queries
       showOutOfStock: userDoc.credentials?.showOutOfStock === true, // Admin toggle: include out-of-stock products in all search surfaces
+      // Semantix tenant module switch (Tenant Studio): {module, enabled, percent}. Read by tenants/semantix-registry.mjs.
+      semantix: userDoc.semantix && typeof userDoc.semantix === "object" ? userDoc.semantix : null,
       // English queries → Hebrew transliteration (authors/product names), then search name+author
       hebrewTranslate: userDoc.hebrewTranslate === true || userDoc.credentials?.hebrewTranslate === true,
       searchAuthor: userDoc.searchAuthor === true || userDoc.credentials?.searchAuthor === true
@@ -3095,12 +3103,34 @@ async function getStoreConfigByApiKey(apiKey) {
   }, 300); // 5-minute TTL — short enough to pick up config changes
 }
 
+function isLoopbackRequest(req) {
+  const ip = String(req.ip || req.socket?.remoteAddress || "").replace(/^::ffff:/, "");
+  return ip === "127.0.0.1" || ip === "::1";
+}
+
+async function getStoreConfigByDbName(dbName) {
+  if (!dbName) return null;
+  const cacheKey = `store-config-db:${dbName}`;
+  return withCache(cacheKey, async () => {
+    const client = await connectToMongoDB(mongodbUri);
+    const userDoc = await client.db("users").collection("users").findOne({
+      dbName,
+      apiKey: { $exists: true, $nin: [null, ""] }
+    });
+    if (!userDoc?.apiKey) return null;
+    return getStoreConfigByApiKey(userDoc.apiKey);
+  }, 300);
+}
+
 async function authenticate(req, res, next) {
   try {
     const apiKey = req.get("X-API-Key");
-    const store = await getStoreConfigByApiKey(apiKey);
-    
-    if (!apiKey || !store) {
+    const demoDb = req.get("X-Demo-Db");
+    const store = apiKey
+      ? await getStoreConfigByApiKey(apiKey)
+      : (demoDb && isLoopbackRequest(req) ? await getStoreConfigByDbName(demoDb) : null);
+
+    if (!store) {
       return res.status(401).json({ error: "Invalid or missing API key" });
     }
     req.store = store;
@@ -3212,10 +3242,13 @@ app.use((req, res, next) => {
       req.path === '/clear-cache' ||
       req.path.startsWith('/cache/') ||
       req.path.startsWith('/webhooks/') ||
-      // The demo page is plain HTML with no embedded credentials — the API key
-      // is typed into the page at runtime. A browser opening it can't send an
-      // X-API-Key header, so gating it just makes it a 401.
+      // Demo pages are plain HTML. A browser opening them can't send an
+      // X-API-Key header, so gating them just makes it a 401. /demo/stores
+      // is the picker that lists catalogs for those pages (loopback-only).
+      req.path === '/' ||
+      req.path === '/demo-enrichment' ||
       req.path === '/demo-concierge' ||
+      req.path === '/demo/stores' ||
       req.path === '/site-config' || // 🔧 Allow /site-config to handle its own auth
       req.path.startsWith('/cdn/')) { // public logo + powered-by script
     return next();
@@ -6614,6 +6647,8 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
     queryDocument.sessionId = sessionId; // legacy/camelCase compatibility
   }
 
+  if (options.searchEngine) queryDocument.searchEngine = options.searchEngine; // which v2 engine answered
+
   // Explicit zero-result flag for callers that know the native result count
   // but never ran a product search here (e.g. the lightweight /log-query path).
   if (typeof options.zeroResults === "boolean") {
@@ -9017,7 +9052,8 @@ app.get("/search/auto-load-more", async (req, res) => {
 });
 */
 
-app.get("/search/load-more", garminRoutes.loadMore, createBeauticsLoadMore(async (request, store) => {
+app.get('/semantix/status',(req,res)=>semantixTenants.statusRoute(req,res));
+app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, createBeauticsLoadMore(async (request, store) => {
   const db = (await getMongoClient()).db(store.dbName);
   return searchBeautics({sessions:db.collection('beautics_search_sessions'),request});
 }), async (req, res) => {
@@ -13575,7 +13611,9 @@ app.post("/simple-search", async (req, res) => {
   }
 });
 
-app.post("/search", garminRoutes.search, async (req, res) => {
+// v2 engines answer before the legacy logQuery runs; this logs their searches to the store's `queries` collection.
+const logV2Search=createV2SearchLogger({logQuery,getQueries:async dbName=>(await getMongoClient()).db(dbName).collection("queries")});
+app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
   console.log(`[${requestId}] SEARCH "${req.body.query}" | db:${req.store?.dbName}`);
@@ -13594,6 +13632,7 @@ app.post("/search", garminRoutes.search, async (req, res) => {
         : {query,limit:Math.min(Number(req.body.limit || 12),50)};
       const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),sessions:db.db(dbName).collection('beautics_search_sessions'),request});
       if (result.nextCursor) res.setHeader('X-Next-Token', `beautics-v2:${result.nextCursor}`);
+      res.setHeader('X-Search-Engine', 'beautics-v2'); // logged by logV2Search
       // The v2 response is opt-in via modern=true; preserve the legacy array
       // contract for existing storefront scripts during the rollout.
       return res.json(storefrontResponse(result, req.body.modern === true || req.body.modern === 'true'));
@@ -20216,6 +20255,47 @@ async function getUserProfileForBoosting(dbOrDbName, sessionId) {
 /* =========================================================== *\
    DEMO PAGES
 \* =========================================================== */
+
+// Local demo picker: one row per catalog, no API keys. Production clients
+// keep using X-API-Key; the demo pages send X-Demo-Db from loopback instead.
+app.get("/demo/stores", async (req, res) => {
+  if (!isLoopbackRequest(req)) {
+    return res.status(403).json({ error: "Demo store list is local-only" });
+  }
+
+  try {
+    const client = await connectToMongoDB(mongodbUri);
+    const users = await client.db("users").collection("users").find(
+      {
+        apiKey: { $exists: true, $nin: [null, ""] },
+        dbName: { $exists: true, $nin: [null, ""] }
+      },
+      { projection: { name: 1, dbName: 1, context: 1, syncMode: 1 } }
+    ).toArray();
+
+    const byDb = new Map();
+    for (const user of users) {
+      const existing = byDb.get(user.dbName);
+      const prefer = !existing || (user.syncMode && !existing._hasSync);
+      if (!prefer) continue;
+      byDb.set(user.dbName, {
+        name: user.name || user.dbName,
+        dbName: user.dbName,
+        context: typeof user.context === "string" ? user.context.trim() : "",
+        _hasSync: Boolean(user.syncMode)
+      });
+    }
+
+    const stores = [...byDb.values()]
+      .map(({ _hasSync, ...store }) => store)
+      .sort((a, b) => String(a.name).localeCompare(String(b.name), "he"));
+
+    res.json({ stores });
+  } catch (error) {
+    console.error("[DEMO] store list failed:", error);
+    res.status(500).json({ error: "Could not list stores" });
+  }
+});
 
 // Serve main demo
 app.get("/", (req, res) => {

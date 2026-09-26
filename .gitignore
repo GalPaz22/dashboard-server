@@ -37,3 +37,7 @@ eval/snapshots/
 
 # Beautics pilot: local catalog and public-page snapshots (do not commit)
 outputs/beautics-pilot/
+outputs/*.zip
+
+# Tenant catalog dumps — too large for GitHub HTTP push
+tenants/**/snapshot.json
