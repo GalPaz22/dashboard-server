@@ -60,8 +60,9 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
   }
   return runtime;
  }
+ // Page size when the storefront sends no limit: the tenant's pipeline.pageSize (published with the profile), else 12.
  return async function search({collection,sessions,moduleStore,request}){
-  const limit=request.limit??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
+  const limit=request.limit??(await published(moduleStore)).profile?.pipeline?.pageSize??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
   const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
   while(r.nextCursor&&matches.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
