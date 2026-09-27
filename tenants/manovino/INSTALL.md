@@ -1,6 +1,6 @@
 # Semantix tenant module — manoVino (manovino)
 
-Revision 4, 2324 product cards, built 2026-09-27T06:42:43.380Z.
+Revision 5, 2324 product cards, built 2026-09-27T08:39:56.533Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 

@@ -9,10 +9,10 @@
   "dbName": "manoVino",
   "collection": "products",
   "tokenPrefix": "manovino-v3:",
-  "revision": 4,
-  "profileHash": "13c7a3dd54b94c243fb96c93fd772343fa88d19ca11f4f2f0da2e3468e5efe0d",
+  "revision": 5,
+  "profileHash": "52f8bc1437e824479a44be110e14791a354037f8473d37b7d04edab9a81a24c3",
   "products": 2324,
-  "builtAt": "2026-09-27T06:42:43.380Z",
+  "builtAt": "2026-09-27T08:39:56.533Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {
