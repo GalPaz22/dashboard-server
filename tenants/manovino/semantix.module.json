@@ -1,0 +1,24 @@
+{
+  "kind": "semantix-tenant-module",
+  "version": 1,
+  "slug": "manovino",
+  "tenantId": "2b3f29d3-1caf-4193-a527-d7da17bbae85",
+  "name": "manoVino",
+  "url": "https://www.manovino.co.il",
+  "platform": "custom",
+  "dbName": "manoVino",
+  "collection": "products",
+  "tokenPrefix": "manovino-v3:",
+  "revision": 4,
+  "profileHash": "13c7a3dd54b94c243fb96c93fd772343fa88d19ca11f4f2f0da2e3468e5efe0d",
+  "products": 2324,
+  "builtAt": "2026-09-27T06:42:43.380Z",
+  "switch": {
+    "field": "users.users.semantix",
+    "value": {
+      "module": "manovino",
+      "enabled": true,
+      "percent": 100
+    }
+  }
+}
