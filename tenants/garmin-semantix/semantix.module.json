@@ -9,10 +9,10 @@
   "dbName": "garmin",
   "collection": "products",
   "tokenPrefix": "garmin-semantix-v3:",
-  "revision": 13,
-  "profileHash": "a6301162ee279dbb8811227f11ac57000dfbbfb3d59a97e0aa9a2a2f7e297288",
+  "revision": 15,
+  "profileHash": "c54b3508e9fa2591237e47183f7d8b9e78a24929288bfdaf0119fffa0b2fe951",
   "products": 1169,
-  "builtAt": "2026-09-26T11:15:29.793Z",
+  "builtAt": "2026-09-28T12:48:12.795Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {

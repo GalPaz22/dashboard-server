@@ -104,7 +104,7 @@ DATA ${JSON.stringify({query,detected:literal.plan,categories,colors:Object.keys
         .sort((a,b)=>b.score-a.score||a.p.id.localeCompare(b.p.id));
       if(rankCandidates){const ranked=await rankCandidates(query,eligible);const combined=new Map(scored.slice(0,maxCandidates).map((x,i)=>[x.p.id,{p:x.p,score:1/(60+i)}]));for(const [i,x] of ranked.slice(0,maxCandidatesVector).entries()){const old=combined.get(x.p.id);combined.set(x.p.id,{p:x.p,score:(old?.score||0)+1/(60+i)});}scored=[...combined.values()].sort((a,b)=>b.score-a.score);}
       // Budgeted candidate set, never claim exhaustive semantic recall.
-      const candidates=scored.slice(0,maxCandidates).map(({p})=>({id:p.id,title:p.title,categories:p.categories,colors:p.colors,finishes:p.finishes,tags:p.tags,specifications:Object.entries(p.specifications||{}).map(([k,v])=>k+': '+v).join('\n'),description:(p.description||'').slice(0,2500),price:p.price}));
+      const candidates=scored.slice(0,maxCandidates).map(({p})=>({id:p.id,title:p.title,categories:p.categories,colors:p.colors,finishes:p.finishes,tags:p.tags,specifications:Object.entries(p.specifications||{}).map(([k,v])=>k+': '+v).join('\n'),description:String(p.description||'').slice(0,2500),price:p.price}));
       const details={intent:plan.intent,requirements:plan.requirements,candidateCount:candidates.length,candidatesTruncated:scored.length>maxCandidates};
       if(!candidates.length)return noVerifiedMatches(query,plan,'no-semantic-candidates',meta(details));
       const selection=await ask('select',`Select and rank only products supported by the supplied catalog evidence for the ORIGINAL shopping request in the store context below.
@@ -144,7 +144,7 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     const terms=normalize(query).split(/\s+/).filter(Boolean);
     let ranked=visible.map(p=>({p,score:terms.reduce((sum,t)=>sum+(normalize(p.title).includes(t)?4:0)+(normalize([p.description,...p.categories,...Object.values(p.specifications||{})].join(' ')).includes(t)?1:0),0)})).sort((a,b)=>b.score-a.score||a.p.id.localeCompare(b.p.id));
     if(rankCandidates){try{const vectors=await rankCandidates(query,visible);const scores=new Map(ranked.map((x,i)=>[x.p.id,1/(60+i)]));for(const [i,x] of vectors.entries())scores.set(x.p.id,(scores.get(x.p.id)||0)+1/(60+i));ranked.sort((a,b)=>scores.get(b.p.id)-scores.get(a.p.id));}catch{}}
-    const candidates=ranked.slice(0,maxCandidates).map(({p})=>({id:p.id,title:p.title,description:(p.description||'').slice(0,1500),categories:p.categories,specifications:p.specifications,price:p.price}));
+    const candidates=ranked.slice(0,maxCandidates).map(({p})=>({id:p.id,title:p.title,description:String(p.description||'').slice(0,1500),categories:p.categories,specifications:p.specifications,price:p.price}));
     let matches=[],response,called=false;
     if(useModel){const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);try{
       called=true;
