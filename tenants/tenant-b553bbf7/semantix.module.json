@@ -5,13 +5,20 @@
   "tenantId": "b553bbf7-58f9-4412-b0d9-9a11fad0697b",
   "name": "ביוטיקס שופ",
   "url": "https://www.beautics-shop.co.il",
-  "platform": "custom",
+  "platform": "woocommerce",
   "dbName": "woo-beautics-shop-co-il",
   "collection": "products",
   "tokenPrefix": "tenant-b553bbf7-v3:",
-  "revision": 4,
-  "profileHash": "76eee8d09ba860a1ddb4481db777990ce337c0ac2f8578e3183304b0ded73be0",
+  "revision": 6,
+  "profileHash": "20f42a02e540ed8b765d6d187e582547949a0399476bc223652c87652414dc00",
   "products": 3418,
-  "builtAt": "2026-09-25T14:00:46.026Z",
-  "flag": "SEMANTIX_TENANTS contains \"tenant-b553bbf7\""
+  "builtAt": "2026-09-28T07:16:16.529Z",
+  "switch": {
+    "field": "users.users.semantix",
+    "value": {
+      "module": "tenant-b553bbf7",
+      "enabled": true,
+      "percent": 100
+    }
+  }
 }

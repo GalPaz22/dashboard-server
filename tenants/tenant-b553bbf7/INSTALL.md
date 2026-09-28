@@ -1,10 +1,10 @@
 # Semantix tenant module — ביוטיקס שופ (tenant-b553bbf7)
 
-Revision 4, 3418 product cards, built 2026-09-25T14:00:46.026Z.
+Revision 6, 3418 product cards, built 2026-09-28T07:16:16.529Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 
-Copy `tenants/tenant-b553bbf7/` and `tenants/semantix-registry.mjs` into dashboard-server, and in server.js next to the Garmin routes:
+Copy `tenants/tenant-b553bbf7/` and `tenants/semantix-registry.mjs` into dashboard-server. In server.js, next to the Garmin routes:
 
 ```js
 import {createSemantixTenants} from './tenants/semantix-registry.mjs';
@@ -12,14 +12,20 @@ const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoCl
 app.get('/semantix/status',(req,res)=>semantixTenants.statusRoute(req,res));
 ```
 
-and put `semantixTenants.search` first on `app.post("/search", …)` and `semantixTenants.loadMore` first on `app.get("/search/load-more", …)`.
+put `semantixTenants.search` first on `app.post("/search", …)` and `semantixTenants.loadMore` first on `app.get("/search/load-more", …)`, and in the store config built from the user document add:
 
-## Switching on and off in production
+```js
+semantix: userDoc.semantix && typeof userDoc.semantix === "object" ? userDoc.semantix : null,
+```
 
-- Control document (no restart, read every 15 s): `semantix.tenant_modules` → `{_id:"tenant-b553bbf7", enabled:true, percent:100}`. `enabled:false` switches back to the existing search; `percent:10` sends 10% of sessions to this module. Tenant Studio's “שליטה בפרודקשן” panel writes this document.
-- Without a control document: `SEMANTIX_TENANTS=tenant-b553bbf7` switches it on.
-- `SEMANTIX_OFF=1` switches every Semantix tenant off (restart).
-- Failures fall back to the existing search; 5 failures in a minute pause the tenant for 5 minutes.
-- `GET /semantix/status` with header `X-Semantix-Admin: $SEMANTIX_ADMIN_TOKEN` shows each tenant's state, revision, source of the decision, circuit and counters.
+## Switching on and off
 
-Requests for store dbName `woo-beautics-shop-co-il` are answered by this module. Pagination tokens start with `tenant-b553bbf7-v3:`; sessions live in `semantix_tenant_b553bbf7_sessions`. Live price/stock/visibility come from the `products` collection every minute; enriched cards come from snapshot.json — re-export after changes in the studio.
+On the merchant's user document (`users.users`, the one with dbName `woo-beautics-shop-co-il`):
+
+```js
+semantix: {module: "tenant-b553bbf7", enabled: true, percent: 100}
+```
+
+`enabled:false` or no field → the existing search answers; `percent:10` → 10% of sessions. Tenant Studio's “שליטה בפרודקשן” panel writes this field. The store config is cached for up to 5 minutes. Failures fall back to the existing search; 5 failures in a minute pause the module for 5 minutes. `GET /semantix/status` with header `X-Semantix-Admin: $SEMANTIX_ADMIN_TOKEN` shows each module, the users that switch it on, the circuit and counters.
+
+Pagination tokens start with `tenant-b553bbf7-v3:`; sessions live in `semantix_tenant_b553bbf7_sessions`. Live price/stock/visibility come from the `products` collection every minute; the approved revision (profile + enriched cards) is published by the studio to `semantix_module` in the store database and picked up within 30 seconds — re-export only when the engine code changes.
