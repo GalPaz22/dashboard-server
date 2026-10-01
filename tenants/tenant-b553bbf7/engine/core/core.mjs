@@ -45,7 +45,7 @@ export function processProduct(raw, client, observations = [], observedAt = null
   if (raw.specialLabel === true) issues.push('legacy-label-without-meaning');
   return {
     id: String(raw.id), tenantId: client.tenantId, schemaVersion: client.version,
-    title: raw.name || raw.title || '', description:raw.description||'', specifications:raw.specifications||{}, sku: String(raw.raw?.sku || ''), url: raw.url,
+    title: String(raw.name || raw.title || ''), description:String(raw.description||''), specifications:raw.specifications||{}, sku: String(raw.raw?.sku || ''), url: raw.url,
     image: raw.image, price: Number.isFinite(raw.price) ? raw.price : null,
     regularPrice: Number.isFinite(raw.regularPrice) ? raw.regularPrice : null,
     currency: raw.currency || null, stockStatus: raw.stockStatus || 'unknown',
