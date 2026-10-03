@@ -1,3 +1,4 @@
+import { ExpiringMap, withTimeout } from './memory-lifecycle.mjs';
 import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient, ObjectId } from "mongodb";
@@ -60,11 +61,9 @@ async function initializeRedis() {
         connectTimeout: 5000, // Reduced from 10s to 5s
       },
       // 🎯 CRITICAL: Disable offline queue to prevent memory buildup
-      enableOfflineQueue: false,
+      disableOfflineQueue: true,
     });
 
-    // 🎯 CRITICAL: Set max listeners to prevent memory leak warnings
-    redisClient.setMaxListeners(5);
 
     redisClient.on('error', (err) => {
       redisErrorCount++;
@@ -2361,6 +2360,7 @@ const aiCircuitBreaker = {
   resetTimeout: 60000, // 1 minute
   lastFailureTime: null,
   isOpen: false,
+  resetTimer: null,
   
   recordFailure() {
     this.failures++;
@@ -2371,13 +2371,15 @@ const aiCircuitBreaker = {
       console.error(`[AI CIRCUIT BREAKER] ⚠️ Circuit opened after ${this.failures} failures. AI models disabled for ${this.resetTimeout / 1000}s`);
       
       // Auto-reset after timeout
-      setTimeout(() => {
-        this.reset();
-      }, this.resetTimeout);
+      clearTimeout(this.resetTimer);
+      this.resetTimer = setTimeout(() => this.reset(), this.resetTimeout);
+      this.resetTimer.unref();
     }
   },
   
   recordSuccess() {
+    clearTimeout(this.resetTimer);
+    this.resetTimer = null;
     if (this.failures > 0) {
       console.log(`[AI CIRCUIT BREAKER] ✅ AI call successful, resetting failure count from ${this.failures}`);
     }
@@ -2386,6 +2388,8 @@ const aiCircuitBreaker = {
   },
   
   reset() {
+    clearTimeout(this.resetTimer);
+    this.resetTimer = null;
     console.log(`[AI CIRCUIT BREAKER] 🔄 Circuit reset, AI models re-enabled`);
     this.failures = 0;
     this.isOpen = false;
@@ -2572,8 +2576,7 @@ function generateCacheKey(prefix, ...args) {
   return `${prefix}:${hash}`;
 }
 
-const memoryCache = new Map();
-const MEMORY_CACHE_MAX_ENTRIES = 500;
+const memoryCache = new ExpiringMap({ maxEntries: 500 });
 
 function getMemoryCache(cacheKey) {
   const cached = memoryCache.get(cacheKey);
@@ -2589,11 +2592,6 @@ function getMemoryCache(cacheKey) {
 
 function setMemoryCache(cacheKey, value, ttlSeconds) {
   if (value && value.__skipCache) return;
-
-  if (memoryCache.size >= MEMORY_CACHE_MAX_ENTRIES) {
-    const oldestKey = memoryCache.keys().next().value;
-    if (oldestKey) memoryCache.delete(oldestKey);
-  }
 
   memoryCache.set(cacheKey, {
     value,
@@ -2815,7 +2813,13 @@ function getMongoClient() {
       // Falls back to primary if no secondary is healthy.
       readPreference: 'secondaryPreferred'
     });
-    cachedPromise = cachedClient.connect();
+    const connectingClient = cachedClient;
+    cachedPromise = connectingClient.connect().catch(async error => {
+      cachedClient = undefined;
+      cachedPromise = undefined;
+      await connectingClient.close().catch(() => {});
+      throw error;
+    });
   }
   return cachedPromise;
 }
@@ -3268,7 +3272,7 @@ app.use((req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────
 const SPECIAL_LABEL_SEARCH_PATHS = new Set(['/search', '/search/load-more', '/search/auto-load-more']);
 const SPECIAL_LABEL_TTL_MS = 60 * 1000;
-const specialLabelCache = new Map(); // `${dbName}.${collection}` -> { labels:Map, at:number }
+const specialLabelCache = new ExpiringMap({ ttlMs: SPECIAL_LABEL_TTL_MS }); // `${dbName}.${collection}` -> { labels:Map, at:number }
 
 async function getSpecialLabels(dbName, collectionName) {
   const key = `${dbName}.${collectionName}`;
@@ -3331,7 +3335,7 @@ app.use(async (req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────
 const AUTHOR_SEARCH_PATHS = new Set(['/search', '/fast-search', '/search/load-more', '/search/auto-load-more']);
 const AUTHOR_TTL_MS = 60 * 1000;
-const authorCache = new Map(); // `${dbName}.${collection}` -> { authors:Map, at:number }
+const authorCache = new ExpiringMap({ ttlMs: AUTHOR_TTL_MS }); // `${dbName}.${collection}` -> { authors:Map, at:number }
 
 // Keyed by _id (a real, guaranteed-unique ObjectId) rather than the `id` field —
 // Steimatzky's feed-sourced `id` has ~200 duplicate values across distinct products.
@@ -5379,10 +5383,7 @@ async function getQueryEmbedding(cleanedText) {
       model: "text-embedding-3-large",
       input: cleanedText,
     });
-    const embeddingTimeout = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error('Embedding timeout after 8s')), 8000)
-    );
-    const response = await Promise.race([embeddingPromise, embeddingTimeout]);
+    const response = await withTimeout(embeddingPromise, 8000, 'Embedding timeout after 8s');
     return response.data[0]?.embedding || null;
   } catch (error) {
     console.error("Error fetching query embedding:", error.message);
@@ -5571,9 +5572,6 @@ Return the extracted filters in JSON format. Only extract values that exist in t
 
     // ⚡ TIMEOUT WRAPPER: Prevent hanging LLM calls
     const timeoutMs = 10000; // 10 seconds max
-    const timeoutPromise = new Promise((_, reject) => {
-      setTimeout(() => reject(new Error('LLM filter extraction timeout')), timeoutMs);
-    });
 
     const llmPromise = genAI.models.generateContent({
       model: "gemini-2.5-flash",
@@ -5646,7 +5644,7 @@ Return the extracted filters in JSON format. Only extract values that exist in t
     });
 
     // Race between LLM call and timeout
-    const response = await Promise.race([llmPromise, timeoutPromise]);
+    const response = await withTimeout(llmPromise, timeoutMs, 'LLM filter extraction timeout');
 
     let content = response.text ? response.text.trim() : null;
     
@@ -5912,10 +5910,7 @@ Query: "כיסא בורדו" -> {"category": "כיסא", "color": ["אדום"]}`
           }
         }
       });
-      const extractFiltersBriefTimeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('extractFiltersBrief LLM timeout after 8s')), 8000)
-      );
-      const response = await Promise.race([extractFiltersBriefPromise, extractFiltersBriefTimeout]);
+      const response = await withTimeout(extractFiltersBriefPromise, 8000, 'extractFiltersBrief LLM timeout after 8s');
 
       let content = response.text ? response.text.trim() : null;
       if (!content && response.candidates && response.candidates[0]) {
@@ -6965,10 +6960,7 @@ Extract filters from the query and decide the search path.`;
             responseSchema
           }
         });
-        const unifiedTimeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error(`Unified search ${model} timeout after ${timeoutMs / 1000}s`)), timeoutMs)
-        );
-        const response = await Promise.race([unifiedLlmPromise, unifiedTimeoutPromise]);
+        const response = await withTimeout(unifiedLlmPromise, timeoutMs, `Unified search ${model} timeout after ${timeoutMs / 1000}s`);
         console.log(`[UNIFIED] ${model} responded in ${Date.now() - started}ms`);
         return response;
       };
@@ -7124,10 +7116,7 @@ Which products (if any) are semantically valid matches for this query?`;
           }
         }
       });
-      const validateWeakTimeout = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('validateWeakTextMatches LLM timeout after 8s')), 8000)
-      );
-      const response = await Promise.race([validateWeakLlmPromise, validateWeakTimeout]);
+      const response = await withTimeout(validateWeakLlmPromise, 8000, 'validateWeakTextMatches LLM timeout after 8s');
 
       let text = response.text ? response.text.trim() : null;
 
@@ -7578,10 +7567,7 @@ Return a JSON OBJECT: { "relevant": [ {"_id": "..."} ], "comprehensive": boolean
       },
     });
     const rerankerTimeout = isFilterHeavy ? 5000 : 8000;
-    const rerankerTimeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Reranker LLM timeout after ${rerankerTimeout / 1000}s`)), rerankerTimeout)
-    );
-    const response = await Promise.race([llmPromise, rerankerTimeoutPromise]);
+    const response = await withTimeout(llmPromise, rerankerTimeout, `Reranker LLM timeout after ${rerankerTimeout / 1000}s`);
 
     let text = response.text ? response.text.trim() : null;
     console.timeEnd(`Rerank LLM call for ${query} (${limitedResults.length} products)`);
@@ -20571,9 +20557,9 @@ async function gracefulShutdown(signal) {
   }
   
   // Close MongoDB connection
-  if (client) {
+  for (const mongoClient of new Set([client, cachedClient].filter(Boolean))) {
     try {
-      await client.close();
+      await mongoClient.close();
       console.log('[SHUTDOWN] MongoDB connection closed');
     } catch (error) {
       console.error('[SHUTDOWN] Error closing MongoDB:', error.message);

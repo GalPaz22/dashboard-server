@@ -1,3 +1,4 @@
+import { ExpiringMap } from './memory-lifecycle.mjs';
 /* =========================================================================== *\
    CONCIERGE — shopper-facing chat, Hebrew only
    ---------------------------------------------------------------------------
@@ -488,7 +489,7 @@ async function getProduct(args, ctx) {
   };
 }
 
-const facetCache = new Map(); // dbName.collection -> { at, value }
+const facetCache = new ExpiringMap({ ttlMs: FACET_CACHE_TTL_MS }); // dbName.collection -> { at, value }
 
 export async function catalogFacets(args, ctx) {
   const inStock = args.in_stock_only !== false;
@@ -815,12 +816,9 @@ function buildBaseSystemPrompt(store) {
    Conversation storage — Redis with an in-process fallback
 \* --------------------------------------------------------------------------- */
 
-const memoryConversations = new Map();
+const memoryConversations = new ExpiringMap({ maxEntries: MEMORY_CONVERSATION_CAP });
 
 function memorySet(key, value, ttlSeconds) {
-  if (memoryConversations.size >= MEMORY_CONVERSATION_CAP) {
-    memoryConversations.delete(memoryConversations.keys().next().value);
-  }
   memoryConversations.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 });
 }
 
@@ -876,7 +874,7 @@ const SHOPPER_WINDOW_SECONDS = 60 * 60;
 const STORE_TURN_LIMIT = Number(process.env.CONCIERGE_STORE_LIMIT) || 600;      // per 10 minutes
 const STORE_WINDOW_SECONDS = 10 * 60;
 
-const memoryCounters = new Map();
+const memoryCounters = new ExpiringMap({ maxEntries: 5000, expiresAt: value => value.resetAt });
 
 async function consumeQuota(deps, key, limit, windowSeconds) {
   const redis = deps.getRedis();
@@ -893,10 +891,9 @@ async function consumeQuota(deps, key, limit, windowSeconds) {
   const now = Date.now();
   const entry = memoryCounters.get(key);
   if (!entry || now > entry.resetAt) {
+    memoryCounters.sweep();
+    if (memoryCounters.size >= 5000) return { allowed: false, count: limit + 1 };
     memoryCounters.set(key, { count: 1, resetAt: now + windowSeconds * 1000 });
-    if (memoryCounters.size > 5000) {
-      for (const [k, v] of memoryCounters) if (now > v.resetAt) memoryCounters.delete(k);
-    }
     return { allowed: true, count: 1 };
   }
   entry.count += 1;
@@ -1626,9 +1623,11 @@ export function mountConcierge(app, deps) {
       // an idle-timeout proxy reads as a dead connection. Comment frames are
       // ignored by EventSource and keep it alive.
       const keepalive = setInterval(() => {
-        if (!res.writableEnded) res.write(": keepalive\n\n");
+        if (!signal.aborted && !res.writableEnded) res.write(": keepalive\n\n");
       }, 15000);
 
+      const stopKeepalive = () => clearInterval(keepalive);
+      res.once("close", stopKeepalive);
       let turnResult = null;
       try {
         turnResult = await runAgent({
@@ -1647,6 +1646,7 @@ export function mountConcierge(app, deps) {
         if (!signal.aborted) sse(res, "error", { message: "אירעה תקלה זמנית. אפשר לנסות שוב." });
       } finally {
         clearInterval(keepalive);
+        res.off("close", stopKeepalive);
       }
 
       await storeSet(deps, conversationKey(conversation.id), conversation, CONVERSATION_TTL_SECONDS);
