@@ -1,0 +1,24 @@
+{
+  "kind": "semantix-tenant-module",
+  "version": 1,
+  "slug": "foxhome",
+  "tenantId": "5cd1c15f-b756-495b-b26e-c8354fee3649",
+  "name": "www.foxhome.co.il",
+  "url": "https://www.foxhome.co.il/",
+  "platform": "shopify",
+  "dbName": "foxhome",
+  "collection": "products",
+  "tokenPrefix": "foxhome-v3:",
+  "revision": 20,
+  "profileHash": "dc55498901fd86f56ef973021b7b59ad777cdf8275beb9ff6933ea0a15850e9e",
+  "products": 1495,
+  "builtAt": "2026-10-03T14:29:56.515Z",
+  "switch": {
+    "field": "users.users.semantix",
+    "value": {
+      "module": "foxhome",
+      "enabled": true,
+      "percent": 100
+    }
+  }
+}
