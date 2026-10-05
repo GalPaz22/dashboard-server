@@ -5,6 +5,7 @@ import {processGarmin} from './tenants/garmin/index.mjs';
 import {hash} from './core/hash.mjs';
 import {createIndexRetriever,buildSearchIndex,TOKENIZER} from './core/search-index.mjs';
 import {createVectorRanker,createPackedRanker} from './core/embeddings.mjs';
+import {createHookRunner,hasHooks} from './core/tenant-hooks.mjs';
 export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}={}) {
  const profile={...revision.profile,storeContext:project.storeContext,tenantId:project.id,platform:project.platform,sourceUrl:project.url,version:`studio-${revision.number}`,publishedStatuses:['ACTIVE','publish'],indexPlan:{text:['title','description','specifications'],filter:['productType','colors','finishes','tags','price','stockStatus'],exact:['id','sku','mpn','gtin']}};
  const classifiedTags=new Map();
@@ -24,7 +25,15 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
  const retrieve=overrideRetrieve||createIndexRetriever(products,profile,index);
  // A build's vector index (exact content) wins; otherwise the studio's per-product vectors from the processing lab.
  const rankCandidates=project.vectorIndex?.contentHash===hash(products)?createVectorRanker(project.vectorIndex):project.studioVectors?.ids?.length?createPackedRanker(project.studioVectors):null;
- return {search:createSearchService(products,profile,generate,{...profile.pipeline,maxEntries:10,retrieve,rankCandidates}),autocomplete:query=>autocomplete(products,profile,query),products,profile,index};
+ // Tenant functions: rewriteQuery/rerank run per search; transformProduct reshapes the catalog once (in its isolated
+ // worker) and the index is rebuilt on the result. If the transform fails, the untransformed catalog keeps serving.
+ let hooks=null,hookError=null;if(hasHooks(profile))try{hooks=createHookRunner(profile.hooks,profile.hookData,{tenant:project.id});}catch(e){hookError=e.message;}
+ const service=list=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:10,retrieve:list===products?retrieve:overrideRetrieve||createIndexRetriever(list,profile,buildSearchIndex(list,profile.version)),rankCandidates,hooks});
+ let search=service(products);
+ if(hooks?.has('transformProduct')){const base=search;let ready=null;
+  const prepare=()=>ready??=hooks.transformProducts(products).then(list=>service(list)).catch(e=>{hookError='transformProduct: '+e.message;return base;});
+  search=async request=>(await prepare())(request);search.ready=prepare;}
+ return {search,autocomplete:query=>autocomplete(products,profile,query),products,profile,index,functions:hooks?.names||[],get functionError(){return hookError;}};
 }
 export function indexDefinition(profile={}) {
  const fields={name:[{type:'string'},{type:'autocomplete'}],id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'},variants:{type:'document',dynamic:false,fields:{id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'}}},description:{type:'string'},specifications:{type:'document',dynamic:true},tenantId:{type:'token'},categories:{type:'token'},tags:{type:'token'},colors:{type:'token'},finishes:{type:'token'},productType:{type:'token'},price:{type:'number'},stockStatus:{type:'token'},hidden:{type:'boolean'}};

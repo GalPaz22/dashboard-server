@@ -1,4 +1,4 @@
-import {normalize,planQuery,matchesScopedAliases} from './core.mjs';
+import {normalize,planQuery,matchesScopedAliases,sellable} from './core.mjs';
 import {hash} from './hash.mjs';
 // Bump when tokenization changes so a saved index is rebuilt instead of reused.
 export const TOKENIZER=2;
@@ -61,7 +61,7 @@ export function createIndexRetriever(products,client,index) {
   const byId=new Map(products.map(p=>[p.id,p]));
   return (query)=>{
     const normalized=normalize(query),plan=planQuery(query,client),exact=Object.hasOwn(index.identifiers,normalized)?index.identifiers[normalized]:null;
-    const visible=p=>p&&!p.hidden&&p.stockStatus==='instock'&&(exact||
+    const visible=p=>sellable(p,client)&&(exact||
       matchesScopedAliases(p,plan)&&(!plan.productType||p.productType===plan.productType)&&plan.colors.every(c=>p.colors.includes(c))&&plan.finishes.every(f=>p.finishes.includes(f))&&plan.tags.every(t=>p.tags.includes(t))&&(plan.maxPrice===null||p.price!==null&&p.price<=plan.maxPrice));
     const run=resolved=>{let ids=exact||products.map(p=>p.id);const penalty=new Map();
       if(!exact)for(const r of resolved){ids=ids.filter(id=>r.postings.has(id));for(const id of ids)penalty.set(id,(penalty.get(id)||0)+r.postings.get(id));}

@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto';
 
+// Tenant stock policy (pipeline.outOfStock): "hide" (default) shows only in-stock products; "last" also shows out-of-stock
+// ones after all in-stock results; "show" shows them in their natural place. Hidden products are never shown.
+export const stockPolicy=client=>['last','show'].includes(client?.pipeline?.outOfStock)?client.pipeline.outOfStock:'hide';
+export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||stockPolicy(client)!=='hide');
 export const normalize = value => String(value ?? '').normalize('NFKC').toLowerCase()
   .normalize('NFD').replace(/\p{M}/gu,'').replace(/[®™]/g,'')
   .replace(/[׳״'’`"“”„«»″‟]/g, '').replace(/[-–—()[\],:;!?]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -41,7 +45,7 @@ export function processProduct(raw, client, observations = [], observedAt = null
   if (raw.specialLabel === true) issues.push('legacy-label-without-meaning');
   return {
     id: String(raw.id), tenantId: client.tenantId, schemaVersion: client.version,
-    title: raw.name || raw.title || '', description:raw.description||'', specifications:raw.specifications||{}, sku: String(raw.raw?.sku || ''), url: raw.url,
+    title: String(raw.name || raw.title || ''), description:String(raw.description||''), specifications:raw.specifications||{}, sku: String(raw.raw?.sku || ''), url: raw.url,
     image: raw.image, price: Number.isFinite(raw.price) ? raw.price : null,
     regularPrice: Number.isFinite(raw.regularPrice) ? raw.regularPrice : null,
     currency: raw.currency || null, stockStatus: raw.stockStatus || 'unknown',
@@ -132,7 +136,7 @@ export function search(products, client, {query, cursor, limit = 12} = {}) {
   }
   if (typeof query !== 'string' || !normalize(query)) return {status:'empty', matches:[], nextCursor:null};
   const plan = planQuery(query, client);
-  const visible = products.filter(p => p.tenantId === client.tenantId && !p.hidden && p.stockStatus === 'instock');
+  const visible = products.filter(p => p.tenantId === client.tenantId && sellable(p, client));
   const exact = visible.filter(p => normalize(p.id) === normalize(query) || (p.sku && normalize(p.sku) === normalize(query)));
   let matches = exact.length ? exact : visible.filter(p =>
     matchesScopedAliases(p,plan) && (!plan.productType || p.productType === plan.productType) && plan.colors.every(c => p.colors.includes(c)) &&
@@ -149,7 +153,7 @@ export function search(products, client, {query, cursor, limit = 12} = {}) {
 export function autocomplete(products, client, query) {
   const prefix = normalize(query);
   if (prefix.length < 2) return [];
-  return products.filter(p => p.tenantId === client.tenantId && !p.hidden && p.stockStatus === 'instock' &&
+  return products.filter(p => p.tenantId === client.tenantId && sellable(p, client) &&
     (normalize(p.title).startsWith(prefix) || normalize(p.title).split(' ').some(t => t.startsWith(prefix))))
     .sort((a,b)=>a.id.localeCompare(b.id)).slice(0,8).map(p=>({type:'product',id:p.id,label:p.title,url:p.url}));
 }

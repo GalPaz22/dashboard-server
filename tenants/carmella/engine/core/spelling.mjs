@@ -1,4 +1,4 @@
-import {normalize,planQuery,search,applySpelling} from './core.mjs';
+import {normalize,planQuery,search,applySpelling,sellable} from './core.mjs';
 
 const tokens=text=>normalize(text).match(/[\p{L}\p{N}]+/gu)||[];
 export function distance(a,b){
@@ -11,7 +11,7 @@ export function distance(a,b){
 // Conservative spelling repair against title phrases, not descriptions.
 // Never repairs numeric model/SKU tokens, short words, or long sentences.
 export function createSpellingResolver(products,client){
-  const visible=products.filter(p=>p.tenantId===client.tenantId&&!p.hidden&&p.stockStatus==='instock');
+  const visible=products.filter(p=>p.tenantId===client.tenantId&&sellable(p,client));
   const vocabulary=new Map();
   for(const p of visible){const words=tokens(p.title);
     for(let start=0;start<words.length;start++)for(let count=1;count<=3&&start+count<=words.length;count++){
