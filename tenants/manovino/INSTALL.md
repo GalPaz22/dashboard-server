@@ -1,6 +1,6 @@
 # Semantix tenant module — manoVino (manovino)
 
-Revision 5, 2324 product cards, built 2026-09-27T08:39:56.533Z.
+Revision 5, 2324 product cards, built 2026-10-06T14:06:35.391Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 
@@ -12,7 +12,7 @@ const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoCl
 app.get('/semantix/status',(req,res)=>semantixTenants.statusRoute(req,res));
 ```
 
-put `semantixTenants.search` first on `app.post("/search", …)` and `semantixTenants.loadMore` first on `app.get("/search/load-more", …)`, and in the store config built from the user document add:
+put `semantixTenants.search` first on `app.post("/search", …)`, `semantixTenants.loadMore` first on `app.get("/search/load-more", …)` and `semantixTenants.autocomplete` first on `app.get("/autocomplete", …)` (suggestions then follow the module's rules; without it the existing autocomplete keeps answering), and in the store config built from the user document add:
 
 ```js
 semantix: userDoc.semantix && typeof userDoc.semantix === "object" ? userDoc.semantix : null,

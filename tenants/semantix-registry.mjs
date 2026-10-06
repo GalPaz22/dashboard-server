@@ -1,7 +1,7 @@
 import {readdir,readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
-export const REGISTRY_VERSION=4;
+export const REGISTRY_VERSION=5;
 // Mounts every tenants/<slug>/ folder that has a semantix.module.json. Modules load lazily on the first request.
 // Whether a module answers is a field on the merchant's user document (users.users), which dashboard-server copies into
 // req.store.semantix:  {module:"<slug>", enabled:true, percent:100}
@@ -43,9 +43,10 @@ export function createSemantixTenants({getDb,dir=new URL('./',import.meta.url),n
    catch(e){console.error('[SEMANTIX] failed to load tenant',entry.name,e.message);}}
   return routes;})();
  const chain=kind=>async(req,res,next)=>{let routes;try{routes=await load();}catch(e){console.error('[SEMANTIX]',e.message);return next();}
-  let i=0;const step=()=>i<routes.length?routes[i++][kind](req,res,step):next();return step();};
+  // A module exported before a route kind existed simply has no say in it.
+  let i=0;const step=()=>{while(i<routes.length&&typeof routes[i][kind]!=='function')i++;return i<routes.length?routes[i++][kind](req,res,step):next();};return step();};
  return {
-  search:chain('search'),loadMore:chain('loadMore'),
+  search:chain('search'),loadMore:chain('loadMore'),autocomplete:chain('autocomplete'),
   // Per module: what is loaded, which users switch it on (users.users.semantix), circuit state and counters since start.
   async status(){const routes=await load();let users=[],usersError=null;
    try{users=await (await getDb('users')).collection('users').find({'semantix.module':{$in:routes.map(r=>r.manifest.slug)}},{projection:{_id:0,username:1,dbName:1,semantix:1}}).toArray();}catch(e){usersError=e.message;}

@@ -9809,7 +9809,9 @@ app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, cr
   }
 });
 
-app.get("/autocomplete", async (req, res) => {
+// Stores with a Semantix tenant module switched on get their suggestions from the module (its rules, no model
+// call); every other store, and anything the module passes on, continues below.
+app.get("/autocomplete", semantixTenants.autocomplete, async (req, res) => {
   const { query, session_id } = req.query;
   const { dbName, products: collectionName } = req.store;
 

@@ -9,10 +9,10 @@
   "dbName": "carmella",
   "collection": "products",
   "tokenPrefix": "carmella-v3:",
-  "revision": 12,
-  "profileHash": "425c0391f7fb63db685f476ed6072defba2cba665c222aa1a02023ecd666c6b4",
+  "revision": 14,
+  "profileHash": "986aa26d2cb80790ac92c63e1540ed5f81d4dddee1c18748395c7cbac6614e6d",
   "products": 16690,
-  "builtAt": "2026-10-04T17:35:35.944Z",
+  "builtAt": "2026-10-05T11:58:03.889Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {
