@@ -1,6 +1,6 @@
 # Semantix tenant module — carmella (carmella)
 
-Revision 14, 16690 product cards, built 2026-10-05T11:58:03.889Z.
+Revision 14, 16690 product cards, built 2026-10-06T14:48:34.497Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 

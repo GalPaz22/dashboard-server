@@ -26,6 +26,17 @@ export function createTenantRoutes({getDb,search=createTenantSearch({loadRows:cr
   manifest,
   search(req,res,next){if(!mine(req)||!enabled(req))return next();if(req.body.cursor!==undefined&&req.body.query!==undefined)return res.status(400).json({error:'Cursor cannot be combined with query'});
    const fresh=req.body.cursor===undefined,request=fresh?{query:req.body.query,limit:req.body.limit}:{cursor:req.body.cursor,limit:req.body.limit};return send(req,res,next,request,req.body.modern===true||req.body.modern==='true',fresh);},
+  // GET /autocomplete — suggestions decided by this module's rules (spelling, linked terms, tags, hidden products,
+  // stock policy, the tenant's functions), without a model call. Rows keep the shape the storefront already reads.
+  // A query the module has nothing for, or any failure, falls through to the existing autocomplete.
+  async autocomplete(req,res,next){if(!mine(req)||!enabled(req)||typeof search.suggest!=='function')return next();
+   const query=typeof req.query.query==='string'?req.query.query.trim():'';if(query.length<2||query.length>300)return next();
+   try{const db=await getDb(manifest.dbName),r=await search.suggest({collection:db.collection(req.store.products||manifest.collection||'products'),moduleStore:db.collection('semantix_module'),query,limit:Math.min(Math.max(parseInt(req.query.limit,10)||8,1),24)});
+    if(!r.matches.length)return next();
+    res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(r.revision??manifest.revision));onServed();
+    return res.json(r.matches.map(p=>{const {description,specifications,provenance,issues,badgeCandidates,...rest}=p,name=p.title??p.name;return {...rest,suggestion:name,name,source:'products',author:specifications?.author||rest.author||''};}));}
+   catch(error){console.error('[SEMANTIX '+manifest.slug+'] autocomplete',error.message);if(onError)onError(error);return next();}
+  },
   // Our own paging tokens are always served while the module is loaded, even if it was just switched off.
   loadMore(req,res,next){const token=req.query.token;if(typeof token!=='string'||!token.startsWith(manifest.tokenPrefix))return next();if(!mine(req))return res.status(400).json({error:'Invalid pagination token'});return send(req,res,next,{cursor:token.slice(manifest.tokenPrefix.length),limit:req.query.limit},true,false);}
  };

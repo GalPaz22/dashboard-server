@@ -1,4 +1,5 @@
-import {processProduct,autocomplete} from './core/core.mjs';
+import {processProduct,autocomplete,normalize,stockPolicy} from './core/core.mjs';
+import {applyRanking,wordMatches} from './core/ranking.mjs';
 import {createSearchService} from './core/semantic.mjs';
 import {generate} from './core/gemini.mjs';
 import {processGarmin} from './tenants/garmin/index.mjs';
@@ -33,7 +34,34 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
  if(hooks?.has('transformProduct')){const base=search;let ready=null;
   const prepare=()=>ready??=hooks.transformProducts(products).then(list=>service(list)).catch(e=>{hookError='transformProduct: '+e.message;return base;});
   search=async request=>(await prepare())(request);search.ready=prepare;}
- return {search,autocomplete:query=>autocomplete(products,profile,query),products,profile,index,functions:hooks?.names||[],get functionError(){return hookError;}};
+ // Suggestions while the shopper types. The same rules as search decide (the tenant's rewriteQuery function, spelling
+ // and linked terms, tag / type / price filters, hidden products and the stock policy, the index's order) — but only
+ // from the index: no model call, so it answers in the time of a keystroke. The last word may be unfinished, so the
+ // catalog's own words that begin with it are tried too, most common first. Each list is ordered the way search orders
+ // it — the tenant's ranking rules (boost / bury) for the words it was found with — then products whose title carries
+ // the typed words come before products that only mention them elsewhere, out-of-stock products go last under that
+ // policy, and the tenant's rerank function (if any) has the last word.
+ async function suggest(query,{limit=8}={}){
+  if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
+  let q=typeof query==='string'?query.trim().slice(0,300):'';if(normalize(q).length<2)return {query:q,matches:[],total:0};
+  if(hooks?.has('rewriteQuery'))try{q=String(await hooks.rewriteQuery(q)||q);}catch{}
+  // One row per title: catalogs carry the same product under more than one id.
+  const seen=new Set(),titles=new Set(),matches=[],applied=new Set();
+  const take=(r,words)=>{const ranked=applyRanking(r?.matches||[],profile.rankingRules,words);for(const name of ranked.applied)applied.add(name);
+   for(const p of ranked.matches){const t=normalize(p.title);if(seen.has(p.id)||titles.has(t))continue;seen.add(p.id);titles.add(t);matches.push(p);}};
+  const literal=await retrieve(q);take(literal,q);
+  const words=q.split(/\s+/),last=normalize(words.at(-1)),completed=[];
+  if(matches.length<limit&&last.length>=2&&!last.includes(' ')){
+   const terms=Object.keys(index.terms||{}).filter(t=>t!==last&&t.startsWith(last)).sort((a,b)=>index.terms[b].length-index.terms[a].length||a.localeCompare(b)).slice(0,6);
+   for(const t of terms){if(matches.length>=limit*3)break;const before=matches.length;const full=[...words.slice(0,-1),t].join(' ');take(await retrieve(full),full);if(matches.length>before)completed.push(t);}
+  }
+  const typed=normalize(q).split(' ').filter(Boolean),inTitle=p=>{const title=normalize(p.title).split(' ');return typed.every(w=>title.some(t=>t.startsWith(w))||wordMatches(w,title))?1:0;};
+  let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
+  if(stockPolicy(profile)==='last')ranked=[...ranked.filter(p=>p.stockStatus==='instock'),...ranked.filter(p=>p.stockStatus!=='instock')];
+  const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,24)),q);functions.push('rerank');}catch{}
+  return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
+ }
+ return {search,suggest,autocomplete:query=>autocomplete(products,profile,query),products,profile,index,functions:hooks?.names||[],get functionError(){return hookError;}};
 }
 export function indexDefinition(profile={}) {
  const fields={name:[{type:'string'},{type:'autocomplete'}],id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'},variants:{type:'document',dynamic:false,fields:{id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'}}},description:{type:'string'},specifications:{type:'document',dynamic:true},tenantId:{type:'token'},categories:{type:'token'},tags:{type:'token'},colors:{type:'token'},finishes:{type:'token'},productType:{type:'token'},price:{type:'number'},stockStatus:{type:'token'},hidden:{type:'boolean'}};

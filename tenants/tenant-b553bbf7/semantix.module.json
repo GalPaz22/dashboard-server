@@ -9,10 +9,10 @@
   "dbName": "woo-beautics-shop-co-il",
   "collection": "products",
   "tokenPrefix": "tenant-b553bbf7-v3:",
-  "revision": 16,
-  "profileHash": "70cbe232403bf60adf9348cc7671baa59a0de957257ee6b3055d0f24ed94b67b",
+  "revision": 21,
+  "profileHash": "076d9230c7d4e57063d2f659905b91793a240ec25bd1a50d2127b65e8fa9c23d",
   "products": 3418,
-  "builtAt": "2026-10-01T08:36:52.164Z",
+  "builtAt": "2026-10-06T14:48:36.901Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {

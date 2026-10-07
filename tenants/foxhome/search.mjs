@@ -11,8 +11,9 @@ const LIVE=["price","regularPrice","stockStatus","hidden","status","url","image"
 const strings=v=>Array.isArray(v)?v.map(x=>typeof x==='string'?x:x?.name).filter(x=>typeof x==='string'):typeof v==='string'&&v?[v]:[];
 const number=v=>v===null||v===undefined||v===''?null:Number.isFinite(Number(v))?Number(v):null;
 // Merchant-row fields the engine card lacks but a storefront needs: the platform's own item id (add to cart, tracking),
-// its catalog number, the subtitle and the sale flag. Only these ride along; the engine's own fields win on a clash.
-const SOURCE_FIELDS=['ItemID','Makat','Subtitle','onSale'];
+// its catalog number, the subtitle, the sale flag and sale price, the feed's offer id and the per-format price labels
+// a card template prints (specialLabel: printed / digital / club). Only these ride along; the engine's own fields win on a clash.
+const SOURCE_FIELDS=['ItemID','Makat','Subtitle','onSale','offerId','salePrice','specialLabel'];
 const sources=new WeakMap();
 export function withSource(rows){
  let byId=sources.get(rows);
@@ -23,7 +24,9 @@ export function withSource(rows){
 export function adaptRow(row){
  return {id:String(row.id??row._id),name:row.name||row.title||'',sku:String(row.sku||''),url:row.url||row.permalink,image:row.image||row.images?.[0]?.src||row.images?.[0]||null,
   price:number(row.price),regularPrice:number(row.regularPrice??row.regular_price),currency:row.currency||null,
-  stockStatus:row.stockStatus||row.stock_status||'unknown',status:row.status||'ACTIVE',hidden:row.hidden===true,
+  stockStatus:row.stockStatus||row.stock_status||'unknown',status:row.status||'ACTIVE',
+  // Hidden as the studio imports it: the store's own flag, "not in store", or a catalog visibility of "hidden".
+  hidden:row.hidden===true||row.notInStore===true||row.catalog_visibility==='hidden',
   categories:strings(row.categories?.length?row.categories:row.category),tags:[...new Set([...strings(row.tags),...strings(row.siteTags)])],
   description:String(row.description||row.short_description||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,18000),specifications:row.specifications&&typeof row.specifications==='object'&&!Array.isArray(row.specifications)?row.specifications:{}};
 }
@@ -61,7 +64,7 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
   return edition??=local()??(()=>{throw Error('No published module data');})();
  }
  async function current(collection,store){
-  const e=await published(store),rows=await loadRows(collection),print=e.digest+':'+hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null)]));
+  const e=await published(store),rows=await loadRows(collection),print=e.digest+':'+hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null]));
   if(print!==fingerprint||!runtime){
    const cards=mergeLive(e.snapshot.productCards,rows,e.profile,manifest.tenantId),s=e.snapshot;
    runtime=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile});
@@ -71,7 +74,7 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
   return runtime;
  }
  // Page size when the storefront sends no limit: the tenant's pipeline.pageSize (published with the profile), else 12.
- return async function search({collection,sessions,moduleStore,request}){
+ const search=async function({collection,sessions,moduleStore,request}){
   const limit=request.limit??(await published(moduleStore)).profile?.pipeline?.pageSize??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
   const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
@@ -79,13 +82,19 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
   const attached=matches.map(rt.attach),result={...r,matches:attached,total:matches.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
   return sessions?createSessions(sessions).save(result,limit):{...result,matches:attached.slice(0,limit)};
  };
+ // Suggestions while the shopper types: the same edition and live rows as search, answered from the index only.
+ search.suggest=async({collection,moduleStore,query,limit})=>{
+  const rt=await current(collection,moduleStore);if(typeof rt.suggest!=='function')throw Error('Engine has no suggestions; export the module again');
+  const r=await rt.suggest(query,{limit});return {...r,matches:r.matches.map(rt.attach),revision:rt.revision};
+ };
+ return search;
 }
 // Default Mongo loader: the merchant's products collection, cached for a minute.
 export function createRowLoader({ttlMs=60000,now=Date.now,max=60000}={}){
  let cached=null,expires=0,pending=null;
  return async collection=>{
   if(cached&&now()<expires)return cached;if(pending)return pending;
-  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
+  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
    try{const rows=await cursor.toArray();if(rows.length>max)throw Error('Catalog exceeds safety limit');cached=rows;expires=now()+ttlMs;return rows;}finally{await cursor.close?.();}})();
   try{return await pending;}finally{pending=null;}
  };
