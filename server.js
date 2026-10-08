@@ -9811,7 +9811,36 @@ app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, cr
 
 // Stores with a Semantix tenant module switched on get their suggestions from the module (its rules, no model
 // call); every other store, and anything the module passes on, continues below.
+// Autocomplete rows carry only the current price. A storefront dropdown that shows
+// sales (struck-through regular price) asks for more with ?prices=1: the rows about
+// to be returned then also get the store's product id and, for products selling
+// below their regular price, regularPrice. One extra lookup, only on request.
+async function withAutocompleteRegularPrices(collection, suggestions) {
+  const urls = [...new Set(suggestions.map(item => item.url).filter(Boolean))];
+  if (!urls.length) return suggestions;
+  try {
+    const docs = await collection.find(
+      { url: { $in: urls } },
+      { projection: { _id: 0, url: 1, id: 1, price: 1, regularPrice: 1, regular_price: 1 }, maxTimeMS: 300 }
+    ).toArray();
+    const byUrl = new Map(docs.map(doc => [doc.url, doc]));
+    return suggestions.map(item => {
+      const doc = byUrl.get(item.url);
+      if (!doc) return item;
+      const out = doc.id != null ? { ...item, id: doc.id } : item;
+      const price = Number(item.price ?? doc.price);
+      const regular = Number(doc.regularPrice ?? doc.regular_price);
+      return Number.isFinite(price) && Number.isFinite(regular) && regular > price ? { ...out, regularPrice: regular } : out;
+    });
+  } catch (error) {
+    // Never let the price lookup break autocomplete.
+    console.warn(`[AUTOCOMPLETE] regular-price lookup failed: ${error.message}`);
+    return suggestions;
+  }
+}
+
 app.get("/autocomplete", semantixTenants.autocomplete, async (req, res) => {
+  const wantRegularPrices = req.query.prices === '1';
   const { query, session_id } = req.query;
   const { dbName, products: collectionName } = req.store;
 
@@ -9851,7 +9880,7 @@ app.get("/autocomplete", semantixTenants.autocomplete, async (req, res) => {
 
         if (skuSuggestions.length > 0) {
           console.log(`[AUTOCOMPLETE] SKU match for "${query}": ${skuSuggestions.length} product(s)`);
-          return res.json(skuSuggestions);
+          return res.json(wantRegularPrices ? await withAutocompleteRegularPrices(collection1, skuSuggestions) : skuSuggestions);
         }
         console.log(`[AUTOCOMPLETE] No SKU match for "${query}", falling back to classic autocomplete.`);
       } catch (skuError) {
@@ -10047,7 +10076,7 @@ app.get("/autocomplete", semantixTenants.autocomplete, async (req, res) => {
       // autocomplete personalization applied
     }
 
-    res.json(combinedSuggestions);
+    res.json(wantRegularPrices ? await withAutocompleteRegularPrices(collection1, combinedSuggestions) : combinedSuggestions);
   } catch (error) {
     console.error("Error fetching autocomplete suggestions:", error);
     res.json([]);
