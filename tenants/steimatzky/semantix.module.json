@@ -1,0 +1,24 @@
+{
+  "kind": "semantix-tenant-module",
+  "version": 1,
+  "slug": "steimatzky",
+  "tenantId": "319319f4-d92b-442c-a3c5-20e27c8e2060",
+  "name": "steimatzky",
+  "url": "https://www.steimatzky.co.il",
+  "platform": "woocommerce",
+  "dbName": "steimatzky",
+  "collection": "products",
+  "tokenPrefix": "steimatzky-v3:",
+  "revision": 26,
+  "profileHash": "04f3efd891cd8938890d41a18bb6469a5fc519f12d0148d6347e4913bdbe7962",
+  "products": 35635,
+  "builtAt": "2026-10-14T08:15:52.188Z",
+  "switch": {
+    "field": "users.users.semantix",
+    "value": {
+      "module": "steimatzky",
+      "enabled": true,
+      "percent": 100
+    }
+  }
+}

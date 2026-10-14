@@ -54,3 +54,19 @@ test('category browsing filters before the retrieval limit and exposes categorie
   assert.equal(result.products.length,1);assert.deepEqual(result.products[0].categories,['טופים']);
   assert.deepEqual(result.products[0].tags,['מבריק']);
 });
+
+test('Beautics lookups keep the grid; advice, empty and sold-out searches still open the chat',async()=>{
+  const products=[{id:'1',name:'לק ג׳ל 288',stockStatus:'instock'}];
+  for(const query of ['288','שמן','פרנ','Hard base 59','Basic 25','10 י״ח קרבייט'])
+    assert.equal(await decideTrigger({store,query,payload:{products,metadata:{}}}),null,query);
+  assert.equal((await decideTrigger({store,query:'איזה טופ מתאים?',payload:{products,metadata:{routerRoute:'consultative'}}})).reason,'non_literal');
+  assert.equal((await decideTrigger({store,query:'288',payload:{products:[],metadata:{}}})).reason,'no_results');
+  assert.equal((await decideTrigger({store,query:'288',payload:{products:[{id:'1',name:'לק',stockStatus:'outofstock'}],metadata:{}}})).reason,'out_of_stock');
+  // Another store keeps the old behavior for the same query.
+  assert.equal((await decideTrigger({store:{...store,dbName:'other'},query:'שמן',payload:{products:[{id:'1',name:'סבון',stockStatus:'instock'}],metadata:{}}})).reason,'non_literal');
+});
+
+test('an unreviewed Beautics non-literal search stays in the grid (fails closed)',async()=>{
+  const products=[{id:'1',name:'סבון',stockStatus:'instock'}];
+  assert.equal(await decideTrigger({store,query:'מחפש משהו לאישה מבוגרת',payload:{products,metadata:{}}}),null);
+});

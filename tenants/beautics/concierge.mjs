@@ -22,12 +22,26 @@ export function beauticsConciergeInstructions(store) {
 `;
 }
 
-export function beauticsTriggerDecision(payload, store) {
+const queryWords = query => String(query || '').normalize('NFKC').toLocaleLowerCase('he')
+  .replace(/[֑-ׇ]/g, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(/\s+/).filter(Boolean);
+
+// A product lookup, not a request for advice: a single word ("שמן", "פרנ"), or a
+// short query carrying a number ("288", "Hard base 59", "Basic 25") — shade and
+// model codes. Measured 2026-10-14: these were ~52% of concierge openings and
+// the shoppers behind them wanted the grid.
+export function isBeauticsLookupQuery(query) {
+  const words = queryWords(query);
+  return words.length <= 1 || (words.length <= 3 && words.some(word => /\d/.test(word)));
+}
+
+export function beauticsTriggerDecision(payload, store, query) {
   if (!isBeautics(store) || Array.isArray(payload)) return null;
   const metadata = payload?.metadata;
   if (metadata?.routerRoute === 'consultative') return 'consultative';
   // A successful tenant rule or spelling resolution is an answer, even when
   // the shopper's words differ from the product title (e.g. spreading top).
   if (metadata?.fullMatch === true && payload?.products?.length) return 'resolved';
+  // Lookups keep the grid when it has products; no_results/out_of_stock still apply.
+  if (payload?.products?.length && isBeauticsLookupQuery(query)) return 'lookup';
   return null;
 }

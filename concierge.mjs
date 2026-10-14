@@ -226,13 +226,21 @@ const PRODUCT_PROJECTION = {
   type: 1, category: 1, softCategory: 1, colors: 1, stockStatus: 1,
   stock_status: 1, specialSales: 1, ItemID: 1,
   categories: 1, tags: 1, status: 1, hidden: 1,
+  regularPrice: 1, regular_price: 1,
 };
+
+/** The pre-sale price, only when the product is actually selling below it. */
+function regularPriceOf(product) {
+  const regular = Number(product.regularPrice ?? product.regular_price);
+  return typeof product.price === "number" && Number.isFinite(regular) && regular > product.price ? regular : null;
+}
 
 function shapeProduct(product) {
   return {
     product_id: String(product.id ?? product.ItemID ?? product._id),
     name: product.name || null,
     price: typeof product.price === "number" ? product.price : null,
+    regular_price: regularPriceOf(product),
     in_stock: productInStock(product),
     categories: [...new Set([...asArray(product.category), ...asArray(product.categories)])],
     tags: [...new Set([...asArray(product.softCategory), ...asArray(product.tags)])],
@@ -251,6 +259,7 @@ function cardForProduct(shaped) {
     product_id: shaped.product_id,
     name: shaped.name,
     price: shaped.price,
+    ...(shaped.regular_price ? { regular_price: shaped.regular_price } : {}),
     in_stock: shaped.in_stock,
     url: shaped.url,
     image: shaped.image,
@@ -1075,7 +1084,7 @@ export async function decideTrigger({ payload, query, store, ctx }) {
 
   const products = productsFromPayload(payload);
   if (products === null) return null;
-  const tenantDecision = beauticsTriggerDecision(payload, store);
+  const tenantDecision = beauticsTriggerDecision(payload, store, query);
   if (tenantDecision === 'resolved') return null;
 
   const isComplex = !Array.isArray(payload) && payload?.metadata?.isComplex === true;
@@ -1088,6 +1097,8 @@ export async function decideTrigger({ payload, query, store, ctx }) {
     reason = "no_results";
   } else if (products.every((p) => p && !productInStock(p))) {
     reason = "out_of_stock";
+  } else if (tenantDecision === 'lookup') {
+    return null;
   } else if (!hasLiteral || isComplex) {
     // Products returned only by vector/category fallback are not necessarily
     // an answer to the literal search — but raw word overlap can't tell a
@@ -1100,6 +1111,9 @@ export async function decideTrigger({ payload, query, store, ctx }) {
     if (reviewed && reviewed.should_trigger === false) {
       return null;
     }
+    // Beautics fails closed: an unreviewed query keeps its results instead of
+    // being interrupted by a chat (the review times out at 2.5s).
+    if (!reviewed && isBeautics(store)) return null;
     reason = "non_literal";
   }
   if (!reason) return null;
