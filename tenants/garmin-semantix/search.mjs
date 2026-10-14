@@ -53,7 +53,7 @@ export async function loadEdition(store,head){
 }
 const local=()=>{const has=n=>existsSync(new URL(n,import.meta.url));return has('./profile.json')&&has('./snapshot.json')?{revision:manifest.revision,profile:read('./profile.json'),snapshot:read('./snapshot.json'),digest:'local'}:null;};
 export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
- let fingerprint=null,runtime=null,edition=null,checkedAt=-Infinity,checking=null;
+ let fingerprint=null,runtime=null,edition=null,checkedAt=-Infinity,checking=null,building=null;
  async function published(store){
   if(store&&now()-checkedAt>=checkMs)checking??=(async()=>{
    try{const head=await store.findOne({_id:manifest.slug+':head'},{projection:{digest:1,parts:1,revision:1}});
@@ -65,13 +65,18 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
  }
  async function current(collection,store){
   const e=await published(store),rows=await loadRows(collection),print=e.digest+':'+hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null]));
-  if(print!==fingerprint||!runtime){
-   const cards=mergeLive(e.snapshot.productCards,rows,e.profile,manifest.tenantId),s=e.snapshot;
-   runtime=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile});
-   runtime.revision=e.revision;fingerprint=print;
-  }
+  // The first build answers this request. Later changes (a new edition, live price or stock) are built in the background
+  // while the previous runtime keeps answering, so no shopper waits for a rebuild of the whole catalog.
+  if(!runtime)build(e,rows,print);
+  else if(print!==fingerprint&&!building)building=new Promise(r=>setTimeout(r,0)).then(()=>build(e,rows,print))
+   .catch(err=>console.error('[SEMANTIX '+manifest.slug+'] rebuild failed, keeping revision',runtime.revision,'-',err.message)).finally(()=>{building=null;});
   runtime.attach=withSource(rows);
   return runtime;
+ }
+ function build(e,rows,print){
+  const cards=mergeLive(e.snapshot.productCards,rows,e.profile,manifest.tenantId),s=e.snapshot;
+  const next=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile});
+  next.revision=e.revision;next.attach=withSource(rows);runtime=next;fingerprint=print;
  }
  // Page size when the storefront sends no limit: the tenant's pipeline.pageSize (published with the profile), else 12.
  const search=async function({collection,sessions,moduleStore,request}){
@@ -89,13 +94,19 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
  };
  return search;
 }
-// Default Mongo loader: the merchant's products collection, cached for a minute.
+// Default Mongo loader: the merchant's products collection. Only the first load makes a search wait: rows older than ttlMs
+// are refreshed in the background while the cached ones keep answering (a failed refresh keeps them).
 export function createRowLoader({ttlMs=60000,now=Date.now,max=60000}={}){
  let cached=null,expires=0,pending=null;
  return async collection=>{
-  if(cached&&now()<expires)return cached;if(pending)return pending;
-  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
-   try{const rows=await cursor.toArray();if(rows.length>max)throw Error('Catalog exceeds safety limit');cached=rows;expires=now()+ttlMs;return rows;}finally{await cursor.close?.();}})();
-  try{return await pending;}finally{pending=null;}
+  if(cached){if(now()>=expires&&!pending)load(collection).catch(e=>console.error('[SEMANTIX '+manifest.slug+'] catalog refresh failed -',e.message));return cached;}
+  return load(collection);
  };
+ function load(collection){
+  if(pending)return pending;
+  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
+   try{const rows=await cursor.toArray();if(rows.length>max)throw Error('Catalog exceeds safety limit');cached=rows;expires=now()+ttlMs;return rows;}finally{await cursor.close?.();}})()
+   .finally(()=>{pending=null;});
+  return pending;
+ }
 }
