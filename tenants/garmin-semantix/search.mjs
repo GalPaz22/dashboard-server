@@ -52,8 +52,10 @@ export async function loadEdition(store,head){
  return {...JSON.parse(gunzipSync(gz).toString('utf8')),digest:head.digest};
 }
 const local=()=>{const has=n=>existsSync(new URL(n,import.meta.url));return has('./profile.json')&&has('./snapshot.json')?{revision:manifest.revision,profile:read('./profile.json'),snapshot:read('./snapshot.json'),digest:'local'}:null;};
-export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
- let fingerprint=null,runtime=null,edition=null,checkedAt=-Infinity,checking=null,building=null;
+// liveRebuildMs: a rebuild of the whole runtime costs seconds of CPU on a large catalog and blocks every search on the
+// server meanwhile, so live price/stock changes are folded in at most this often (a new edition is built at once).
+export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=600000,now=Date.now}={}){
+ let fingerprint=null,runtime=null,edition=null,checkedAt=-Infinity,checking=null,building=null,builtDigest=null,builtAt=-Infinity;
  async function published(store){
   if(store&&now()-checkedAt>=checkMs)checking??=(async()=>{
    try{const head=await store.findOne({_id:manifest.slug+':head'},{projection:{digest:1,parts:1,revision:1}});
@@ -68,7 +70,7 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
   // The first build answers this request. Later changes (a new edition, live price or stock) are built in the background
   // while the previous runtime keeps answering, so no shopper waits for a rebuild of the whole catalog.
   if(!runtime)build(e,rows,print);
-  else if(print!==fingerprint&&!building)building=new Promise(r=>setTimeout(r,0)).then(()=>build(e,rows,print))
+  else if(print!==fingerprint&&!building&&(e.digest!==builtDigest||now()-builtAt>=liveRebuildMs))building=new Promise(r=>setTimeout(r,0)).then(()=>build(e,rows,print))
    .catch(err=>console.error('[SEMANTIX '+manifest.slug+'] rebuild failed, keeping revision',runtime.revision,'-',err.message)).finally(()=>{building=null;});
   runtime.attach=withSource(rows);
   return runtime;
@@ -76,7 +78,7 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
  function build(e,rows,print){
   const cards=mergeLive(e.snapshot.productCards,rows,e.profile,manifest.tenantId),s=e.snapshot;
   const next=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile});
-  next.revision=e.revision;next.attach=withSource(rows);runtime=next;fingerprint=print;
+  next.revision=e.revision;next.attach=withSource(rows);runtime=next;fingerprint=print;builtDigest=e.digest;builtAt=now();
  }
  // Page size when the storefront sends no limit: the tenant's pipeline.pageSize (published with the profile), else 12.
  const search=async function({collection,sessions,moduleStore,request}){
@@ -95,8 +97,9 @@ export function createTenantSearch({loadRows,checkMs=30000,now=Date.now}={}){
  return search;
 }
 // Default Mongo loader: the merchant's products collection. Only the first load makes a search wait: rows older than ttlMs
-// are refreshed in the background while the cached ones keep answering (a failed refresh keeps them).
-export function createRowLoader({ttlMs=60000,now=Date.now,max=60000}={}){
+// are refreshed in the background while the cached ones keep answering (a failed refresh keeps them). Every refresh
+// decodes the whole collection, so it runs every few minutes, not every minute.
+export function createRowLoader({ttlMs=300000,now=Date.now,max=60000}={}){
  let cached=null,expires=0,pending=null;
  return async collection=>{
   if(cached){if(now()>=expires&&!pending)load(collection).catch(e=>console.error('[SEMANTIX '+manifest.slug+'] catalog refresh failed -',e.message));return cached;}
