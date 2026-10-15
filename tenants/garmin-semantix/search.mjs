@@ -53,8 +53,8 @@ export async function loadEdition(store,head){
 }
 const local=()=>{const has=n=>existsSync(new URL(n,import.meta.url));return has('./profile.json')&&has('./snapshot.json')?{revision:manifest.revision,profile:read('./profile.json'),snapshot:read('./snapshot.json'),digest:'local'}:null;};
 // liveRebuildMs: a rebuild of the whole runtime costs seconds of CPU on a large catalog and blocks every search on the
-// server meanwhile, so live price/stock changes are folded in at most this often (a new edition is built at once).
-export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=600000,now=Date.now}={}){
+// server meanwhile, so live price/stock changes are folded in twice a day (a new edition is built at once).
+export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=43200000,now=Date.now}={}){
  let fingerprint=null,runtime=null,edition=null,checkedAt=-Infinity,checking=null,building=null,builtDigest=null,builtAt=-Infinity;
  async function published(store){
   if(store&&now()-checkedAt>=checkMs)checking??=(async()=>{
@@ -98,8 +98,8 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=600000,
 }
 // Default Mongo loader: the merchant's products collection. Only the first load makes a search wait: rows older than ttlMs
 // are refreshed in the background while the cached ones keep answering (a failed refresh keeps them). Every refresh
-// decodes the whole collection, so it runs every few minutes, not every minute.
-export function createRowLoader({ttlMs=300000,now=Date.now,max=60000}={}){
+// decodes the whole collection; it runs twice a day, like the live rebuild that uses it.
+export function createRowLoader({ttlMs=43200000,now=Date.now,max=60000}={}){
  let cached=null,expires=0,pending=null;
  return async collection=>{
   if(cached){if(now()>=expires&&!pending)load(collection).catch(e=>console.error('[SEMANTIX '+manifest.slug+'] catalog refresh failed -',e.message));return cached;}
