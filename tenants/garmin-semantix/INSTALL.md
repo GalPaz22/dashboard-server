@@ -1,6 +1,6 @@
 # Semantix tenant module — garmin (garmin-semantix)
 
-Revision 19, 1169 product cards, built 2026-10-06T14:48:33.358Z.
+Revision 23, 1169 product cards, built 2026-10-15T17:04:12.703Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 

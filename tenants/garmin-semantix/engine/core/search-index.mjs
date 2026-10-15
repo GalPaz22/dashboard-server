@@ -1,7 +1,7 @@
 import {normalize,planQuery,matchesScopedAliases,sellable} from './core.mjs';
 import {hash} from './hash.mjs';
 // Bump when tokenization changes so a saved index is rebuilt instead of reused.
-export const TOKENIZER=2;
+export const TOKENIZER=3;
 export function buildSearchIndex(products,version) {
   const terms=Object.create(null),identifiers=Object.create(null);
   for(const p of products){const values=[p.id,p.sku,p.mpn,p.gtin,...(p.variants||[]).filter(v=>v.stockStatus!=='outofstock').flatMap(v=>[v.id,v.sku,v.mpn,v.gtin])];for(const k of new Set(values.filter(Boolean).map(normalize)))(identifiers[k]??=[]).push(p.id);
