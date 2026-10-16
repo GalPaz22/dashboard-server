@@ -4,8 +4,9 @@ import { createHash } from 'node:crypto';
 // ones after all in-stock results; "show" shows them in their natural place. Hidden products are never shown.
 export const stockPolicy=client=>['last','show'].includes(client?.pipeline?.outOfStock)?client.pipeline.outOfStock:'hide';
 export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||stockPolicy(client)!=='hide');
-export const normalize = value => String(value ?? '').normalize('NFKC').toLowerCase()
-  .normalize('NFD').replace(/\p{M}/gu,'').replace(/[®™]/g,'')
+// Trademark signs go before NFKC, which would spell ™ as "TM" and glue it to the name ("Enduro™" → "endurotm").
+export const normalize = value => String(value ?? '').replace(/[®™℠]/g,'').normalize('NFKC').toLowerCase()
+  .normalize('NFD').replace(/\p{M}/gu,'')
   .replace(/[׳״'’`"“”„«»″‟]/g, '').replace(/[-–—()[\],:;!?]/g, ' ').replace(/\s+/g, ' ').trim();
 const list = value => Array.isArray(value) ? value.filter(x => typeof x === 'string') : [];
 export function productUrl(value) {
