@@ -3,7 +3,28 @@ import { createHash } from 'node:crypto';
 // Tenant stock policy (pipeline.outOfStock): "hide" (default) shows only in-stock products; "last" also shows out-of-stock
 // ones after all in-stock results; "show" shows them in their natural place. Hidden products are never shown.
 export const stockPolicy=client=>['last','show'].includes(client?.pipeline?.outOfStock)?client.pipeline.outOfStock:'hide';
-export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||stockPolicy(client)!=='hide');
+// An out-of-stock product without a price is not shown under any policy: the store no longer sells it.
+export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||(stockPolicy(client)!=='hide'&&Number(p.price)>0));
+// Order for the "last" policy: out-of-stock products follow every in-stock one, keeping the order inside each group —
+// except a product whose title is exactly what the shopper typed: exact titles lead (in-stock ones first), so a short
+// title ("הסערה") is not buried behind dozens of in-stock books that merely contain the word. A title written
+// "name / author" counts by its name too.
+export function stockLast(matches,query){
+ const q=normalize(query),inStock=p=>p.stockStatus==='instock';
+ const exact=p=>{const t=String(p.title||p.name||'');return !!q&&(normalize(t)===q||normalize(t.split(' / ')[0])===q);};
+ if(!matches.some(p=>!inStock(p)))return matches;
+ const lead=matches.filter(exact),rest=matches.filter(p=>!exact(p));
+ return [...lead.filter(inStock),...lead.filter(p=>!inStock(p)),...rest.filter(inStock),...rest.filter(p=>!inStock(p))];
+}
+// Out-of-stock rows the store has retired (a dead product page, not "temporarily missing"), so they are imported as
+// hidden: no price, or — when the catalog's syncs stamp lastSeenAt on most rows — not seen in the latest sync (older
+// than the newest stamp by more than graceMs). In-stock rows are never retired here.
+export function retiredRows(rows,{graceMs=3*864e5}={}){
+ const at=v=>v==null||v===''?NaN:new Date(v).getTime();let newest=-Infinity,stamped=0;
+ for(const r of rows){const t=at(r.lastSeenAt);if(Number.isFinite(t)){stamped++;if(t>newest)newest=t;}}
+ const tracked=rows.length>0&&stamped>=rows.length/2;
+ return r=>(r.stockStatus||r.stock_status)==='outofstock'&&(!(Number(r.price)>0)||(tracked&&!(at(r.lastSeenAt)>=newest-graceMs)));
+}
 // Trademark signs go before NFKC, which would spell ™ as "TM" and glue it to the name ("Enduro™" → "endurotm").
 export const normalize = value => String(value ?? '').replace(/[®™℠]/g,'').normalize('NFKC').toLowerCase()
   .normalize('NFD').replace(/\p{M}/gu,'')

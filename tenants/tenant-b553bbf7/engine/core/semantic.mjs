@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {applyRanking} from './ranking.mjs';
-import { normalize, planQuery, search, matchesScopedAliases, sellable, stockPolicy } from './core.mjs';
+import { normalize, planQuery, search, matchesScopedAliases, sellable, stockPolicy, stockLast } from './core.mjs';
 import { createSpellingResolver } from './spelling.mjs';
 import { createLightRouter } from './router.mjs';
 
@@ -58,12 +58,13 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
       metadata:{...s.result.metadata,cached}};
   }
   // Every path (lexical, spelling, router, LLM, alternatives) ends here: the tenant's ranking rules order the final list,
-  // then the tenant's own rerank function (if any) has the last word. A failing function never breaks the search.
+  // then the tenant's own rerank function (if any). A failing function never breaks the search.
   async function store(key,result){
     const ranked=applyRanking(result.matches,client.rankingRules,key);if(ranked.applied.length)result={...result,matches:ranked.matches,metadata:{...result.metadata,ranking:ranked.applied}};
-    // "last": out-of-stock products follow every in-stock one, keeping the order inside each group.
-    if(stockPolicy(client)==='last'&&result.matches.some(p=>p.stockStatus!=='instock'))result={...result,matches:[...result.matches.filter(p=>p.stockStatus==='instock'),...result.matches.filter(p=>p.stockStatus!=='instock')]};
     if(hooks?.has('rerank')&&result.matches.length){try{result={...result,matches:await hooks.rerank(result.matches,key),metadata:{...result.metadata,functions:[...(result.metadata?.functions||[]),'rerank']}};}catch(e){result={...result,metadata:{...result.metadata,functionErrors:[...(result.metadata?.functionErrors||[]),'rerank: '+e.message]}};}}
+    // "last" is a guarantee, so it goes after the function too: out-of-stock products follow every in-stock one, except an
+    // exact title match (stockLast). The sort is stable — the rules' and the function's order holds within each part.
+    if(stockPolicy(client)==='last'&&result.matches.some(p=>p.stockStatus!=='instock'))result={...result,matches:stockLast(result.matches,key)};
     return save(key,result);
   }
   function save(key,result){

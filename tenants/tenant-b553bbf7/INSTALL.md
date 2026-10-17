@@ -1,6 +1,6 @@
 # Semantix tenant module — ביוטיקס שופ (tenant-b553bbf7)
 
-Revision 24, 3418 product cards, built 2026-10-16T09:08:52.927Z.
+Revision 24, 3418 product cards, built 2026-10-17T07:56:22.565Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 
