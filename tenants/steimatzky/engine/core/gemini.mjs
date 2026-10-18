@@ -22,5 +22,6 @@ export async function generate({stage,prompt,schema,signal,model:requested,think
   const result=await ai.models.generateContent({model,contents:prompt,
     config:{responseMimeType:'application/json',responseJsonSchema:schema,temperature:/^gemini-3/.test(model)?1:0,maxOutputTokens:deep?16000:stage==='route'?600:stage==='select'?2400:['enrich','classify','merchant-facts'].includes(stage)?6000:1200,thinkingConfig:/^gemini-3/.test(model)?{thinkingLevel:deep?apiThinking(THINKING_LEVELS.includes(thinking)?thinking:searchThinking(model),model):'minimal'}:{thinkingBudget:deep?4096:0},abortSignal:signal,httpOptions:{timeout:deep?90000:45000,retryOptions:{attempts:1}}}});
   if(result.candidates?.[0]?.finishReason==='MAX_TOKENS')throw Error('Search/model output truncated');
+  if(!result.text)throw Error(`Search/model returned no output (${result.candidates?.[0]?.finishReason||result.promptFeedback?.blockReason||'no candidate'})`);
   return {model,data:JSON.parse(result.text),usage:result.usageMetadata?{inputTokens:result.usageMetadata.promptTokenCount,outputTokens:result.usageMetadata.candidatesTokenCount}:null};
 }

@@ -1,4 +1,4 @@
-import {processProduct,autocomplete,normalize,stockPolicy} from './core/core.mjs';
+import {processProduct,autocomplete,normalize,stockPolicy,stockLast} from './core/core.mjs';
 import {applyRanking,wordMatches} from './core/ranking.mjs';
 import {createSearchService} from './core/semantic.mjs';
 import {generate} from './core/gemini.mjs';
@@ -57,8 +57,9 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   }
   const typed=normalize(q).split(' ').filter(Boolean),inTitle=p=>{const title=normalize(p.title).split(' ');return typed.every(w=>title.some(t=>t.startsWith(w))||wordMatches(w,title))?1:0;};
   let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
-  if(stockPolicy(profile)==='last')ranked=[...ranked.filter(p=>p.stockStatus==='instock'),...ranked.filter(p=>p.stockStatus!=='instock')];
   const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,24)),q);functions.push('rerank');}catch{}
+  // Same as search: out-of-stock last is applied after the tenant's function.
+  if(stockPolicy(profile)==='last')ranked=stockLast(ranked,q);
   return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
  }
  return {search,suggest,autocomplete:query=>autocomplete(products,profile,query),products,profile,index,functions:hooks?.names||[],get functionError(){return hookError;}};

@@ -2,7 +2,7 @@ import {readFileSync,existsSync} from 'node:fs';
 import {gunzipSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
 import {createDraftRuntime} from './engine/runtime.mjs';
-import {processProduct} from './engine/core/core.mjs';
+import {processProduct,retiredRows} from './engine/core/core.mjs';
 import {hash} from './engine/core/hash.mjs';
 import {createSessions} from './sessions.mjs';
 const read=name=>JSON.parse(readFileSync(new URL(name,import.meta.url),'utf8'));
@@ -21,18 +21,19 @@ export function withSource(rows){
  return p=>{const s=byId.get(String(p.id))||byId.get(String(p.id).split(':').pop());return s?{...s,...p}:p;};
 }
 // A merchant Mongo row in the engine's raw shape (as the studio imports existing clients).
-export function adaptRow(row){
+export function adaptRow(row,retired=()=>false){
  return {id:String(row.id??row._id),name:row.name||row.title||'',sku:String(row.sku||''),url:row.url||row.permalink,image:row.image||row.images?.[0]?.src||row.images?.[0]||null,
   price:number(row.price),regularPrice:number(row.regularPrice??row.regular_price),currency:row.currency||null,
   stockStatus:row.stockStatus||row.stock_status||'unknown',status:row.status||'ACTIVE',
-  // Hidden as the studio imports it: the store's own flag, "not in store", or a catalog visibility of "hidden".
-  hidden:row.hidden===true||row.notInStore===true||row.catalog_visibility==='hidden',
+  // Hidden as the studio imports it: the store's own flag, "not in store", a catalog visibility of "hidden", or an
+  // out-of-stock row the store has retired (no price, or missed by the catalog's latest sync — retiredRows).
+  hidden:row.hidden===true||row.notInStore===true||row.catalog_visibility==='hidden'||retired(row),
   categories:strings(row.categories?.length?row.categories:row.category),tags:[...new Set([...strings(row.tags),...strings(row.siteTags)])],
   description:String(row.description||row.short_description||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,18000),specifications:row.specifications&&typeof row.specifications==='object'&&!Array.isArray(row.specifications)?row.specifications:{}};
 }
 // Enriched snapshot cards with live commercial fields; new products are processed with the same profile.
 export function mergeLive(cards,rows,profile,tenantId){
- const live=new Map(rows.map(r=>{const a=adaptRow(r);return [a.id,a];})),out=[],seen=new Set();
+ const retired=retiredRows(rows),live=new Map(rows.map(r=>{const a=adaptRow(r,retired);return [a.id,a];})),out=[],seen=new Set();
  for(const c of cards){const key=String(c.id).split(':').pop(),row=live.get(String(c.id))||live.get(key);if(!row)continue;seen.add(row.id);
   const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];out.push(next);}
  const client={...profile,tenantId,version:'semantix-mini',publishedStatuses:['ACTIVE','publish']};
@@ -66,7 +67,7 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
   return edition??=local()??(()=>{throw Error('No published module data');})();
  }
  async function current(collection,store){
-  const e=await published(store),rows=await loadRows(collection),print=e.digest+':'+hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null]));
+  const e=await published(store),rows=await loadRows(collection),print=e.digest+':'+hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null]));
   // The first build answers this request. Later changes (a new edition, live price or stock) are built in the background
   // while the previous runtime keeps answering, so no shopper waits for a rebuild of the whole catalog.
   if(!runtime)build(e,rows,print);
@@ -107,7 +108,7 @@ export function createRowLoader({ttlMs=43200000,now=Date.now,max=60000}={}){
  };
  function load(collection){
   if(pending)return pending;
-  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
+  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,lastSeenAt:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
    try{const rows=await cursor.toArray();if(rows.length>max)throw Error('Catalog exceeds safety limit');cached=rows;expires=now()+ttlMs;return rows;}finally{await cursor.close?.();}})()
    .finally(()=>{pending=null;});
   return pending;

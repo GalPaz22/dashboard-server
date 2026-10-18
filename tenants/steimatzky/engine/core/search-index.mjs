@@ -1,7 +1,7 @@
 import {normalize,planQuery,matchesScopedAliases,sellable} from './core.mjs';
 import {hash} from './hash.mjs';
 // Bump when tokenization changes so a saved index is rebuilt instead of reused.
-export const TOKENIZER=2;
+export const TOKENIZER=3;
 export function buildSearchIndex(products,version) {
   const terms=Object.create(null),identifiers=Object.create(null);
   for(const p of products){const values=[p.id,p.sku,p.mpn,p.gtin,...(p.variants||[]).filter(v=>v.stockStatus!=='outofstock').flatMap(v=>[v.id,v.sku,v.mpn,v.gtin])];for(const k of new Set(values.filter(Boolean).map(normalize)))(identifiers[k]??=[]).push(p.id);
@@ -54,7 +54,8 @@ export function resolveTerm(index,term,{relax=false}={}){
   if(!stem&&!chosen.length)return {kind:'none',postings:own};
   const postings=new Map(own);const add=(t,cost)=>{for(const id of index.terms[t])if(!postings.has(id)||postings.get(id)>cost)postings.set(id,cost);};
   if(stem)add(stem,1);for(const {t,edits} of chosen)add(t,1+edits);
-  return {kind:stem&&!chosen.length?'prefix':chosen.length&&!stem?'fuzzy':'prefix+fuzzy',to:[...(stem?[stem]:[]),...chosen.map(c=>c.t)],...(chosen.length&&{edits:least}),postings};
+  // relaxed: the term is a real catalog word that was approximated only because the words do not occur together.
+  return {kind:stem&&!chosen.length?'prefix':chosen.length&&!stem?'fuzzy':'prefix+fuzzy',to:[...(stem?[stem]:[]),...chosen.map(c=>c.t)],...(chosen.length&&{edits:least}),...(relax&&own.size&&{relaxed:true}),postings};
 }
 export function createIndexRetriever(products,client,index) {
   if(index.contentHash!==hash(products))throw Error('האינדקס אינו תואם לגרסת המוצרים');
@@ -71,7 +72,7 @@ export function createIndexRetriever(products,client,index) {
     if(!best.matches.length&&resolved.length>1)for(const [i,term] of plan.terms.entries()){if(resolved[i].kind!=='exact')continue;const relaxed=resolveTerm(index,term,{relax:true});if(relaxed.kind==='none')continue;
       const attempt=run(resolved.map((r,j)=>j===i?relaxed:r));if(attempt.matches.length&&(!best.matches.length||(relaxed.edits||0)<(best.relaxedEdits||0)||(relaxed.edits||0)===(best.relaxedEdits||0)&&attempt.matches.length>best.matches.length))best={...attempt,relaxedEdits:relaxed.edits||0};}
     const {penalty}=best;let {matches}=best;
-    const corrections=best.resolved.flatMap((r,i)=>r.kind!=='exact'&&r.kind!=='none'?[{term:plan.terms[i],kind:r.kind,to:r.to,...(r.edits&&{edits:r.edits})}]:[]);
+    const corrections=best.resolved.flatMap((r,i)=>r.kind!=='exact'&&r.kind!=='none'?[{term:plan.terms[i],kind:r.kind,to:r.to,...(r.edits&&{edits:r.edits}),...(r.relaxed&&{relaxed:true})}]:[]);
     if(corrections.length)plan.corrections=corrections;
     const rankTerms=plan.terms.length?plan.terms:(plan.scopedAliases||[]).map(r=>normalize(r.term)).filter(Boolean);
     const titleHits=p=>{const words=new Set(normalize(p.title).split(' ').filter(Boolean));return rankTerms.reduce((n,t)=>n+(words.has(t)?1:0),0);};

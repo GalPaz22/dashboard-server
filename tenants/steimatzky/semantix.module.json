@@ -9,10 +9,10 @@
   "dbName": "steimatzky",
   "collection": "products",
   "tokenPrefix": "steimatzky-v3:",
-  "revision": 26,
-  "profileHash": "04f3efd891cd8938890d41a18bb6469a5fc519f12d0148d6347e4913bdbe7962",
+  "revision": 32,
+  "profileHash": "dcd6d7d9f6815e6e6d16d047275b78ff5b99669aac8cc6837bfa4b832bf9d271",
   "products": 35635,
-  "builtAt": "2026-10-14T08:15:52.188Z",
+  "builtAt": "2026-10-18T07:22:47.120Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {
