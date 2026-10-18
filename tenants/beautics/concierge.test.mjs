@@ -70,3 +70,15 @@ test('an unreviewed Beautics non-literal search stays in the grid (fails closed)
   const products=[{id:'1',name:'סבון',stockStatus:'instock'}];
   assert.equal(await decideTrigger({store,query:'מחפש משהו לאישה מבוגרת',payload:{products,metadata:{}}}),null);
 });
+
+test('research results stay lean for the model and the prompt asks for batched detail',async()=>{
+  const collection={find(){return {sort(){return this},limit(){return this},async toArray(){return [
+    {id:'1',name:'בייס',categories:['בייסים'],status:'ACTIVE',stockStatus:'instock',price:69,url:'https://x/1',image:'https://x/1.jpg',description:'בייס מחזק'},
+  ]}}}};
+  const result=await searchCatalog({categories:['בייסים']},{store,deps:{getMongoClient:async()=>({db:()=>({collection:()=>collection})})}});
+  const [product]=result.products;
+  assert.equal(product.description,'בייס מחזק');assert.equal(product.url,undefined);assert.equal(product.image,undefined);
+  assert.equal(product.colors,undefined);assert.equal(product.on_sale,undefined);
+  const prompt=buildSystemPrompt(store);
+  assert.ok(prompt.includes('product_ids'));assert.ok(!prompt.includes('קרא get_product עבור המוצרים הנבחרים'));
+});
