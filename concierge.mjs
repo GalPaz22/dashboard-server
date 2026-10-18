@@ -1459,7 +1459,67 @@ ${serializeToolResult(prefetched)}
 
 const analyticsIndexed = new Set();
 
-async function recordConversation(deps, store, conversation, extra = {}) {
+/**
+ * Collects one turn as the shopper saw it, for the saved transcript: the full
+ * streamed answer (a text_reset discards what came before it, exactly as the
+ * widget does), the cards present_products put on screen, and the tool steps.
+ */
+export function createTurnRecorder({ message, opening, trigger }) {
+  const startedAt = new Date();
+  let reply = "";
+  const products = [];
+  const tools = [];
+  let error = null;
+  return {
+    onEvent(event) {
+      if (event.type === "text") reply += event.text || "";
+      else if (event.type === "text_reset") reply = "";
+      else if (event.type === "error") error = event.message || "error";
+      else if (event.type === "tool_end") {
+        tools.push({ tool: event.tool, ms: event.ms ?? null, ...(event.error ? { error: event.error } : {}) });
+        if (event.tool === "present_products") products.push(...(event.products || []));
+      }
+    },
+    turn({ stopped = null, usage = null, rejected = null } = {}) {
+      const seen = new Set();
+      return {
+        at: startedAt,
+        finished_at: new Date(),
+        ms: Date.now() - startedAt.getTime(),
+        // The shopper's own words, or — for the auto-opening turn — the search
+        // that opened the chat.
+        ...(opening
+          ? { opening: true, query: trigger?.query || null, reason: trigger?.reason || null }
+          : { message }),
+        reply,
+        products: products
+          .filter((p) => p?.product_id && !seen.has(p.product_id) && seen.add(p.product_id))
+          .map((p) => ({ product_id: p.product_id, name: p.name ?? null, price: p.price ?? null, url: p.url ?? null, image: p.image ?? null, ...(p.match_reason ? { match_reason: p.match_reason } : {}) })),
+        tools,
+        ...(error ? { error } : {}),
+        ...(stopped ? { stopped } : {}),
+        ...(rejected ? { rejected } : {}),
+        ...(usage ? { rounds: usage.rounds || 0 } : {}),
+      };
+    },
+  };
+}
+
+/** A turn that never reached the model (junk input): add it to the record, touch nothing else. */
+async function appendTranscriptTurn(deps, store, conversationId, turn) {
+  try {
+    const client = await deps.getMongoClient();
+    await client.db(store.dbName).collection("concierge_conversations").updateOne(
+      { conversation_id: conversationId },
+      { $set: { updated_at: new Date() }, $setOnInsert: { conversation_id: conversationId, created_at: new Date() }, $push: { transcript: turn } },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.warn("[CONCIERGE] transcript write failed:", err.message);
+  }
+}
+
+async function recordConversation(deps, store, conversation, extra = {}, turn = null) {
   try {
     const client = await deps.getMongoClient();
     const db = client.db(store.dbName);
@@ -1488,6 +1548,9 @@ async function recordConversation(deps, store, conversation, extra = {}) {
           ...extra,
         },
         $setOnInsert: { created_at: new Date() },
+        // Every turn in full — what the shopper wrote and everything they were
+        // shown. The Redis copy expires after a few hours; this one is the record.
+        ...(turn ? { $push: { transcript: turn } } : {}),
       },
       { upsert: true }
     );
@@ -1580,14 +1643,23 @@ export function mountConcierge(app, deps) {
       return res.status(400).json({ error: "message_too_long", max_chars: MAX_MESSAGE_CHARS });
     }
     const message = sanitizeShopperText(req.body?.message);
+    // The transcript keeps what the shopper actually typed (≤ 4×MAX_MESSAGE_CHARS,
+    // checked above); the model gets the sanitized, capped form.
+    const typed = typeof req.body?.message === "string" && message ? req.body.message.trim() : "";
 
     // Obvious junk gets a canned Hebrew reply — no model call, no tokens spent,
     // and nothing hostile ever reaches the tools.
     const garbage = message ? looksLikeGarbage(message) : null;
     if (garbage) {
       console.log(`[CONCIERGE] rejected junk input (${garbage}) for ${store.dbName}`);
+      const junkConversation = sanitizeId(req.body?.conversation_id);
+      if (junkConversation) {
+        const recorder = createTurnRecorder({ message: typed });
+        recorder.onEvent({ type: "text", text: GARBAGE_REPLIES[garbage] || GARBAGE_REPLIES.no_letters });
+        appendTranscriptTurn(deps, store, junkConversation, recorder.turn({ rejected: garbage })).catch(() => {});
+      }
       return res.status(200).json({
-        conversation_id: sanitizeId(req.body?.conversation_id) || null,
+        conversation_id: junkConversation || null,
         reply: GARBAGE_REPLIES[garbage] || GARBAGE_REPLIES.no_letters,
         products: [],
         rejected: garbage,
@@ -1678,6 +1750,7 @@ export function mountConcierge(app, deps) {
 
     const ctx = { store, deps };
     const signal = { aborted: false, onAbort: null };
+    const recorder = createTurnRecorder({ message: typed, opening, trigger: conversation.trigger });
 
     // Watch the *response*, not the request: in Node 18+ the request emits
     // 'close' as soon as its body has been consumed, which is long before the
@@ -1716,6 +1789,7 @@ export function mountConcierge(app, deps) {
           ctx,
           signal,
           onEvent: (event) => {
+            recorder.onEvent(event);
             if (signal.aborted) return;
             const { type, ...rest } = event;
             sse(res, type, rest);
@@ -1724,6 +1798,7 @@ export function mountConcierge(app, deps) {
         recordTurnCost(conversation, turnResult?.usage);
       } catch (err) {
         console.error("[CONCIERGE] chat failed:", err);
+        recorder.onEvent({ type: "error", message: err.message });
         if (!signal.aborted) sse(res, "error", { message: "אירעה תקלה זמנית. אפשר לנסות שוב." });
       } finally {
         clearInterval(keepalive);
@@ -1731,7 +1806,9 @@ export function mountConcierge(app, deps) {
       }
 
       await storeSet(deps, conversationKey(conversation.id), conversation, CONVERSATION_TTL_SECONDS);
-      recordConversation(deps, store, conversation).catch(() => {});
+      recordConversation(deps, store, conversation, {}, recorder.turn({
+        stopped: signal.aborted ? "aborted" : turnResult?.stopped, usage: turnResult?.usage,
+      })).catch(() => {});
       // Always close the stream. A half-open SSE response is worse than an
       // error: the browser sits on it until its own body timeout fires.
       if (!res.writableEnded) res.end();
@@ -1750,7 +1827,9 @@ export function mountConcierge(app, deps) {
         ctx,
         signal,
         onEvent: (event) => {
+          recorder.onEvent(event);
           if (event.type === "text") text += event.text;
+          else if (event.type === "text_reset") text = "";
           else if (event.type === "tool_end" && event.tool === "present_products" && event.products?.length) products.push(...event.products);
           else if (event.type === "error") failed = event.message;
         },
@@ -1758,11 +1837,12 @@ export function mountConcierge(app, deps) {
       recordTurnCost(conversation, turnResult?.usage);
     } catch (err) {
       console.error("[CONCIERGE] chat failed:", err);
+      recorder.onEvent({ type: "error", message: err.message });
       failed = "אירעה תקלה זמנית. אפשר לנסות שוב.";
     }
 
     await storeSet(deps, conversationKey(conversation.id), conversation, CONVERSATION_TTL_SECONDS);
-    recordConversation(deps, store, conversation).catch(() => {});
+    recordConversation(deps, store, conversation, {}, recorder.turn({ stopped: turnResult?.stopped, usage: turnResult?.usage })).catch(() => {});
 
     // Products are deduplicated across tool calls but kept in the order the
     // model saw them — the first tool result is the one it usually answers from.
@@ -1781,6 +1861,16 @@ export function mountConcierge(app, deps) {
   /** Transcript of one conversation — for debugging and for a widget that reconnects. */
   app.get("/concierge/conversation/:id", async (req, res) => {
     if (!requireConcierge(req, res)) return;
+
+    // The saved record first: it survives the Redis TTL and holds every turn.
+    try {
+      const client = await deps.getMongoClient();
+      const saved = await client.db(req.store.dbName).collection("concierge_conversations")
+        .findOne({ conversation_id: String(req.params.id) }, { projection: { _id: 0, conversation_id: 1, reason: 1, query: 1, session_id: 1, created_at: 1, transcript: 1 } });
+      if (saved?.transcript?.length) return res.json(saved);
+    } catch (err) {
+      console.warn("[CONCIERGE] transcript read failed:", err.message);
+    }
 
     const conversation = await storeGet(deps, conversationKey(req.params.id));
     if (!conversation || conversation.dbName !== req.store.dbName) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildSystemPrompt,decideTrigger,catalogFacets,searchCatalog} from '../../concierge.mjs';
+import {buildSystemPrompt,decideTrigger,catalogFacets,searchCatalog,createTurnRecorder} from '../../concierge.mjs';
 import client from '../../pilot/beautics/client.json' with {type:'json'};
 import {createTopSearch} from './top-search.mjs';
 import {createSearchService} from '../../pilot/beautics/semantic.mjs';
@@ -81,4 +81,19 @@ test('research results stay lean for the model and the prompt asks for batched d
   assert.equal(product.colors,undefined);assert.equal(product.on_sale,undefined);
   const prompt=buildSystemPrompt(store);
   assert.ok(prompt.includes('product_ids'));assert.ok(!prompt.includes('קרא get_product עבור המוצרים הנבחרים'));
+});
+
+test('a saved turn keeps the whole answer the shopper saw and every card, without the discarded draft',()=>{
+  const long='א'.repeat(9000);
+  const recorder=createTurnRecorder({message:'בייס <b>לציפורניים</b>'});
+  recorder.onEvent({type:'text',text:'טיוטה שנזרקה'});recorder.onEvent({type:'text_reset'});
+  recorder.onEvent({type:'tool_end',tool:'search_catalog',ms:40,products:[]});
+  recorder.onEvent({type:'tool_end',tool:'present_products',ms:5,products:[{product_id:'1',name:'בייס',price:69,url:'u',image:'i'},{product_id:'1',name:'בייס'}]});
+  recorder.onEvent({type:'text',text:long});recorder.onEvent({type:'text',text:'!'});
+  const turn=recorder.turn({stopped:'STOP',usage:{rounds:2}});
+  assert.equal(turn.message,'בייס <b>לציפורניים</b>');assert.equal(turn.reply,long+'!');
+  assert.deepEqual(turn.products,[{product_id:'1',name:'בייס',price:69,url:'u',image:'i'}]);
+  assert.deepEqual(turn.tools.map(t=>t.tool),['search_catalog','present_products']);assert.equal(turn.rounds,2);
+  const opening=createTurnRecorder({opening:true,trigger:{query:'טופ מתפשט',reason:'non_literal'}}).turn();
+  assert.equal(opening.opening,true);assert.equal(opening.query,'טופ מתפשט');assert.equal(opening.message,undefined);
 });
