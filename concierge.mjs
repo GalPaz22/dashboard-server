@@ -783,7 +783,8 @@ function extractProducts(result) {
 \* --------------------------------------------------------------------------- */
 
 export function buildSystemPrompt(store) {
-  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store);
+  const instructions = typeof store.conciergeInstructions === 'string' ? store.conciergeInstructions.trim() : '';
+  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store) + (instructions ? `\n\n## הוראות נוספות של החנות\n${instructions}` : '');
 }
 
 function buildBaseSystemPrompt(store) {
@@ -1529,6 +1530,7 @@ async function recordConversation(deps, store, conversation, extra = {}, turn = 
       analyticsIndexed.add(store.dbName);
       col.createIndex({ conversation_id: 1 }, { unique: true }).catch(() => {});
       col.createIndex({ created_at: -1 }).catch(() => {});
+      col.createIndex({ updated_at: -1, conversation_id: -1 }).catch(() => {});
     }
 
     await col.updateOne(
@@ -1635,6 +1637,14 @@ export function mountConcierge(app, deps) {
    */
   app.post("/concierge/chat", async (req, res) => {
     if (!requireConcierge(req, res)) return;
+
+    if (typeof deps.getConciergeSettings === 'function') {
+      try { req.store = await deps.getConciergeSettings(req.store); }
+      catch (error) {
+        console.warn('[CONCIERGE] prompt settings unavailable:', error.message);
+        return res.status(503).json({ error: 'concierge_settings_unavailable', message: 'לא ניתן לטעון כרגע את הנחיות החנות. נסו שוב.' });
+      }
+    }
 
     const store = req.store;
     const wantsStream = req.body?.stream !== false;

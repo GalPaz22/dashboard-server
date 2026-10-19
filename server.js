@@ -13,6 +13,7 @@ import { fileURLToPath } from 'url';
 import { AsyncLocalStorage } from 'async_hooks';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
 import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
+import { liveConciergeSettings } from './concierge-settings.mjs';
 import { searchBeautics } from './tenants/beautics/search.mjs';
 import { storefrontResponse } from './tenants/beautics/response.mjs';
 import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
@@ -3110,6 +3111,7 @@ async function getStoreConfigByApiKey(apiKey) {
       conciergeAutoOpen: (userDoc.conciergeAutoOpen ?? userDoc.credentials?.conciergeAutoOpen) !== false, // false → widget shows an invitation pill instead of fading open
       conciergeContext: userDoc.conciergeContext || userDoc.credentials?.conciergeContext || "",          // merchant's own description of the shop, for the system prompt
       conciergeSystemPrompt: userDoc.conciergeSystemPrompt || userDoc.credentials?.conciergeSystemPrompt || null, // full override, for a merchant with a specific voice
+      conciergeInstructions: userDoc.conciergeInstructions || userDoc.credentials?.conciergeInstructions || '',
     };
   }, 300); // 5-minute TTL — short enough to pick up config changes
 }
@@ -3410,6 +3412,7 @@ app.use(async (req, res, next) => {
 // ───────────────────────────────────────────────────────────────────────────
 const conciergeDeps = {
   getMongoClient,
+  getConciergeSettings: store => liveConciergeSettings(store, getMongoClient),
   getQueryEmbedding: (text) => getQueryEmbedding(text),
   getRedis: () => (redisClient && redisReady ? redisClient : null),
 };
