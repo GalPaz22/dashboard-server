@@ -17,12 +17,19 @@ import { searchBeautics } from './tenants/beautics/search.mjs';
 import { storefrontResponse } from './tenants/beautics/response.mjs';
 import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
 import {createGarminRoutes} from './tenants/garmin/routes.mjs';
-const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).db('garmin')});
+import {applyMerchantRanking} from './merchant-ranking.mjs';
+import {findPinnedRuleForQuery} from './pinned-matching.mjs';
+async function merchandiseV2(req,matches){
+  const db=(await getMongoClient()).db(req.store.dbName);
+  const store=await applyPermanentRules(req.store,req.body.query,db,redisClient,new Date(),{record:req.get('X-Semantix-Preview')!=='dashboard'});
+  return applyMerchantRanking({collection:db.collection(req.store.products||'products'),matches,query:req.body.query,store});
+}
+const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).db('garmin'),merchandise:merchandiseV2});
 // Semantix tenant modules (tenants/<slug>/, exported by Tenant Studio). A module answers only when the merchant's user
 // document switches it on (users.users → semantix:{module,enabled,percent}); failures fall through to the existing routes.
 import {createSemantixTenants} from './tenants/semantix-registry.mjs';
 import {createV2SearchLogger} from './search-logging.mjs';
-const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoClient()).db(name)});
+const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoClient()).db(name),merchandise:merchandiseV2});
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -3142,6 +3149,7 @@ async function authenticate(req, res, next) {
     requestStoreContext.run({
       showOutOfStock: store.showOutOfStock === true,
       dbName: store.dbName,
+      preview: req.get('X-Semantix-Preview') === 'dashboard',
       hebrewTranslate: store.hebrewTranslate === true,
       searchAuthor: store.searchAuthor === true,
       context: store.context || ''
@@ -6617,6 +6625,7 @@ function levenshteinDistance(str1, str2) {
 }
 
 async function logQuery(queryCollection, query, filters, products = [], isComplex = false, options = {}) {
+  if (requestStoreContext.getStore()?.preview) return;
   const timestamp = new Date();
   const entity = `${filters.category || "unknown"} ${filters.type || "unknown"}`;
   const sessionId = normalizeSessionId(options.session_id, options.sessionId);
@@ -8006,98 +8015,6 @@ async function getProductsByIds(ids, dbName, collectionName) {
    Store owners can pin specific products to the top of results
    for chosen search phrases via the admin panel.
 \* =========================================================== */
-
-// Normalize a phrase for consistent matching: trim, unify quote chars, lowercase.
-function normalizePinnedText(str) {
-  if (!str || typeof str !== 'string') return '';
-  return normalizeQuoteCharacters(str.trim()).toLowerCase();
-}
-
-// Single-letter Hebrew prefixes (mem, shin, he, vav, kaf, lamed, bet) that
-// commonly attach to a word — e.g. "לנשים" = "ל" + "נשים".
-const HEBREW_PREFIXES = new Set(['מ', 'ש', 'ה', 'ו', 'כ', 'ל', 'ב']);
-
-// Levenshtein edit distance (small strings only) — tolerates a single typo.
-function pinnedEditDistance(a, b) {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  let prev = Array.from({ length: n + 1 }, (_, i) => i);
-  let curr = new Array(n + 1);
-  for (let i = 1; i <= m; i++) {
-    curr[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
-    }
-    [prev, curr] = [curr, prev];
-  }
-  return prev[n];
-}
-
-// Build the set of comparable keys for a Hebrew word: the mater-lectionis-free
-// form (drop optional י/ו), plus a prefix-stripped variant. This lets
-// "לנשים" and "נשים" compare equal without over-stripping real words.
-function pinnedWordKeys(word) {
-  const base = word.replace(/[יו]/g, '');
-  const keys = new Set();
-  if (base) keys.add(base);
-  if (base.length >= 4 && HEBREW_PREFIXES.has(base[0])) {
-    keys.add(base.slice(1));
-  }
-  return keys;
-}
-
-// Fuzzy equality between two words: shared key, or a single-typo edit distance
-// on the normalized base (only for words long enough to avoid false positives).
-function pinnedWordsMatch(ruleWord, queryWord) {
-  if (!ruleWord || !queryWord) return ruleWord === queryWord;
-  if (ruleWord === queryWord) return true;
-  const rKeys = pinnedWordKeys(ruleWord);
-  const qKeys = pinnedWordKeys(queryWord);
-  for (const k of rKeys) if (qKeys.has(k)) return true;
-  const rBase = ruleWord.replace(/[יו]/g, '');
-  const qBase = queryWord.replace(/[יו]/g, '');
-  if (Math.max(rBase.length, qBase.length) >= 4 && pinnedEditDistance(rBase, qBase) <= 1) return true;
-  return false;
-}
-
-// Fuzzy CONTAINMENT at the word level: every word of the rule phrase must fuzzy-
-// match some word in the query (order-independent, prefix/typo tolerant).
-// So "שעון לנשים" also catches "שעון נשים" and "שעון לנשים ספורט".
-function pinnedPhraseMatchesQuery(phrase, queryWords) {
-  const phraseWords = phrase.split(/\s+/).filter(Boolean);
-  if (phraseWords.length === 0) return false;
-  return phraseWords.every(pw => queryWords.some(qw => pinnedWordsMatch(pw, qw)));
-}
-
-// Find the pinned rule whose phrase fuzzy-matches the query. When several rules
-// match, the longest phrase wins (most specific). Returns the rule or null.
-function findPinnedRuleForQuery(query, store) {
-  const rules = store?.pinnedResults;
-  if (!Array.isArray(rules) || rules.length === 0) return null;
-
-  const normQuery = normalizePinnedText(query);
-  if (!normQuery) return null;
-  const queryWords = normQuery.split(/\s+/).filter(Boolean);
-
-  let best = null;
-  let bestLen = -1;
-  for (const rule of rules) {
-    if (!rule || rule.enabled === false) continue;
-    if (!Array.isArray(rule.productIds) || rule.productIds.length === 0) continue;
-    // A rule may hold several comma-separated terms — any of them can trigger it.
-    for (const rawPhrase of String(rule.query || '').split(',')) {
-      const phrase = normalizePinnedText(rawPhrase);
-      if (!phrase) continue;
-      if (phrase.length > bestLen && pinnedPhraseMatchesQuery(phrase, queryWords)) {
-        best = rule;
-        bestLen = phrase.length;
-      }
-    }
-  }
-  return best;
-}
 
 // Resolve the pinned products for a query: find the matching rule, fetch the
 // products (order-preserving, hidden ones filtered), and strip the heavy
@@ -12143,7 +12060,7 @@ app.post("/fast-search", async (req, res) => {
     {
       const expClient = await getMongoClient();
       const expDb = expClient.db(req.store.dbName);
-      req.store = await applyPermanentRules(req.store, query, expDb, redisClient);
+      req.store = await applyPermanentRules(req.store, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview});
       req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
       const expCtx = requestStoreContext.getStore();
       if (expCtx) {
@@ -13475,7 +13392,7 @@ app.post("/simple-search", async (req, res) => {
   {
     const expClient = await getMongoClient();
     const expDb = expClient.db(dbName);
-    req.store = await applyPermanentRules(req.store, query, expDb, redisClient);
+    req.store = await applyPermanentRules(req.store, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview});
     req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
     const expCtx = requestStoreContext.getStore();
     if (expCtx) {
@@ -13682,7 +13599,7 @@ app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, as
   {
     const expClient = await getMongoClient();
     const expDb = expClient.db(dbName);
-    req.store = await applyPermanentRules(req.store, query, expDb, redisClient);
+    req.store = await applyPermanentRules(req.store, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview});
     req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
     const expCtx = requestStoreContext.getStore();
     if (expCtx) {

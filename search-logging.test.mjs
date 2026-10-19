@@ -25,3 +25,13 @@ test('v2 engine searches are logged once to the store queries collection; pages,
   failLog=true;assert.equal((await post({query:'טופ',modern:true})).products.length,2,'a failing log never breaks the response');
  }finally{server.close();}
 });
+
+test('dashboard previews do not enter shopper analytics', async () => {
+ let continued = false, touched = false;
+ const req = {body:{query:'watch'},get:name=>name==='X-Semantix-Preview'?'dashboard':undefined};
+ const logger = createV2SearchLogger({logQuery:()=>{touched=true},getQueries:()=>{touched=true}});
+ const res = {json(){throw Error('Response should not be wrapped')}};
+ const original = res.json;
+ logger(req,res,()=>{continued=true});
+ assert.equal(continued,true); assert.equal(touched,false); assert.equal(res.json,original);
+});

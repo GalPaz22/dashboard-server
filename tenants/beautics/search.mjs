@@ -20,7 +20,7 @@ export async function searchBeautics({collection, sessions, request}) {
   // Use the service that produced this result even if another request has
   // refreshed the catalog and replaced the current service in the meantime.
   if (!sessions) return result.result;
-  return createSearchSessions(sessions).save(result.result,result.search,limit);
+  return createSearchSessions(sessions).save(result.result,result.search,limit,request.merchandise);
 }
 
 async function searchLocal({collection, request}) {

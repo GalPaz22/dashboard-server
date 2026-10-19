@@ -9,13 +9,13 @@ export function storefrontResponse(result,modern=true){
  const token=result.nextCursor?manifest.tokenPrefix+result.nextCursor:null;
  return {...result,matches:products,products,metadata:{...result.metadata,searchEngine:'semantix-'+manifest.slug},pagination:{totalAvailable:result.total,returned:products.length,hasMore:!!token,nextToken:token,nextCursor:result.nextCursor,secondBatchToken:null,categoryFilterToken:null,hasCategoryFiltering:false}};
 }
-export function createTenantRoutes({getDb,search=createTenantSearch({loadRows:createRowLoader()}),enabled=req=>{const s=req.store?.semantix;return !!s&&s.module===manifest.slug&&s.enabled===true;},onError=null,onServed=()=>{}}={}){
+export function createTenantRoutes({getDb,merchandise=null,search=createTenantSearch({loadRows:createRowLoader()}),enabled=req=>{const s=req.store?.semantix;return !!s&&s.module===manifest.slug&&s.enabled===true;},onError=null,onServed=()=>{}}={}){
  const mine=req=>!!manifest.dbName&&req.store?.dbName===manifest.dbName;
  async function send(req,res,next,request,modern,fresh){
   const limit=request.limit===undefined||request.limit===null||request.limit===''?undefined:Number(request.limit);
   if(limit!==undefined&&(!Number.isInteger(limit)||limit<1||limit>50))return res.status(400).json({error:'Invalid limit'});
   if(request.cursor?typeof request.cursor!=='string'||!request.cursor:typeof request.query!=='string'||!request.query.trim()||request.query.length>300)return res.status(400).json({error:'Invalid request'});
-  try{const db=await getDb(manifest.dbName);const result=await search({collection:db.collection(req.store.products||manifest.collection||'products'),sessions:db.collection('semantix_'+manifest.slug.replace(/-/g,'_')+'_sessions'),moduleStore:db.collection('semantix_module'),request:{...request,limit}});
+  try{const db=await getDb(manifest.dbName);const result=await search({collection:db.collection(req.store.products||manifest.collection||'products'),sessions:db.collection('semantix_'+manifest.slug.replace(/-/g,'_')+'_sessions'),moduleStore:db.collection('semantix_module'),request:{...request,limit,...(merchandise&&fresh?{merchandise:matches=>merchandise(req,matches)}:{})}});
    res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(result.metadata?.revision??manifest.revision));if(result.nextCursor)res.setHeader('X-Next-Token',manifest.tokenPrefix+result.nextCursor);onServed();return res.json(storefrontResponse(result,modern));}
   catch(error){if(error.message==='Search expired; start a new search'||error.message==='Invalid cursor')return res.status(410).json({error:'Search expired; start a new search'});
    console.error('[SEMANTIX '+manifest.slug+']',error.message);

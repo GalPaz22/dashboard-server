@@ -6,6 +6,7 @@
 export function createV2SearchLogger({logQuery,getQueries}){
  return function logV2Search(req,res,next){
   const query=req.body?.query;
+  if(req.get?.('X-Semantix-Preview')==='dashboard')return next();
   if(typeof query!=='string'||!query.trim()||req.body?.cursor!==undefined)return next();
   const send=res.json.bind(res);
   res.json=body=>{

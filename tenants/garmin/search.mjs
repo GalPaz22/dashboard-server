@@ -17,7 +17,7 @@ export function createGarminSearch({loadCatalog=createCatalogLoader(),generator=
    service=createSearchService(products,profile,generator,{...profile.pipeline,maxEntries:10});lastProducts=raw;
   }
   const search=service,result=await search(request);
-  return sessions?createSearchSessions(sessions).save(result,search,limit):result;
+  return sessions?createSearchSessions(sessions).save(result,search,limit,request.merchandise):result;
  };
 }
 export const searchGarmin=createGarminSearch();

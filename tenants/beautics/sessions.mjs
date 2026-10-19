@@ -20,15 +20,18 @@ export function createSearchSessions(collection, {now = Date.now} = {}) {
     return {...result, nextCursor:offset + limit < result.total ? `snapshot:${id}:${offset + limit}` : null};
   }
   return {
-    async save(result, search, limit) {
-      if (!result.nextCursor) return result;
-      const matches = [...result.matches];
+    async save(result, search, limit, merchandise) {
+      if (!result.nextCursor && !merchandise) return result;
+      let matches = [...result.matches];
       let cursor = result.nextCursor;
       while (cursor) {
         const next = await search({cursor,limit:50});
         matches.push(...next.matches);
         cursor = next.nextCursor;
       }
+      if (merchandise) matches = await merchandise(matches);
+      result = {...result,matches:matches.slice(0,limit),total:matches.length,nextCursor:null};
+      if (matches.length <= limit) return result;
       await ready();
       const id = randomUUID(), expiresAt = new Date(now() + TTL_MS);
       const {matches:ignored, nextCursor:ignoredCursor, ...envelope} = result;

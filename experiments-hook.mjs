@@ -230,7 +230,7 @@ export async function applyExperimentVariant(store, sessionId, query, tenantDb, 
  * request whose query/time condition matches gets the patch. Any failure
  * returns the original store, same as the experiment path.
  */
-export async function applyPermanentRules(store, query, tenantDb, redisClient, now = new Date()) {
+export async function applyPermanentRules(store, query, tenantDb, redisClient, now = new Date(), { record = true } = {}) {
   try {
     if (!store?.apiKey) return store;
     const rules = await getActiveRules(redisClient, store.apiKey);
@@ -239,7 +239,7 @@ export async function applyPermanentRules(store, query, tenantDb, redisClient, n
     let patched = store;
     for (const rule of rules) {
       if (!queryMatchesTargeting(rule.condition, query, now)) continue;
-      if (tenantDb) logRuleTrigger(tenantDb, rule.id);
+      if (tenantDb && record) logRuleTrigger(tenantDb, rule.id);
       patched = await mergePatchIntoStore(patched, rule.patch, query, tenantDb);
     }
     return patched;
