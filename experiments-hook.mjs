@@ -21,6 +21,8 @@ function fnv1a32(str) {
 }
 
 function assignArm(exp, sessionId) {
+  if (exp.expiresAt && +new Date(exp.expiresAt) <= Date.now()) return null;
+  if (exp.delivery === 'all') return 'v1';
   if (!sessionId) return null;
   const bucket = fnv1a32(`${exp.id}:${sessionId}`) % 10000;
   const enrolledRange = Math.floor(exp.trafficPct * 100);
@@ -137,6 +139,9 @@ async function resolveCategoryAssociation(assoc, query, tenantDb) {
  */
 async function mergePatchIntoStore(store, patch, query, tenantDb) {
   if (!patch || Object.keys(patch).length === 0) return store;
+  if (patch.queryPatches) {
+    for (const scoped of patch.queryPatches) if (String(scoped.query).trim().replace(/\s+/g,' ').toLowerCase() === String(query).trim().replace(/\s+/g,' ').toLowerCase()) store = await mergePatchIntoStore(store, scoped.patch, query, tenantDb);
+  }
   const patched = { ...store };
 
   if (patch.softCategoriesBoost) {
@@ -151,6 +156,9 @@ async function mergePatchIntoStore(store, patch, query, tenantDb) {
     ];
   }
   if (patch.excludedProductIds) patched.excludedProductIds = [...new Set([...(patched.excludedProductIds || []), ...patch.excludedProductIds.map(String)])];
+  for (const key of ['demotedProductIds', 'productNotes', 'productBundles']) {
+    if (patch[key]) patched[key] = [...(patched[key] || []), ...patch[key]];
+  }
   if (patch.productBoosts) {
     patched.experimentBoosts = { ...(patched.experimentBoosts || {}), ...patch.productBoosts };
   }
@@ -170,11 +178,11 @@ async function mergePatchIntoStore(store, patch, query, tenantDb) {
   return patched;
 }
 
-function logExposure(tenantDb, experimentId, arm, sessionId, query) {
+function logExposure(tenantDb, experimentId, arm, sessionId, query, serpFeatures = []) {
   setImmediate(() => {
     tenantDb
       .collection("experiment_exposures")
-      .insertOne({ experiment_id: experimentId, arm, session_id: sessionId, query, timestamp: new Date() })
+      .insertOne({ experiment_id: experimentId, arm, session_id: sessionId, query, serpFeatures, timestamp: new Date() })
       .catch((err) => {
         if (err?.code !== 11000) console.error("[experiments] exposure log failed:", err?.message);
       });
@@ -202,19 +210,20 @@ function logRuleTrigger(tenantDb, ruleId) {
  * Patched copy may carry `experimentBoosts` {productId: boost} and
  * `profileBoostMultiplier` for downstream scoring hooks.
  */
-export async function applyExperimentVariant(store, sessionId, query, tenantDb, redisClient, now = new Date()) {
+export async function applyExperimentVariant(store, sessionId, query, tenantDb, redisClient, now = new Date(), { record = true, serpFeatures = [] } = {}) {
   try {
-    if (!store?.apiKey || !sessionId) return store;
+    if (!store?.apiKey) return store;
     const experiments = await getActiveExperiments(redisClient, store.apiKey);
     if (!experiments.length) return store;
 
     let patched = store;
     for (const exp of experiments) {
+      if (!record && exp.delivery !== 'all') continue;
       if (!queryMatchesTargeting(exp.targeting, query, now)) continue;
       const armKey = assignArm(exp, sessionId);
       if (!armKey) continue;
 
-      if (tenantDb) logExposure(tenantDb, exp.id, armKey, sessionId, query);
+      if (record && tenantDb && sessionId) logExposure(tenantDb, exp.id, armKey, sessionId, query, serpFeatures);
       const arm = exp.arms.find((a) => a.key === armKey);
       patched = await mergePatchIntoStore(patched, arm?.patch, query, tenantDb);
     }

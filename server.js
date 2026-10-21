@@ -20,10 +20,12 @@ import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
 import {createGarminRoutes} from './tenants/garmin/routes.mjs';
 import {applyMerchantRanking} from './merchant-ranking.mjs';
 import {findPinnedRuleForQuery} from './pinned-matching.mjs';
+import {applySerpPresentation} from './serp-presentation.mjs';
 import {filterExcludedProducts} from './query-result-exclusions.mjs';
 async function merchandiseV2(req,matches){
   const db=(await getMongoClient()).db(req.store.dbName);
-  const store=await applyPermanentRules(req.store,req.body.query,db,redisClient,new Date(),{record:req.get('X-Semantix-Preview')!=='dashboard'});
+  let store=await applyPermanentRules(req.store,req.body.query,db,redisClient,new Date(),{record:req.get('X-Semantix-Preview')!=='dashboard'});
+  store=await applyExperimentVariant(store,normalizeSessionId(req.body.session_id,req.body.sessionId),req.body.query,db,redisClient,new Date(),{record:req.get('X-Semantix-Preview')!=='dashboard',serpFeatures:Array.isArray(req.body.serpFeatures)?req.body.serpFeatures.filter(f=>f==='weekly-serp-v1'):[]});
   return applyMerchantRanking({collection:db.collection(req.store.products||'products'),matches,query:req.body.query,store});
 }
 const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).db('garmin'),merchandise:merchandiseV2});
@@ -12067,7 +12069,7 @@ app.post("/fast-search", async (req, res) => {
       const expClient = await getMongoClient();
       const expDb = expClient.db(req.store.dbName);
       req.store = await applyPermanentRules(req.store, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview});
-      req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
+      req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview,serpFeatures:Array.isArray(req.body.serpFeatures)?req.body.serpFeatures.filter(f=>f==='weekly-serp-v1'):[]});
       const expCtx = requestStoreContext.getStore();
       if (expCtx) {
         expCtx.experimentBoosts = req.store.experimentBoosts;
@@ -12078,10 +12080,10 @@ app.post("/fast-search", async (req, res) => {
     // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
     {
       const pinned = await getPinnedProductsForQuery(query, req.store);
-      if (pinned || req.store.excludedProductIds?.length) {
+      if (pinned || req.store.excludedProductIds?.length || req.store.demotedProductIds?.length || req.store.productNotes?.length || req.store.productBundles?.length) {
         console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned?.rule.query || query}") → prepending ${pinned?.products.length || 0} product(s)`);
         const _json = res.json.bind(res);
-        res.json = (payload) => _json(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds));
+        res.json = (payload) => _json(applySerpPresentation(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds),req.store));
       }
     }
 
@@ -13399,7 +13401,7 @@ app.post("/simple-search", async (req, res) => {
     const expClient = await getMongoClient();
     const expDb = expClient.db(dbName);
     req.store = await applyPermanentRules(req.store, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview});
-    req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
+    req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview,serpFeatures:Array.isArray(req.body.serpFeatures)?req.body.serpFeatures.filter(f=>f==='weekly-serp-v1'):[]});
     const expCtx = requestStoreContext.getStore();
     if (expCtx) {
       expCtx.experimentBoosts = req.store.experimentBoosts;
@@ -13410,10 +13412,10 @@ app.post("/simple-search", async (req, res) => {
   // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
   {
     const pinned = await getPinnedProductsForQuery(query, req.store);
-    if (pinned || req.store.excludedProductIds?.length) {
+    if (pinned || req.store.excludedProductIds?.length || req.store.demotedProductIds?.length || req.store.productNotes?.length || req.store.productBundles?.length) {
       console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned?.rule.query || query}") → prepending ${pinned?.products.length || 0} product(s)`);
       const _json = res.json.bind(res);
-      res.json = (payload) => _json(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds));
+      res.json = (payload) => _json(applySerpPresentation(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds),req.store));
     }
   }
 
@@ -13606,7 +13608,7 @@ app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, as
     const expClient = await getMongoClient();
     const expDb = expClient.db(dbName);
     req.store = await applyPermanentRules(req.store, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview});
-    req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient);
+    req.store = await applyExperimentVariant(req.store, session_id, query, expDb, redisClient, new Date(), {record: !requestStoreContext.getStore()?.preview,serpFeatures:Array.isArray(req.body.serpFeatures)?req.body.serpFeatures.filter(f=>f==='weekly-serp-v1'):[]});
     const expCtx = requestStoreContext.getStore();
     if (expCtx) {
       expCtx.experimentBoosts = req.store.experimentBoosts;
@@ -13619,10 +13621,10 @@ app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, as
   // response, regardless of which of the many return branches below fires.
   {
     const pinned = await getPinnedProductsForQuery(query, req.store);
-    if (pinned || req.store.excludedProductIds?.length) {
+    if (pinned || req.store.excludedProductIds?.length || req.store.demotedProductIds?.length || req.store.productNotes?.length || req.store.productBundles?.length) {
       console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned?.rule.query || query}") → prepending ${pinned?.products.length || 0} product(s)`);
       const _json = res.json.bind(res);
-      res.json = (payload) => _json(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds));
+      res.json = (payload) => _json(applySerpPresentation(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds),req.store));
     }
   }
 
@@ -18491,7 +18493,7 @@ app.get("/search-index-config", async (req, res) => {
 app.get("/health", async (req, res) => {
   const health = {
     revision: process.env.RENDER_GIT_COMMIT || process.env.RAILWAY_GIT_COMMIT_SHA || null,
-    features: { querySearchLayouts: true },
+    features: { querySearchLayouts: true, weeklyReviewV1: true },
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),

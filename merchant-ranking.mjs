@@ -1,3 +1,4 @@
+import { applySerpPresentation } from './serp-presentation.mjs';
 import { ObjectId } from 'mongodb';
 import { findPinnedRuleForQuery } from './pinned-matching.mjs';
 
@@ -35,5 +36,5 @@ export async function applyMerchantRanking({ collection, matches, query, store =
     used.add(key);
     pinned.push(enrich(existing || { id: String(row.id ?? row._id), name: row.name || row.title, title: row.name || row.title, sku: row.sku, image: row.image || row.images?.[0]?.src || row.images?.[0], url: row.url || row.permalink, categories: row.categories || row.category || [], currency: row.currency, badges: [] }, row));
   }
-  return [...pinned, ...ranked.filter(p => !used.has(String(find(p.id ?? p._id)?._id ?? find(p.id ?? p._id)?.id)))];
+  return applySerpPresentation([...pinned, ...ranked.filter(p => !used.has(String(find(p.id ?? p._id)?._id ?? find(p.id ?? p._id)?.id)))].map(p=>({...p,_id:String(find(p.id??p._id)?._id||p._id||p.id)})),store);
 }
