@@ -17,16 +17,22 @@ export function stockLast(matches,query){
  return [...lead.filter(inStock),...lead.filter(p=>!inStock(p)),...rest.filter(inStock),...rest.filter(p=>!inStock(p))];
 }
 // Rows the store has retired (a dead product page, not "temporarily missing"), so they are imported as hidden:
+// - a row whose product page answered 404/410 when last checked (pageCheck, written by scripts/page-check.mjs);
 // - out of stock with no price, or — when the catalog's syncs stamp lastSeenAt on most rows — out of stock and not seen
 //   in the latest sync (older than the newest stamp by more than graceMs);
-// - any row, even "instock", that no sync ever stamped in a tracked catalog: leftovers of older feeds/scrapes that the
-//   current sync never saw. On Steimatzky (2026-10-18) these were ~3,600 rows still marked instock, most with 404 pages.
-// An in-stock row that was stamped once is never retired here (a weekly sync can skip live products).
+// - any row, even "instock", that no sync ever stamped in a tracked catalog, unless its page answered 200: leftovers of
+//   older feeds/scrapes. On Steimatzky (2026-10-21) 3,635 such rows were marked instock; 3,334 pages were 404 and 301
+//   live (32 LEGO sets among them), with no field in the row that tells them apart — only the page check does.
+// An in-stock row that was stamped once is never retired by the stamp rules (a weekly sync can skip live products).
+export const pageStatus=r=>Number(r?.pageCheck?.status)||null;
 export function retiredRows(rows,{graceMs=3*864e5}={}){
  const at=v=>v==null||v===''?NaN:new Date(v).getTime();let newest=-Infinity,stamped=0;
  for(const r of rows){const t=at(r.lastSeenAt);if(Number.isFinite(t)){stamped++;if(t>newest)newest=t;}}
  const tracked=rows.length>0&&stamped>=rows.length/2;
- return r=>(tracked&&!Number.isFinite(at(r.lastSeenAt)))||(r.stockStatus||r.stock_status)==='outofstock'&&(!(Number(r.price)>0)||(tracked&&!(at(r.lastSeenAt)>=newest-graceMs)));
+ return r=>{const page=pageStatus(r),live=page===200,seen=at(r.lastSeenAt);
+  if(page===404||page===410)return true;
+  if(tracked&&!Number.isFinite(seen))return !live||(r.stockStatus||r.stock_status)==='outofstock'&&!(Number(r.price)>0);
+  return (r.stockStatus||r.stock_status)==='outofstock'&&(!(Number(r.price)>0)||(tracked&&!(seen>=newest-graceMs)));};
 }
 // Trademark signs go before NFKC, which would spell ™ as "TM" and glue it to the name ("Enduro™" → "endurotm").
 export const normalize = value => String(value ?? '').replace(/[®™℠]/g,'').normalize('NFKC').toLowerCase()

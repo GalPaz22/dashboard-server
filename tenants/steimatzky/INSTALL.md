@@ -1,6 +1,6 @@
 # Semantix tenant module — steimatzky (steimatzky)
 
-Revision 32, 35635 product cards, built 2026-10-18T07:22:47.120Z.
+Revision 32, 40652 product cards, built 2026-10-21T11:40:07.104Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 

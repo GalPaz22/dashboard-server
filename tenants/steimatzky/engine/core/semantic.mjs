@@ -190,7 +190,7 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
   }
   const run=async function(request={}){
     if(!request||typeof request!=='object'||Array.isArray(request)||Object.keys(request).some(k=>!['query','cursor','limit'].includes(k)))throw Error('Invalid request');
-    const {query,cursor,limit=12}=request;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');sweep();
+    let {query,cursor,limit=12}=request;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');sweep();
     if(cursor){if(query!==undefined||typeof cursor!=='string'||!cursors.has(cursor))throw Error('Invalid cursor');const c=cursors.get(cursor);return page(c.id,c.offset,limit,true);}
     if(typeof query!=='string'||query.length>300)throw Error('Invalid query');
     const asked=query;let rewriteError=null;

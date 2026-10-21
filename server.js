@@ -1,4 +1,6 @@
 import { ExpiringMap, withTimeout } from './memory-lifecycle.mjs';
+import { createMemoryMonitor } from './memory-monitor.mjs';
+import {hasTrackingEventId, insertTrackingEvent} from './tracking-events.mjs';
 import express from "express";
 import bodyParser from "body-parser";
 import { MongoClient, ObjectId } from "mongodb";
@@ -1587,43 +1589,13 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
    MEMORY MONITORING & PROTECTION
 \* =========================================================== */
 
-// Memory usage tracking
-let lastMemoryWarning = 0;
-const MEMORY_WARNING_INTERVAL = 60000; // 1 minute between warnings
-const MEMORY_LIMIT_MB = 450; // Start warning at 450MB (below 512MB limit)
-const MEMORY_CRITICAL_MB = 480; // Critical threshold
-
-/**
- * Check memory usage and log warnings
- */
-function checkMemoryUsage(context = '') {
-  const usage = process.memoryUsage();
-  const heapUsedMB = Math.round(usage.heapUsed / 1024 / 1024);
-  const heapTotalMB = Math.round(usage.heapTotal / 1024 / 1024);
-  const rssMB = Math.round(usage.rss / 1024 / 1024);
-
-  // Log critical memory usage
-  if (heapUsedMB > MEMORY_CRITICAL_MB) {
-    console.error(`[MEMORY CRITICAL] ${context} - Heap: ${heapUsedMB}MB / Total: ${heapTotalMB}MB / RSS: ${rssMB}MB`);
-
-    // Force garbage collection if available (run node with --expose-gc flag)
-    if (global.gc) {
-      console.log('[MEMORY] Forcing garbage collection...');
-      global.gc();
-      const afterGC = process.memoryUsage();
-      const afterHeapMB = Math.round(afterGC.heapUsed / 1024 / 1024);
-      console.log(`[MEMORY] After GC: ${afterHeapMB}MB (freed ${heapUsedMB - afterHeapMB}MB)`);
-    }
-  } else if (heapUsedMB > MEMORY_LIMIT_MB) {
-    const now = Date.now();
-    if (now - lastMemoryWarning > MEMORY_WARNING_INTERVAL) {
-      console.warn(`[MEMORY WARNING] ${context} - Heap: ${heapUsedMB}MB / Total: ${heapTotalMB}MB / RSS: ${rssMB}MB`);
-      lastMemoryWarning = now;
-    }
-  }
-
-  return { heapUsedMB, heapTotalMB, rssMB };
-}
+// Thresholds follow the real heap limit; MEMORY_WARNING_MB / MEMORY_CRITICAL_MB override them (see memory-monitor.mjs).
+const memoryMonitor = createMemoryMonitor({
+  warningMB: Number(process.env.MEMORY_WARNING_MB) || undefined,
+  criticalMB: Number(process.env.MEMORY_CRITICAL_MB) || undefined,
+});
+console.log(`[MEMORY] Heap limit ${memoryMonitor.limitMB}MB - warning at ${memoryMonitor.warningMB}MB, critical at ${memoryMonitor.criticalMB}MB`);
+const checkMemoryUsage = context => memoryMonitor.check(context);
 
 /**
  * Middleware to monitor memory usage per request
@@ -1631,9 +1603,6 @@ function checkMemoryUsage(context = '') {
 function memoryMonitoringMiddleware(req, res, next) {
   const startMemory = process.memoryUsage().heapUsed;
   const startTime = Date.now();
-
-  // Check memory before processing
-  const beforeMemory = checkMemoryUsage(`Before ${req.method} ${req.path}`);
 
   // Override res.json to check memory after response
   const originalJson = res.json.bind(res);
@@ -17787,7 +17756,7 @@ app.post("/search-to-cart", async (req, res) => {
 
     console.log(`[SEARCH-TO-CART] Checking for duplicates within timestamp range: ${thirtyMinutesAgo.toISOString()} to ${thirtyMinutesFromNow.toISOString()} for query: ${enhancedDocument.search_query}`);
 
-    const existingDocument = await targetCollection.findOne(queryForExisting);
+    const existingDocument = hasTrackingEventId(enhancedDocument) ? null : await targetCollection.findOne(queryForExisting);
     if (existingDocument) {
       console.log(`[SEARCH-TO-CART] Duplicate document found (within 30-min window), preventing insertion. Existing ID: ${existingDocument._id}`);
       return res.status(200).json({ success: true, message: "Document already exists within 30-minute window, no new insertion." });
@@ -17795,7 +17764,8 @@ app.post("/search-to-cart", async (req, res) => {
 
     console.log(`[SEARCH-TO-CART] Inserting into collection: ${targetCollection.collectionName}`);
     // Save to appropriate collection
-    const insertResult = await targetCollection.insertOne(enhancedDocument);
+    const insertResult = await insertTrackingEvent(targetCollection, enhancedDocument);
+    if (insertResult.duplicate) return res.status(200).json({success: true, message: 'Event already recorded.'});
     console.log(`[SEARCH-TO-CART] Insert result:`, insertResult);
     
     // Handle query complexity feedback for conversion events.
@@ -20473,12 +20443,7 @@ const server = app.listen(PORT, async () => {
     const heapTotalMB = Math.round(memUsage.heapTotal / 1024 / 1024);
     const rssMB = Math.round(memUsage.rss / 1024 / 1024);
     
-    console.log(`[MEMORY] Heap: ${heapUsedMB}MB / ${heapTotalMB}MB | RSS: ${rssMB}MB`);
-    
-    // 🎯 WARNING: If memory usage is high, trigger garbage collection
-    if (heapUsedMB > 400) {
-      console.warn(`[MEMORY WARNING] High heap usage: ${heapUsedMB}MB - consider restarting server`);
-    }
+    console.log(`[MEMORY] Heap: ${heapUsedMB}MB / ${heapTotalMB}MB (limit ${memoryMonitor.limitMB}MB) | RSS: ${rssMB}MB`);
     
     // 🎯 Force garbage collection if available (run node with --expose-gc flag)
     if (global.gc && heapUsedMB > 300) {

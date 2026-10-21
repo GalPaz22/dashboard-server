@@ -1,0 +1,24 @@
+{
+  "kind": "semantix-tenant-module",
+  "version": 1,
+  "slug": "shipi",
+  "tenantId": "a6e8f510-d27c-4776-95e6-3f7c5d3db2dc",
+  "name": "שיפי אביזרים לסלולר",
+  "url": "https://shipi.co.il/",
+  "platform": "woocommerce",
+  "dbName": "shipi",
+  "collection": "products",
+  "tokenPrefix": "shipi-v3:",
+  "revision": 5,
+  "profileHash": "f44cf07b739c9345d8b2843f30af8e48febc6cffe3368e5590b2375e7ed2c9bc",
+  "products": 9110,
+  "builtAt": "2026-10-21T06:21:23.101Z",
+  "switch": {
+    "field": "users.users.semantix",
+    "value": {
+      "module": "shipi",
+      "enabled": true,
+      "percent": 100
+    }
+  }
+}

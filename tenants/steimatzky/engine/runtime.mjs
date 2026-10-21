@@ -57,7 +57,7 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   }
   const typed=normalize(q).split(' ').filter(Boolean),inTitle=p=>{const title=normalize(p.title).split(' ');return typed.every(w=>title.some(t=>t.startsWith(w))||wordMatches(w,title))?1:0;};
   let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
-  const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,24)),q);functions.push('rerank');}catch{}
+  const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,60)),q);functions.push('rerank');}catch{}
   // Same as search: out-of-stock last is applied after the tenant's function.
   if(stockPolicy(profile)==='last')ranked=stockLast(ranked,q);
   return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
