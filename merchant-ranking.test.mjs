@@ -44,3 +44,24 @@ test('admin phrases use the same Hebrew-aware matching in new engines, with the 
   assert.equal(findPinnedRuleForQuery('watch band', {pinnedResults:[{...broad,query:'watch',matchType:'exact'}]}), null);
   assert.equal(findPinnedRuleForQuery('watch', {pinnedResults:[{...broad,enabled:false}]}), null);
 });
+test('query exclusions override pins, resolve native and Mongo ids, and keep organic pagination stable',async()=>{
+ const rows=[row(1),row(2),row(3)];
+ const store={excludedProductIds:[String(rows[1]._id)],pinnedResults:[{query:'סרום',matchType:'exact',productIds:[String(rows[1]._id),String(rows[2]._id)]}]};
+ const result=await applyMerchantRanking({collection:collection(rows),matches:[{id:'tenant:1'},{id:'tenant:2'}],query:'סרום',store});
+ assert.deepEqual(result.map(x=>x.id),['3','tenant:1']);
+});
+test('excluded-only permanent rules apply to exactly one query without global hiding',async()=>{
+ const {applyPermanentRules}=await import('./experiments-hook.mjs');
+ const redis={async get(){return JSON.stringify([{id:'demo',condition:{mode:'queryMatch',patterns:['red wine'],matchType:'exact'},patch:{excludedProductIds:['2']}}]);}};
+ const store={apiKey:'fixture-query-demo'};
+ assert.deepEqual((await applyPermanentRules(store,'RED   WINE',null,redis,new Date(),{record:false})).excludedProductIds,['2']);
+ assert.equal((await applyPermanentRules(store,'red wine glass',null,redis,new Date(),{record:false})).excludedProductIds,undefined);
+});
+test('legacy and modern exclusion filters preserve metadata and never affect unrelated products',async()=>{
+ const {filterExcludedProducts}=await import('./query-result-exclusions.mjs');const products=[{_id:'1'},{id:'tenant:2'},{id:3}];
+ assert.deepEqual(filterExcludedProducts(products,['2']),[{_id:'1'},{id:3}]);
+ assert.deepEqual(filterExcludedProducts({products,count:3,metadata:{next:'cursor'}},['2']).metadata,{next:'cursor'});
+});
+test('an explicitly arranged exact query wins over a longer Hebrew prefix phrase',async()=>{
+ const {findPinnedRuleForQuery}=await import('./pinned-matching.mjs');const fuzzy={query:'לנשים',productIds:['1']},exact={query:'נשים',matchType:'exact',productIds:['2']};assert.equal(findPinnedRuleForQuery('נשים',{pinnedResults:[fuzzy,exact]}),exact);
+});

@@ -20,6 +20,7 @@ import { createBeauticsLoadMore } from './tenants/beautics/pagination.mjs';
 import {createGarminRoutes} from './tenants/garmin/routes.mjs';
 import {applyMerchantRanking} from './merchant-ranking.mjs';
 import {findPinnedRuleForQuery} from './pinned-matching.mjs';
+import {filterExcludedProducts} from './query-result-exclusions.mjs';
 async function merchandiseV2(req,matches){
   const db=(await getMongoClient()).db(req.store.dbName);
   const store=await applyPermanentRules(req.store,req.body.query,db,redisClient,new Date(),{record:req.get('X-Semantix-Preview')!=='dashboard'});
@@ -8040,7 +8041,9 @@ async function getPinnedProductsForQuery(query, store) {
 // already appear in the regular results. Handles both response shapes:
 //   - legacy: an array of products
 //   - modern: { products: [...], metadata: {...} }
-function mergePinnedProducts(payload, pinnedProducts) {
+function mergePinnedProducts(payload, pinnedProducts, excludedIds = []) {
+  payload = filterExcludedProducts(payload, excludedIds);
+  pinnedProducts = filterExcludedProducts(pinnedProducts || [], excludedIds);
   if (!Array.isArray(pinnedProducts) || pinnedProducts.length === 0) return payload;
 
   const pinnedIds = new Set(pinnedProducts.map(p => p?._id?.toString()).filter(Boolean));
@@ -12075,10 +12078,10 @@ app.post("/fast-search", async (req, res) => {
     // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
     {
       const pinned = await getPinnedProductsForQuery(query, req.store);
-      if (pinned) {
-        console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned.rule.query}") → prepending ${pinned.products.length} product(s)`);
+      if (pinned || req.store.excludedProductIds?.length) {
+        console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned?.rule.query || query}") → prepending ${pinned?.products.length || 0} product(s)`);
         const _json = res.json.bind(res);
-        res.json = (payload) => _json(mergePinnedProducts(payload, pinned.products));
+        res.json = (payload) => _json(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds));
       }
     }
 
@@ -13407,10 +13410,10 @@ app.post("/simple-search", async (req, res) => {
   // 📌 PINNED / PROMOTED RESULTS: prepend merchandised products if this query matches a rule.
   {
     const pinned = await getPinnedProductsForQuery(query, req.store);
-    if (pinned) {
-      console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned.rule.query}") → prepending ${pinned.products.length} product(s)`);
+    if (pinned || req.store.excludedProductIds?.length) {
+      console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned?.rule.query || query}") → prepending ${pinned?.products.length || 0} product(s)`);
       const _json = res.json.bind(res);
-      res.json = (payload) => _json(mergePinnedProducts(payload, pinned.products));
+      res.json = (payload) => _json(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds));
     }
   }
 
@@ -13567,7 +13570,7 @@ app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, as
       const request = req.body.cursor
         ? {cursor:req.body.cursor,limit:Math.min(Number(req.body.limit || 12),50)}
         : {query,limit:Math.min(Number(req.body.limit || 12),50)};
-      const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),sessions:db.db(dbName).collection('beautics_search_sessions'),request});
+      const result = await searchBeautics({collection:db.db(dbName).collection(collectionName || 'products'),sessions:db.db(dbName).collection('beautics_search_sessions'),request:{...request,merchandise:matches=>merchandiseV2(req,matches)}});
       if (result.nextCursor) res.setHeader('X-Next-Token', `beautics-v2:${result.nextCursor}`);
       res.setHeader('X-Search-Engine', 'beautics-v2'); // logged by logV2Search
       // The v2 response is opt-in via modern=true; preserve the legacy array
@@ -13616,10 +13619,10 @@ app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, as
   // response, regardless of which of the many return branches below fires.
   {
     const pinned = await getPinnedProductsForQuery(query, req.store);
-    if (pinned) {
-      console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned.rule.query}") → prepending ${pinned.products.length} product(s)`);
+    if (pinned || req.store.excludedProductIds?.length) {
+      console.log(`[${requestId}] 📌 Pinned rule matched ("${pinned?.rule.query || query}") → prepending ${pinned?.products.length || 0} product(s)`);
       const _json = res.json.bind(res);
-      res.json = (payload) => _json(mergePinnedProducts(payload, pinned.products));
+      res.json = (payload) => _json(mergePinnedProducts(payload, pinned?.products || [], req.store.excludedProductIds));
     }
   }
 
@@ -18487,6 +18490,8 @@ app.get("/search-index-config", async (req, res) => {
 
 app.get("/health", async (req, res) => {
   const health = {
+    revision: process.env.RENDER_GIT_COMMIT || process.env.RAILWAY_GIT_COMMIT_SHA || null,
+    features: { querySearchLayouts: true },
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),

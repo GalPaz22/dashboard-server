@@ -81,6 +81,7 @@ export function findPinnedRuleForQuery(query, store) {
     for (const rawPhrase of String(rule.query || '').split(',')) {
       const phrase = normalizePinnedText(rawPhrase);
       if (!phrase) continue;
+      if (rule.matchType === 'exact' && phrase === normQuery) return rule;
       if (phrase.length > bestLen && (rule.matchType === 'exact' ? phrase === normQuery : pinnedPhraseMatchesQuery(phrase, queryWords))) {
         best = rule;
         bestLen = phrase.length;

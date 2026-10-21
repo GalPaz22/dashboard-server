@@ -56,11 +56,11 @@ function timeWindowMatches(tw, now = new Date()) {
 function queryMatchesTargeting(targeting, query, now = new Date()) {
   if (!targeting) return true;
   if (targeting.mode === "queryMatch") {
-    const q = (query || "").trim().toLowerCase();
+    const q = (query || "").trim().replace(/\s+/g," ").toLowerCase();
     if (!q) return false;
     const patterns = targeting.patterns || [];
     const matched = patterns.some((p) => {
-      const pat = String(p).trim().toLowerCase();
+      const pat = String(p).trim().replace(/\s+/g," ").toLowerCase();
       return targeting.matchType === "exact" ? q === pat : q.includes(pat);
     });
     if (!matched) return false;
@@ -150,6 +150,7 @@ async function mergePatchIntoStore(store, patch, query, tenantDb) {
       ...existingPins.filter((r) => !newQueries.has((r.query || "").toLowerCase())),
     ];
   }
+  if (patch.excludedProductIds) patched.excludedProductIds = [...new Set([...(patched.excludedProductIds || []), ...patch.excludedProductIds.map(String)])];
   if (patch.productBoosts) {
     patched.experimentBoosts = { ...(patched.experimentBoosts || {}), ...patch.productBoosts };
   }

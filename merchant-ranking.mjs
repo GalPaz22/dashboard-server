@@ -10,6 +10,8 @@ const fields = { _id: 1, id: 1, name: 1, title: 1, sku: 1, price: 1, regularPric
 // Apply before saving the ranked snapshot so later pages keep the same order.
 export async function applyMerchantRanking({ collection, matches, query, store = {} }) {
   const pins = findPinnedRuleForQuery(query, store)?.productIds || [];
+  const excluded = new Set((store.excludedProductIds || []).map(String));
+  const allowed = row => visible(row) && ![row._id, row.id].some(id => id != null && excluded.has(String(id)));
   const ids = [...new Set([...matches.map(p => p.id ?? p._id), ...pins].filter(id => id != null).flatMap(aliases))];
   if (!ids.length) return [];
   const values = ids.flatMap(id => Number.isFinite(Number(id)) ? [id, Number(id)] : [id]);
@@ -19,17 +21,18 @@ export async function applyMerchantRanking({ collection, matches, query, store =
   for (const row of rows) for (const id of [row.id, row._id].filter(id => id != null)) byId.set(String(id), row);
   const find = id => aliases(id).map(key => byId.get(key)).find(Boolean);
   const enrich = (p, row) => ({ ...p, boost: row.boost || 0, price: row.price ?? p.price, stockStatus: row.stockStatus || row.stock_status || p.stockStatus });
-  const ranked = matches.map((p, index) => ({ p, row: find(p.id ?? p._id), index })).filter(x => visible(x.row))
+  const ranked = matches.map((p, index) => ({ p, row: find(p.id ?? p._id), index })).filter(x => allowed(x.row))
     .map(x => ({ ...x, p: enrich(x.p, x.row), boost: store.experimentBoosts?.[String(x.row._id)] ?? store.experimentBoosts?.[String(x.row.id)] ?? x.row.boost ?? 0 }))
     .sort((a, b) => b.boost - a.boost || a.index - b.index).map(x => x.p);
   const pinned = [], used = new Set();
   for (const id of pins) {
     const row = find(id);
-    if (!visible(row) || (row.stockStatus || row.stock_status) === 'outofstock') continue;
+    if (!allowed(row)) continue;
+    const existing = ranked.find(p => find(p.id ?? p._id) === row);
+    if ((row.stockStatus || row.stock_status) === 'outofstock' && !existing) continue;
     const key = String(row._id ?? row.id);
     if (used.has(key)) continue;
     used.add(key);
-    const existing = ranked.find(p => find(p.id ?? p._id) === row);
     pinned.push(enrich(existing || { id: String(row.id ?? row._id), name: row.name || row.title, title: row.name || row.title, sku: row.sku, image: row.image || row.images?.[0]?.src || row.images?.[0], url: row.url || row.permalink, categories: row.categories || row.category || [], currency: row.currency, badges: [] }, row));
   }
   return [...pinned, ...ranked.filter(p => !used.has(String(find(p.id ?? p._id)?._id ?? find(p.id ?? p._id)?.id)))];
