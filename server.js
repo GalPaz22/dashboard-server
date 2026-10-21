@@ -11,6 +11,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { AsyncLocalStorage } from 'async_hooks';
+import {mountExperimentPublication} from './experiment-publication.mjs';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
 import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
 import { liveConciergeSettings } from './concierge-settings.mjs';
@@ -3272,6 +3273,8 @@ app.use((req, res, next) => {
   }
   return authenticate(req, res, next);
 });
+
+mountExperimentPublication(app,{getClient:getMongoClient,getRedis:()=>redisReady?redisClient:null});
 
 // ───────────────────────────────────────────────────────────────────────────
 // Special-label stamping
@@ -18493,7 +18496,7 @@ app.get("/search-index-config", async (req, res) => {
 app.get("/health", async (req, res) => {
   const health = {
     revision: process.env.RENDER_GIT_COMMIT || process.env.RAILWAY_GIT_COMMIT_SHA || null,
-    features: { querySearchLayouts: true, weeklyReviewV1: true },
+    features: { querySearchLayouts: true, weeklyReviewV1: true, experimentPublication: true },
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
