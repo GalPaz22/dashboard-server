@@ -1,11 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildSystemPrompt,decideTrigger,catalogFacets,searchCatalog,createTurnRecorder} from '../../concierge.mjs';
+import {buildSystemPrompt,decideTrigger,catalogFacets,searchCatalog,createTurnRecorder,conciergeModelConfig} from '../../concierge.mjs';
 import client from '../../pilot/beautics/client.json' with {type:'json'};
 import {createTopSearch} from './top-search.mjs';
 import {createSearchService} from '../../pilot/beautics/semantic.mjs';
 import {processProduct} from '../../pilot/beautics/core.mjs';
 const store={dbName:'woo-beautics-shop-co-il',products:'products',conciergeEnabled:true};
+
+test('Beautics uses Flash-Lite with minimal thinking while other stores retain their configured model',()=>{
+  assert.deepEqual(conciergeModelConfig(store),{model:'gemini-3.5-flash-lite',thinkingLevel:'MINIMAL'});
+  assert.deepEqual(conciergeModelConfig({dbName:'other'}),{
+    model:process.env.CONCIERGE_MODEL||'gemini-3.7-flash',
+    thinkingLevel:{minimal:'MINIMAL',low:'LOW'}[process.env.CONCIERGE_EFFORT||'low']||'MEDIUM',
+  });
+});
 
 test('top advice reaches the model router instead of being treated as a failed literal product filter',async()=>{
   const products=[processProduct({id:'1',name:'טופ מבריק',categories:['טופים'],status:'ACTIVE',stockStatus:'instock',price:69},client)];

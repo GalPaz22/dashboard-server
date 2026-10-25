@@ -43,6 +43,11 @@ const MODEL = process.env.CONCIERGE_MODEL || "gemini-3.7-flash";
 const EFFORT = process.env.CONCIERGE_EFFORT || "low";
 // "minimal" only on models that accept it — gemini-3.7-flash answers MINIMAL with a 400.
 const THINKING_LEVEL = { minimal: "MINIMAL", low: "LOW" }[EFFORT] || "MEDIUM";
+export function conciergeModelConfig(store) {
+  return isBeautics(store)
+    ? { model: "gemini-3.5-flash-lite", thinkingLevel: "MINIMAL" }
+    : { model: MODEL, thinkingLevel: THINKING_LEVEL };
+}
 const MAX_TOKENS = Number(process.env.CONCIERGE_MAX_TOKENS) || 8000;
 
 const MAX_TOOL_ROUNDS = 8;         // one shopper turn = at most this many API calls
@@ -1086,7 +1091,7 @@ async function reviewNonLiteralQuery({ query, products, store, ctx }) {
     const timer = setTimeout(() => controller.abort(), TRIGGER_REVIEW_TIMEOUT_MS);
     try {
       const response = await client.models.generateContent({
-        model: TRIGGER_REVIEW_MODEL,
+        model: isBeautics(store) ? conciergeModelConfig(store).model : TRIGGER_REVIEW_MODEL,
         contents: userPrompt,
         config: {
           abortSignal: controller.signal,
@@ -1094,7 +1099,7 @@ async function reviewNonLiteralQuery({ query, products, store, ctx }) {
           systemInstruction: TRIGGER_REVIEW_SYSTEM_PROMPT,
           responseMimeType: "application/json",
           responseJsonSchema: TRIGGER_REVIEW_SCHEMA.schema,
-          thinkingConfig: { thinkingLevel: TRIGGER_REVIEW_EFFORT === "low" ? "LOW" : "MINIMAL" },
+          thinkingConfig: { thinkingLevel: isBeautics(store) ? "MINIMAL" : TRIGGER_REVIEW_EFFORT === "low" ? "LOW" : "MINIMAL" },
         },
       });
       const parsed = JSON.parse(response.text || "{}");
@@ -1279,6 +1284,7 @@ async function runTool(block, ctx, onEvent) {
  */
 async function runAgent({ messages, ctx, onEvent, signal }) {
   const client = getGemini();
+  const { model, thinkingLevel } = conciergeModelConfig(ctx.store);
   const functionDeclarations = toolDefinitions.map(({ name, description, input_schema }) => ({
     name, description, parametersJsonSchema: input_schema,
   }));
@@ -1292,7 +1298,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     const abortController = new AbortController();
     if (signal) signal.onAbort = () => abortController.abort();
     const stream = await client.models.generateContentStream({
-      model: MODEL,
+      model,
       contents: messages,
       config: {
         abortSignal: abortController.signal,
@@ -1304,7 +1310,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
           : round >= FORCE_PRESENT_AFTER_ROUNDS
             ? { mode: "ANY", allowedFunctionNames: ["present_products"] }
             : { mode: "AUTO" } },
-        thinkingConfig: { thinkingLevel: THINKING_LEVEL },
+        thinkingConfig: { thinkingLevel },
       },
     });
 
@@ -1370,7 +1376,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
         });
         continue;
       }
-      onEvent({ type: "done", usage, model: MODEL });
+      onEvent({ type: "done", usage, model });
       return { stopped: finishReason || "STOP", usage };
     }
 
@@ -1408,7 +1414,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     // text this round, roundText is empty and the loop continues as before
     // to get the real answer.
     if (justPresented && roundText.trim()) {
-      onEvent({ type: "done", usage, model: MODEL });
+      onEvent({ type: "done", usage, model });
       return { stopped: finishReason || "STOP", usage };
     }
   }
@@ -1561,14 +1567,15 @@ async function recordConversation(deps, store, conversation, extra = {}, turn = 
   }
 }
 
-function pricingForNow() {
+function pricingForNow(model) {
   // Gemini 3.7 Flash is API-accessible but not yet listed on Google's public
   // pricing page. Defaults follow 3.6 Flash until explicit 3.7 rates are
   // published; production can override every rate through env vars.
-  const baseInput = Number(process.env.CONCIERGE_INPUT_USD_PER_MTOK) || 1.5;
-  const output = Number(process.env.CONCIERGE_OUTPUT_USD_PER_MTOK) || 7.5;
+  const flashLite = model === "gemini-3.5-flash-lite";
+  const baseInput = Number(process.env.CONCIERGE_INPUT_USD_PER_MTOK) || (flashLite ? 0.3 : 1.5);
+  const output = Number(process.env.CONCIERGE_OUTPUT_USD_PER_MTOK) || (flashLite ? 2.5 : 7.5);
   return {
-    model: MODEL,
+    model,
     input_usd_per_mtok: baseInput,
     output_usd_per_mtok: output,
     cache_write_usd_per_mtok: Number(process.env.CONCIERGE_CACHE_WRITE_USD_PER_MTOK) || baseInput,
@@ -1578,7 +1585,7 @@ function pricingForNow() {
 
 function recordTurnCost(conversation, usage) {
   if (!usage) return;
-  const pricing = pricingForNow();
+  const pricing = pricingForNow(conciergeModelConfig({ dbName: conversation.dbName }).model);
   const normalized = {
     rounds: usage.rounds || 0,
     input_tokens: usage.input_tokens || 0,
@@ -1999,5 +2006,5 @@ export function mountConcierge(app, deps) {
     }
   });
 
-  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}`);
+  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal`);
 }
