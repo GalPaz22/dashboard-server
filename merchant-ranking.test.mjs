@@ -6,6 +6,17 @@ import { createSearchSessions } from './tenants/beautics/sessions.mjs';
 const row = (id, extra = {}) => ({ _id: new ObjectId(id.toString(16).padStart(24, '0')), id, name: `Product ${id}`, status: 'publish', stockStatus: 'instock', ...extra });
 const collection = rows => ({ find(query, options) { assert.ok(query.$or); assert.equal(options.projection.embedding, undefined); return { async toArray() { return rows; } }; } });
 
+test('catalog-only pins and organic results preserve platform ItemID independently of id and Mongo _id', async () => {
+  const rows = [row(1, { ItemID: 9001 }), row(2, { ItemID: 9002 }), row(3, { itemID: 'platform-three' })];
+  const products = { find(query, { projection }) {
+    return { async toArray() { return rows.map(source => Object.fromEntries(Object.keys(projection).filter(key => key in source).map(key => [key, source[key]]))); } };
+  } };
+  const result = await applyMerchantRanking({ collection: products, matches: [{ id: 'tenant:1' }], query: 'wine',
+    store: { pinnedResults: [{ query: 'wine', productIds: ['2', '3'] }] } });
+  assert.deepEqual(result.map(p => p.id), ['2', '3', 'tenant:1']);
+  assert.equal(result[0].ItemID, 9002); assert.equal(result[1].itemID, 'platform-three'); assert.equal(result[2].ItemID, 9001);
+});
+
 test('manual boosts preserve organic relevance and read fresh flags outside the engine cache', async () => {
   const rows = [row(1), row(2, { boost: 3 }), row(3, { hidden: true }), row(4, { boost: 2 }), row(5)];
   const matches = [1, 2, 3, 5].map(id => ({ id: `tenant:${id}`, title: `Card ${id}` }));

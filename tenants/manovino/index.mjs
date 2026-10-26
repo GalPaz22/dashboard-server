@@ -4,7 +4,10 @@ export {manifest};
 // The registry decides whether this tenant answers (control document, rollout, circuit breaker); with onError set, a
 // failed new search falls through to the existing pipeline instead of returning an error to the shopper.
 export function storefrontResponse(result,modern=true){
- const products=(result.matches||[]).map(p=>({...p,name:p.title??p.name,badges:p.badges||[]}));
+ const products=(result.matches||[]).map(p=>{
+  const itemID=p.itemID??p.ItemID;
+  return {...p,...(itemID!=null?{itemID,ItemID:p.ItemID??itemID}:{}),name:p.title??p.name,badges:p.badges||[]};
+ });
  if(!modern)return products;
  const token=result.nextCursor?manifest.tokenPrefix+result.nextCursor:null;
  return {...result,matches:products,products,metadata:{...result.metadata,searchEngine:'semantix-'+manifest.slug},pagination:{totalAvailable:result.total,returned:products.length,hasMore:!!token,nextToken:token,nextCursor:result.nextCursor,secondBatchToken:null,categoryFilterToken:null,hasCategoryFiltering:false}};

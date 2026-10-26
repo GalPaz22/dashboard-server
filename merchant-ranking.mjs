@@ -5,7 +5,7 @@ import { findPinnedRuleForQuery } from './pinned-matching.mjs';
 const aliases = value => [...new Set([String(value), String(value).split(':').pop()])];
 const visible = row => row && row.hidden !== true && row.notInStore !== true && row.catalog_visibility !== 'hidden'
   && (!row.status || ['ACTIVE', 'active', 'publish', 'published'].includes(row.status));
-const fields = { _id: 1, id: 1, name: 1, title: 1, sku: 1, price: 1, regularPrice: 1, currency: 1, image: 1, images: 1, url: 1, permalink: 1, category: 1, categories: 1, boost: 1, hidden: 1, notInStore: 1, catalog_visibility: 1, status: 1, stockStatus: 1, stock_status: 1 };
+const fields = { _id: 1, id: 1, ItemID: 1, itemID: 1, name: 1, title: 1, sku: 1, price: 1, regularPrice: 1, currency: 1, image: 1, images: 1, url: 1, permalink: 1, category: 1, categories: 1, boost: 1, hidden: 1, notInStore: 1, catalog_visibility: 1, status: 1, stockStatus: 1, stock_status: 1 };
 
 // Read commercial flags on every new search, outside the engine's cached catalog.
 // Apply before saving the ranked snapshot so later pages keep the same order.
@@ -21,7 +21,12 @@ export async function applyMerchantRanking({ collection, matches, query, store =
   const byId = new Map();
   for (const row of rows) for (const id of [row.id, row._id].filter(id => id != null)) byId.set(String(id), row);
   const find = id => aliases(id).map(key => byId.get(key)).find(Boolean);
-  const enrich = (p, row) => ({ ...p, boost: row.boost || 0, price: row.price ?? p.price, stockStatus: row.stockStatus || row.stock_status || p.stockStatus });
+  const enrich = (p, row) => ({ ...p,
+    // Pins outside the organic results are built from these rows. Preserve the
+    // storefront's item identifier, which may differ from both id and Mongo _id.
+    ...(row.ItemID != null ? { ItemID: row.ItemID } : {}),
+    ...(row.itemID != null ? { itemID: row.itemID } : {}),
+    boost: row.boost || 0, price: row.price ?? p.price, stockStatus: row.stockStatus || row.stock_status || p.stockStatus });
   const ranked = matches.map((p, index) => ({ p, row: find(p.id ?? p._id), index })).filter(x => allowed(x.row))
     .map(x => ({ ...x, p: enrich(x.p, x.row), boost: store.experimentBoosts?.[String(x.row._id)] ?? store.experimentBoosts?.[String(x.row.id)] ?? x.row.boost ?? 0 }))
     .sort((a, b) => b.boost - a.boost || a.index - b.index).map(x => x.p);

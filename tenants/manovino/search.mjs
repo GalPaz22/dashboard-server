@@ -13,7 +13,7 @@ const number=v=>v===null||v===undefined||v===''?null:Number.isFinite(Number(v))?
 // Merchant-row fields the engine card lacks but a storefront needs: the platform's own item id (add to cart, tracking),
 // its catalog number, the subtitle, the sale flag and sale price, the feed's offer id and the per-format price labels
 // a card template prints (specialLabel: printed / digital / club). Only these ride along; the engine's own fields win on a clash.
-const SOURCE_FIELDS=['ItemID','Makat','Subtitle','onSale','offerId','salePrice','specialLabel'];
+const SOURCE_FIELDS=['ItemID','itemID','Makat','Subtitle','onSale','offerId','salePrice','specialLabel'];
 const sources=new WeakMap();
 export function withSource(rows){
  let byId=sources.get(rows);
