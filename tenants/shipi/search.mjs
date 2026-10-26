@@ -28,7 +28,9 @@ export function adaptRow(row,retired=()=>false){
   // Hidden as the studio imports it: the store's own flag, "not in store", a catalog visibility of "hidden", or an
   // row the store has retired (dead product page, never seen by a sync, or out of stock with no price / missed by the latest sync — retiredRows).
   hidden:row.hidden===true||row.notInStore===true||row.catalog_visibility==='hidden'||retired(row),
-  categories:strings(row.categories?.length?row.categories:row.category),tags:[...new Set([...strings(row.tags),...strings(row.siteTags)])],
+  categories:strings(row.categories?.length?row.categories:row.category),tags:[...new Set([...strings(row.tags),...strings(row.siteTags),...(row.isWooPopular===true?['isWooPopular']:[])])],
+  // WooCommerce's popular flag and sales count, read live: the engine lifts popular products by default, best sellers first.
+  ...(typeof row.isWooPopular==='boolean'&&{popular:row.isWooPopular}),...(Number(row.total_sales)>0&&{popularity:Number(row.total_sales)}),
   description:String(row.description||row.short_description||'').replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim().slice(0,18000),specifications:row.specifications&&typeof row.specifications==='object'&&!Array.isArray(row.specifications)?row.specifications:{}};
 }
 // Enriched snapshot cards with live commercial fields; new products are processed with the same profile. seen collects
@@ -36,9 +38,12 @@ export function adaptRow(row,retired=()=>false){
 export function mergeLive(cards,rows,profile,tenantId,seen=new Set()){
  const retired=retiredRows(rows),live=new Map(rows.map(r=>{const a=adaptRow(r,retired);return [a.id,a];})),out=[];
  for(const c of cards){const key=String(c.id).split(':').pop(),row=live.get(String(c.id))||live.get(key);if(!row)continue;seen.add(row.id);
-  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];out.push(next);}
+  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];
+  // The store's popular flag and sales follow the live rows, so a newly popular product is lifted without a new edition.
+  if(row.popular!==undefined){const tags=(next.tags||[]).filter(t=>t!=='isWooPopular');next.tags=row.popular?[...tags,'isWooPopular']:tags;}
+  if(row.popularity)next.popularity=row.popularity;out.push(next);}
  const client={...profile,tenantId,version:'semantix-mini',publishedStatuses:['ACTIVE','publish']};
- for(const [id,row] of live)if(!seen.has(id))out.push(processProduct(row,client));
+ for(const [id,row] of live)if(!seen.has(id))out.push({...processProduct(row,client),...(row.popularity&&{popularity:row.popularity})});
  return out;
 }
 // The module's data (approved revision: profile + enriched cards) is published by the studio to the store's own
@@ -60,12 +65,12 @@ const local=()=>{const has=n=>existsSync(new URL(n,import.meta.url));return has(
 // The live-rows part of the fingerprint, once per rows array (the loader returns the same array until it refreshes,
 // and a refresh is a new array): hashing the whole catalog on every search and suggestion cost CPU and garbage.
 const prints=new WeakMap();
-const rowsPrint=rows=>{let p=prints.get(rows);if(p===undefined)prints.set(rows,p=hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null,r.pageCheck?.status??null])));return p;};
+const rowsPrint=rows=>{let p=prints.get(rows);if(p===undefined)prints.set(rows,p=hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null,r.pageCheck?.status??null,r.isWooPopular??null,r.total_sales??null])));return p;};
 // Live rows the built edition already covers with enriched cards are cut down to what the fingerprint, the live fields,
 // the hidden rule and withSource read; their text (description, specifications, images...) stays only in the runtime.
 // Rows the edition lacks keep everything: a build processes them as new products. Only the module's own row loader
 // (it can reload) has its rows slimmed, in place, so a caller's own array is never changed.
-const SLIM_FIELDS=['_id','id','price','regularPrice','regular_price','currency','stockStatus','stock_status','status','hidden','notInStore','catalog_visibility','lastSeenAt','pageCheck','url','permalink','image',...SOURCE_FIELDS];
+const SLIM_FIELDS=['_id','id','price','regularPrice','regular_price','currency','stockStatus','stock_status','status','hidden','notInStore','catalog_visibility','lastSeenAt','pageCheck','isWooPopular','total_sales','url','permalink','image',...SOURCE_FIELDS];
 const slim=new WeakSet();
 function slimRow(r){const s={};for(const k of SLIM_FIELDS)if(r[k]!==undefined)s[k]=r[k];if(!r.image&&r.images?.length)s.images=[r.images[0]];slim.add(s);return s;}
 function compact(rows,covered){for(let i=0;i<rows.length;i++){const r=rows[i];if(!slim.has(r)&&covered.has(String(r.id??r._id)))rows[i]=slimRow(r);}}
@@ -136,7 +141,7 @@ export function createRowLoader({ttlMs=43200000,now=Date.now,max=60000}={}){
  return get;
  function load(collection){
   if(pending)return pending;
-  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,lastSeenAt:1,pageCheck:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
+  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,lastSeenAt:1,pageCheck:1,isWooPopular:1,total_sales:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
    try{const rows=await cursor.toArray();if(rows.length>max)throw Error('Catalog exceeds safety limit');cached=rows;expires=now()+ttlMs;return rows;}finally{await cursor.close?.();}})()
    .finally(()=>{pending=null;});
   return pending;

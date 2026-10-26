@@ -12,7 +12,7 @@ export const REGISTRY_VERSION=5;
 // existing pipeline, so shoppers get the old search rather than an error.
 export const userSwitch=store=>{const s=store?.semantix;if(!s||typeof s!=='object')return null;const percent=Number(s.percent);
  return {module:String(s.module||''),enabled:s.enabled===true,percent:Number.isFinite(percent)?Math.max(0,Math.min(100,percent)):100};};
-export function createSemantixTenants({getDb,dir=new URL('./',import.meta.url),now=Date.now,breaker={failures:5,windowMs:60000,coolMs:300000}}={}){
+export function createSemantixTenants({getDb,merchandise=null,dir=new URL('./',import.meta.url),now=Date.now,breaker={failures:5,windowMs:60000,coolMs:300000}}={}){
  let loading=null;const state=new Map();
  const tenant=slug=>{if(!state.has(slug))state.set(slug,{failures:[],openUntil:0,served:0,fellBack:0,lastError:null});return state.get(slug);};
  function decide(manifest,store){
@@ -39,7 +39,7 @@ export function createSemantixTenants({getDb,dir=new URL('./',import.meta.url),n
   for(const entry of await readdir(dir,{withFileTypes:true})){if(!entry.isDirectory())continue;const folder=new URL(entry.name+'/',dir);
    try{JSON.parse(await readFile(new URL('semantix.module.json',folder),'utf8'));}catch{continue;}
    try{const mod=await import(pathToFileURL(new URL('index.mjs',folder).pathname).href),manifest=mod.manifest;
-    routes.push(mod.createTenantRoutes({getDb,enabled:req=>allowed(manifest,req),onError:e=>failed(manifest.slug,e),onServed:()=>{tenant(manifest.slug).served++;}}));}
+    routes.push(mod.createTenantRoutes({getDb,merchandise,enabled:req=>allowed(manifest,req),onError:e=>failed(manifest.slug,e),onServed:()=>{tenant(manifest.slug).served++;}}));}
    catch(e){console.error('[SEMANTIX] failed to load tenant',entry.name,e.message);}}
   return routes;})();
  const chain=kind=>async(req,res,next)=>{let routes;try{routes=await load();}catch(e){console.error('[SEMANTIX]',e.message);return next();}
