@@ -2,7 +2,7 @@
 // cannot reach the search server's Redis, or its 120-second publication expires.
 export function createPermanentRuleLoader({ now = Date.now, ttlMs = 15_000, maxEntries = 500 } = {}) {
   const cache = new Map();
-  async function load(store, client) {
+  return async function load(store, client) {
     const key = JSON.stringify([store.dbName, store.apiKey]);
     const cached = cache.get(key);
     if (cached?.pending) return cached.pending;
@@ -10,8 +10,8 @@ export function createPermanentRuleLoader({ now = Date.now, ttlMs = 15_000, maxE
     const entry = {};
     const pending = (async () => {
       const siblings = await client.db('users').collection('users').find(
-        { dbName: store.dbName }, { projection: { apiKey: 1, platform: 1, 'credentials.dbName': 1, 'credentials.pinnedResults': 1 }, maxTimeMS: 2000 }
-      ).sort({ _id: 1 }).toArray();
+        { dbName: store.dbName }, { projection: { apiKey: 1 }, maxTimeMS: 2000 }
+      ).toArray();
       const keys = [...new Set([store.apiKey, ...siblings.map(row => row.apiKey)].filter(Boolean))];
       const rows = await client.db('control_plane').collection('rules').find({
         status: 'active',
@@ -26,10 +26,7 @@ export function createPermanentRuleLoader({ now = Date.now, ttlMs = 15_000, maxE
       if (rows.length > 500) throw Error('Too many active store rules');
       // The merchant's saved arrangement takes precedence over older agent pins.
       rows.sort((a, b) => Number(typeof a.merchantQuery === 'string') - Number(typeof b.merchantQuery === 'string'));
-      const users = siblings.filter(row => !row.credentials?.dbName || row.credentials.dbName === store.dbName);
-      const primary = users.find(row => row.platform) || users[0];
-      const pinnedResults = primary ? (Array.isArray(primary.credentials?.pinnedResults) ? primary.credentials.pinnedResults : []) : undefined;
-      const rules = { rules: rows.map(row => ({ id: String(row._id), condition: row.condition, patch: row.patch })), pinnedResults };
+      const rules = rows.map(row => ({ id: String(row._id), condition: row.condition, patch: row.patch }));
       entry.rules = rules;
       entry.at = now();
       delete entry.pending;
@@ -40,7 +37,5 @@ export function createPermanentRuleLoader({ now = Date.now, ttlMs = 15_000, maxE
     cache.set(key, entry);
     if (cache.size > maxEntries) cache.delete(cache.keys().next().value);
     return pending;
-  }
-  load.invalidate = store => cache.delete(JSON.stringify([store.dbName, store.apiKey]));
-  return load;
+  };
 }
