@@ -1,6 +1,8 @@
+import { createPermanentRuleLoader } from './permanent-rules.mjs';
+
 // A/B experiment + permanent-rule hook for the search-optimizer control plane.
-// Reads active experiment/rule definitions published by search-optimizer to
-// Redis, applies them to the store config for this request, and returns a
+// Reads experiments from Redis and saved permanent rules from Mongo (with a
+// Redis fallback), applies them to the store config for this request, and returns a
 // patched copy. Any failure anywhere returns the original store — the search
 // path must never depend on this.
 //
@@ -97,7 +99,14 @@ async function getCached(kind, redisClient, apiKey, redisKeyPrefix) {
 }
 
 const getActiveExperiments = (redisClient, apiKey) => getCached("experiments", redisClient, apiKey, "experiments:active");
-const getActiveRules = (redisClient, apiKey) => getCached("rules", redisClient, apiKey, "rules:active");
+const loadPermanentRules = createPermanentRuleLoader();
+async function getActiveRules(redisClient, store, tenantDb) {
+  if (store.dbName && tenantDb?.client) {
+    try { return await loadPermanentRules(store, tenantDb.client); }
+    catch (error) { console.error('[rules] Mongo refresh failed, using published rules:', error.message); }
+  }
+  return getCached("rules", redisClient, store.apiKey, "rules:active");
+}
 
 /**
  * Rule-based cross-category association ("show cognac on 'brandy'"). Resolves
@@ -243,7 +252,7 @@ export async function applyExperimentVariant(store, sessionId, query, tenantDb, 
 export async function applyPermanentRules(store, query, tenantDb, redisClient, now = new Date(), { record = true } = {}) {
   try {
     if (!store?.apiKey) return store;
-    const rules = await getActiveRules(redisClient, store.apiKey);
+    const rules = await getActiveRules(redisClient, store, tenantDb);
     if (!rules.length) return store;
 
     let patched = store;

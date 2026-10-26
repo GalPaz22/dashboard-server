@@ -18466,7 +18466,7 @@ app.get("/search-index-config", async (req, res) => {
 app.get("/health", async (req, res) => {
   const health = {
     revision: process.env.RENDER_GIT_COMMIT || process.env.RAILWAY_GIT_COMMIT_SHA || null,
-    features: { querySearchLayouts: true, weeklyReviewV1: true, experimentPublication: true },
+    features: { querySearchLayouts: true, savedSearchRules: true, weeklyReviewV1: true, experimentPublication: true },
     status: 'healthy',
     timestamp: new Date().toISOString(),
     uptime: process.uptime(),
