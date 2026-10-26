@@ -100,12 +100,16 @@ async function getCached(kind, redisClient, apiKey, redisKeyPrefix) {
 
 const getActiveExperiments = (redisClient, apiKey) => getCached("experiments", redisClient, apiKey, "experiments:active");
 const loadPermanentRules = createPermanentRuleLoader();
+export async function refreshPermanentRules(store, client) {
+  loadPermanentRules.invalidate(store);
+  return loadPermanentRules(store, client);
+}
 async function getActiveRules(redisClient, store, tenantDb) {
   if (store.dbName && tenantDb?.client) {
     try { return await loadPermanentRules(store, tenantDb.client); }
     catch (error) { console.error('[rules] Mongo refresh failed, using published rules:', error.message); }
   }
-  return getCached("rules", redisClient, store.apiKey, "rules:active");
+  return { rules: await getCached("rules", redisClient, store.apiKey, "rules:active") };
 }
 
 /**
@@ -252,10 +256,9 @@ export async function applyExperimentVariant(store, sessionId, query, tenantDb, 
 export async function applyPermanentRules(store, query, tenantDb, redisClient, now = new Date(), { record = true } = {}) {
   try {
     if (!store?.apiKey) return store;
-    const rules = await getActiveRules(redisClient, store, tenantDb);
-    if (!rules.length) return store;
-
-    let patched = store;
+    const { rules, pinnedResults } = await getActiveRules(redisClient, store, tenantDb);
+    let patched = pinnedResults === undefined ? store : { ...store, pinnedResults };
+    if (!rules.length) return patched;
     for (const rule of rules) {
       if (!queryMatchesTargeting(rule.condition, query, now)) continue;
       if (tenantDb && record) logRuleTrigger(tenantDb, rule.id);

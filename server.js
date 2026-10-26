@@ -14,6 +14,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { AsyncLocalStorage } from 'async_hooks';
 import {mountExperimentPublication} from './experiment-publication.mjs';
+import {mountRulePublication} from './rule-publication.mjs';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
 import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
 import { liveConciergeSettings } from './concierge-settings.mjs';
@@ -3244,6 +3245,7 @@ app.use((req, res, next) => {
 });
 
 mountExperimentPublication(app,{getClient:getMongoClient,getRedis:()=>redisReady?redisClient:null});
+mountRulePublication(app,{getClient:getMongoClient});
 
 // ───────────────────────────────────────────────────────────────────────────
 // Special-label stamping

@@ -12,7 +12,7 @@ function fixture() {
     checks.push({ name, collection, filter, options });
     if (state.fail) throw Error('Mongo offline');
     return { sort() { return this; }, limit() { return this; }, async toArray() {
-      if (collection === 'users') return [{ apiKey: 'tracking-key' }];
+      if (collection === 'users') return state.users || [{ apiKey: 'tracking-key' }];
       state.reads++;
       return state.rows;
     } };
@@ -21,7 +21,7 @@ function fixture() {
 }
 
 test('reads saved rules without Redis, scoped by dbName and legacy sibling keys', async () => {
-  const f = fixture(), rules = await createPermanentRuleLoader()(f.store, f.client);
+  const f = fixture(), {rules} = await createPermanentRuleLoader()(f.store, f.client);
   assert.deepEqual(rules.map(r => r.id), ['agent', 'merchant']);
   assert.deepEqual(f.checks[1].filter, { status: 'active', $or: [
     { dbName: 'manoVino' },
@@ -37,9 +37,9 @@ test('coalesces reads and sees edits and removal after 15 seconds instead of rev
   assert.equal(f.state.reads, 1);
   f.state.rows = [];
   time = 14999;
-  assert.equal((await load(f.store, f.client)).length, 2);
+  assert.equal((await load(f.store, f.client)).rules.length, 2);
   time = 15000;
-  assert.deepEqual(await load(f.store, f.client), []);
+  assert.deepEqual((await load(f.store, f.client)).rules, []);
   assert.equal(f.state.reads, 2);
 });
 
@@ -52,7 +52,7 @@ test('cache is isolated by store and bounded, and a failed read can recover', as
   const retry = createPermanentRuleLoader(); f.state.fail = true;
   await assert.rejects(retry(f.store, f.client), /Mongo offline/);
   f.state.fail = false;
-  assert.equal((await retry(f.store, f.client)).length, 2);
+  assert.equal((await retry(f.store, f.client)).rules.length, 2);
 });
 
 test('search applies merchant ordering and removals without Studio publication and preserves exact query scope', async () => {
@@ -60,7 +60,7 @@ test('search applies merchant ordering and removals without Studio publication a
   const result = await applyPermanentRules(f.store, '  הכורמים   החופשיים ', db, null, new Date(), { record: false });
   assert.deepEqual(result.pinnedResults[0].productIds, ['first', 'second']);
   assert.deepEqual(result.excludedProductIds, ['removed']);
-  assert.deepEqual(await applyPermanentRules(f.store, 'יין אחר', db, null, new Date(), { record: false }), f.store);
+  assert.deepEqual(await applyPermanentRules(f.store, 'יין אחר', db, null, new Date(), { record: false }), { ...f.store, pinnedResults: [] });
   assert.equal(f.store.pinnedResults, undefined);
   assert.equal(f.state.reads, 1);
 });
@@ -68,8 +68,29 @@ test('search applies merchant ordering and removals without Studio publication a
 test('empty Mongo result overrides stale published rules; Mongo outages still use the Redis fallback', async () => {
   const empty = fixture(); empty.store = { ...empty.store, apiKey: 'empty-key' }; empty.state.rows = [];
   const redis = { get: async () => JSON.stringify([{ id: 'stale', condition: empty.agent.condition, patch: empty.agent.patch }]) };
-  assert.deepEqual(await applyPermanentRules(empty.store, 'הכורמים החופשיים', { client: empty.client }, redis, new Date(), { record: false }), empty.store);
+  assert.deepEqual(await applyPermanentRules(empty.store, 'הכורמים החופשיים', { client: empty.client }, redis, new Date(), { record: false }), { ...empty.store, pinnedResults: [] });
   const down = fixture(); down.store = { ...down.store, apiKey: 'outage-key' }; down.state.fail = true;
   const result = await applyPermanentRules(down.store, 'הכורמים החופשיים', { client: down.client }, redis, new Date(), { record: false });
   assert.deepEqual(result.pinnedResults[0].productIds, ['old']);
+});
+
+
+test('legacy dashboard pins refresh and removals clear cached store config, using the assigned store account', async () => {
+  const f = fixture(); f.store = { ...f.store, apiKey: 'legacy-dashboard-key' }; f.state.rows = [];
+  f.state.users = [
+    { apiKey: 'foreign-credentials', platform: 'woocommerce', credentials: { dbName: 'other-store', pinnedResults: [{ query: 'private' }] } },
+    { apiKey: 'tracking-key' },
+    { apiKey: f.store.apiKey, platform: 'woocommerce', credentials: { dbName: f.store.dbName, pinnedResults: [{ query: 'בירה', productIds: ['fresh'], enabled: true }] } },
+  ];
+  let time = 0; const load = createPermanentRuleLoader({ now: () => time });
+  assert.equal((await load(f.store, f.client)).pinnedResults[0].productIds[0], 'fresh');
+  f.state.users[2].credentials.pinnedResults = [];
+  time = 15000;
+  assert.deepEqual((await load(f.store, f.client)).pinnedResults, []);
+  f.state.users[2].credentials.pinnedResults = [{ query: 'חדש', productIds: ['new'] }];
+  load.invalidate(f.store);
+  assert.equal((await load(f.store, f.client)).pinnedResults[0].productIds[0], 'new');
+  f.state.users[2].credentials.pinnedResults = [];
+  const result = await applyPermanentRules({ ...f.store, pinnedResults: [{ query: 'stale' }] }, 'בירה', {client:f.client}, null, new Date(), {record:false});
+  assert.deepEqual(result.pinnedResults, []);
 });
