@@ -40,7 +40,9 @@ function vocabulary(index){
 // relax=true also approximates a term that exists, keeping its own postings (a rare real word
 // such as "שליו" must not block the correction to "שלו").
 // Terms with digits (ISBN, models) and short words are never approximated.
-export function resolveTerm(index,term,{relax=false}={}){
+// partial=true (a tenant's pipeline.partialWords) also reads an unfinished word as the catalog words it begins
+// ("ארנ" → ארנק, "סמסו" → סמסונג), most common first — after the exact word and its inflections, beside the fuzzy ones.
+export function resolveTerm(index,term,{relax=false,partial=false}={}){
   const own=new Map((Object.hasOwn(index.terms,term)?index.terms[term]:[]).map(id=>[id,0]));
   // The other number of the same word counts as the word itself (ranked just after the exact form).
   const forms=inflections(term).filter(t=>Object.hasOwn(index.terms,t));for(const t of forms)for(const id of index.terms[t])if(!own.has(id))own.set(id,0.5);
@@ -51,9 +53,11 @@ export function resolveTerm(index,term,{relax=false}={}){
   if(term.length>=4&&!/\d/.test(term)){const max=term.length>=8?2:1,byLength=vocabulary(index);
     for(let len=term.length-max;len<=term.length+max;len++)for(const t of byLength.get(len)||[]){if(t===term)continue;const edits=boundedDistance(term,t,max);if(edits<=max)found.push({t,edits});}}
   const least=found.length?Math.min(...found.map(f=>f.edits)):0,chosen=found.filter(f=>f.edits===least).sort((a,b)=>index.terms[b.t].length-index.terms[a.t].length).slice(0,10);
-  if(!stem&&!chosen.length)return {kind:'none',postings:own};
+  const completions=partial&&!own.size&&term.length>=3&&!/^\d+$/.test(term)?Object.keys(index.terms).filter(t=>t.length>term.length&&t.startsWith(term)).sort((a,b)=>index.terms[b].length-index.terms[a].length).slice(0,20):[];
+  if(!stem&&!chosen.length&&!completions.length)return {kind:'none',postings:own};
   const postings=new Map(own);const add=(t,cost)=>{for(const id of index.terms[t])if(!postings.has(id)||postings.get(id)>cost)postings.set(id,cost);};
-  if(stem)add(stem,1);for(const {t,edits} of chosen)add(t,1+edits);
+  if(stem)add(stem,1);for(const t of completions)add(t,1);for(const {t,edits} of chosen)add(t,1+edits);
+  if(completions.length&&!stem&&!chosen.length)return {kind:'completion',to:completions,postings};
   // relaxed: the term is a real catalog word that was approximated only because the words do not occur together.
   return {kind:stem&&!chosen.length?'prefix':chosen.length&&!stem?'fuzzy':'prefix+fuzzy',to:[...(stem?[stem]:[]),...chosen.map(c=>c.t)],...(chosen.length&&{edits:least}),...(relax&&own.size&&{relaxed:true}),postings};
 }
@@ -61,15 +65,15 @@ export function createIndexRetriever(products,client,index) {
   if(index.contentHash!==hash(products))throw Error('האינדקס אינו תואם לגרסת המוצרים');
   const byId=new Map(products.map(p=>[p.id,p]));
   return (query)=>{
-    const normalized=normalize(query),plan=planQuery(query,client),exact=Object.hasOwn(index.identifiers,normalized)?index.identifiers[normalized]:null;
+    const partial=client.pipeline?.partialWords===true,normalized=normalize(query),plan=planQuery(query,client),exact=Object.hasOwn(index.identifiers,normalized)?index.identifiers[normalized]:null;
     const visible=p=>sellable(p,client)&&(exact||
       matchesScopedAliases(p,plan)&&(!plan.productType||p.productType===plan.productType)&&plan.colors.every(c=>p.colors.includes(c))&&plan.finishes.every(f=>p.finishes.includes(f))&&plan.tags.every(t=>p.tags.includes(t))&&(plan.maxPrice===null||p.price!==null&&p.price<=plan.maxPrice));
     const run=resolved=>{let ids=exact||products.map(p=>p.id);const penalty=new Map();
       if(!exact)for(const r of resolved){ids=ids.filter(id=>r.postings.has(id));for(const id of ids)penalty.set(id,(penalty.get(id)||0)+r.postings.get(id));}
       return {penalty,matches:ids.map(id=>byId.get(id)).filter(visible),resolved};};
-    let resolved=exact?[]:plan.terms.map(term=>resolveTerm(index,term)),best=run(resolved);
+    let resolved=exact?[]:plan.terms.map(term=>resolveTerm(index,term,{partial})),best=run(resolved);
     // Every term exists but not together: approximate one term at a time, fewest edits first.
-    if(!best.matches.length&&resolved.length>1)for(const [i,term] of plan.terms.entries()){if(resolved[i].kind!=='exact')continue;const relaxed=resolveTerm(index,term,{relax:true});if(relaxed.kind==='none')continue;
+    if(!best.matches.length&&resolved.length>1)for(const [i,term] of plan.terms.entries()){if(resolved[i].kind!=='exact')continue;const relaxed=resolveTerm(index,term,{relax:true,partial});if(relaxed.kind==='none')continue;
       const attempt=run(resolved.map((r,j)=>j===i?relaxed:r));if(attempt.matches.length&&(!best.matches.length||(relaxed.edits||0)<(best.relaxedEdits||0)||(relaxed.edits||0)===(best.relaxedEdits||0)&&attempt.matches.length>best.matches.length))best={...attempt,relaxedEdits:relaxed.edits||0};}
     const {penalty}=best;let {matches}=best;
     const corrections=best.resolved.flatMap((r,i)=>r.kind!=='exact'&&r.kind!=='none'?[{term:plan.terms[i],kind:r.kind,to:r.to,...(r.edits&&{edits:r.edits}),...(r.relaxed&&{relaxed:true})}]:[]);

@@ -16,14 +16,23 @@ export function stockLast(matches,query){
  const lead=matches.filter(exact),rest=matches.filter(p=>!exact(p));
  return [...lead.filter(inStock),...lead.filter(p=>!inStock(p)),...rest.filter(inStock),...rest.filter(p=>!inStock(p))];
 }
-// Out-of-stock rows the store has retired (a dead product page, not "temporarily missing"), so they are imported as
-// hidden: no price, or — when the catalog's syncs stamp lastSeenAt on most rows — not seen in the latest sync (older
-// than the newest stamp by more than graceMs). In-stock rows are never retired here.
+// Rows the store has retired (a dead product page, not "temporarily missing"), so they are imported as hidden:
+// - a row whose product page answered 404/410 when last checked (pageCheck, written by scripts/page-check.mjs);
+// - out of stock with no price, or — when the catalog's syncs stamp lastSeenAt on most rows — out of stock and not seen
+//   in the latest sync (older than the newest stamp by more than graceMs);
+// - any row, even "instock", that no sync ever stamped in a tracked catalog, unless its page answered 200: leftovers of
+//   older feeds/scrapes. On Steimatzky (2026-10-21) 3,635 such rows were marked instock; 3,334 pages were 404 and 301
+//   live (32 LEGO sets among them), with no field in the row that tells them apart — only the page check does.
+// An in-stock row that was stamped once is never retired by the stamp rules (a weekly sync can skip live products).
+export const pageStatus=r=>Number(r?.pageCheck?.status)||null;
 export function retiredRows(rows,{graceMs=3*864e5}={}){
  const at=v=>v==null||v===''?NaN:new Date(v).getTime();let newest=-Infinity,stamped=0;
  for(const r of rows){const t=at(r.lastSeenAt);if(Number.isFinite(t)){stamped++;if(t>newest)newest=t;}}
  const tracked=rows.length>0&&stamped>=rows.length/2;
- return r=>(r.stockStatus||r.stock_status)==='outofstock'&&(!(Number(r.price)>0)||(tracked&&!(at(r.lastSeenAt)>=newest-graceMs)));
+ return r=>{const page=pageStatus(r),live=page===200,seen=at(r.lastSeenAt);
+  if(page===404||page===410)return true;
+  if(tracked&&!Number.isFinite(seen))return !live||(r.stockStatus||r.stock_status)==='outofstock'&&!(Number(r.price)>0);
+  return (r.stockStatus||r.stock_status)==='outofstock'&&(!(Number(r.price)>0)||(tracked&&!(seen>=newest-graceMs)));};
 }
 // Trademark signs go before NFKC, which would spell ™ as "TM" and glue it to the name ("Enduro™" → "endurotm").
 export const normalize = value => String(value ?? '').replace(/[®™℠]/g,'').normalize('NFKC').toLowerCase()
@@ -38,11 +47,33 @@ export function productUrl(value) {
   } catch { return null; }
 }
 
+// A catalog whose source has no categories (Rikushet's JSON-LD) still names the kind of product in its titles, at
+// their head: the type whose name or shopper alias opens the title, as whole words, after any Latin brand/model words
+// or a leading "סט" ("Deuter Dreamlite 500 שק שינה", "סט מזוודות"). "מנעול קוד למזוודה" is a lock and "משקל מזוודות"
+// none of the types; the longest alias wins ("תג מזוודה" over "מזוודה"). Used when the product has no categories, or
+// first for a tenant whose categories are navigation, not kinds (typeFrom "title"). A type's titleAliases are title
+// heads only ("ראש מטען", "סוללת גיבוי"): they type products and never become a query filter.
+export function typeFromTitle(title, productTypes = {}) {
+  // Punctuation (| - ׳ ') separates words on both sides, so "מוצ׳ילה" in a title meets the alias "מוצ'ילה".
+  const clean = s => normalize(s).replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+  const words = clean(title).split(' ');
+  while (words.length && (/^[\p{Script=Latin}\p{N}]+$/u.test(words[0]) || words[0] === 'סט')) words.shift();
+  const head = ` ${words.join(' ')} `;
+  let best = null;
+  for (const [type, rule] of Object.entries(productTypes))
+    for (const alias of [type, ...(rule.queryAliases || []), ...(rule.titleAliases || [])].map(clean).filter(Boolean))
+      if (head.startsWith(` ${alias} `) && (!best || alias.length > best.alias.length)) best = {type, alias};
+  return best?.type || null;
+}
+
 export function processProduct(raw, client, observations = [], observedAt = null) {
   const categories = list(raw.categories), tags = list(raw.tags);
   const badgeCandidates = Object.entries(client.badgeCandidates).flatMap(([field, values]) =>
     list(raw[field]).filter(v => values.includes(v)).map(text => ({text, sourceField: field, status: 'needs-verification'})));
-  const types = Object.entries(client.productTypes).filter(([, rule]) => rule.categories.some(c => categories.includes(c)));
+  let types = Object.entries(client.productTypes).filter(([, rule]) => rule.categories.some(c => categories.includes(c))), typeSource = 'categories';
+  // Shipi files a case under "כיסויים" and "מגני מסך", and cables under "אביזרים למחשב" too: with typeFrom "title" the
+  // title's head noun decides, and the categories only when the title names no type.
+  if (!categories.length || client.typeFrom === 'title') { const t = typeFromTitle(raw.name || raw.title, client.productTypes); if (t) { types = [[t]]; typeSource = 'title'; } }
   const colors = Object.entries(client.colors).filter(([color, cats]) =>
     list(raw.colors).includes(color) || cats.some(c => categories.includes(c))).map(([color]) => color);
   const finishes = Object.entries(client.finishes || {}).filter(([, rule]) => rule.categories.some(c => categories.includes(c))).map(([key]) => key);
@@ -74,15 +105,20 @@ export function processProduct(raw, client, observations = [], observedAt = null
     hidden: raw.hidden === true || !client.publishedStatuses.includes(raw.status),
     productType: types.length === 1 ? types[0][0] : null, colors, finishes, categories, tags,
     badges, badgeCandidates, issues,
-    provenance: {productType: 'categories', colors: ['categories', 'colors'], finishes: 'categories', fetchedAt: raw.fetchedAt || null},
+    provenance: {productType: typeSource, colors: ['categories', 'colors'], finishes: 'categories', fetchedAt: raw.fetchedAt || null},
   };
 }
 
 // Tenant typo corrections; keys may be phrases ("מאיר שליו"), longest first, whole words only.
 export function applySpelling(query, aliases = {}) {
   let text = ` ${normalize(query)} `;
-  for (const [from, to] of Object.entries(aliases || {}).map(([f, t]) => [normalize(f), normalize(t)]).filter(([f]) => f).sort((a, b) => b[0].length - a[0].length))
-    while (text.includes(` ${from} `)) text = text.replace(` ${from} `, ` ${to} `);
+  // One left-to-right pass per alias: replaced text is never rescanned, so an alias whose correction contains it
+  // ("fenix" → "fēnix" normalizes to itself, "ספא" → "מוצרי ספא") cannot loop forever and hang the server.
+  for (const [from, to] of Object.entries(aliases || {}).map(([f, t]) => [normalize(f), normalize(t)]).filter(([f, t]) => f && f !== t).sort((a, b) => b[0].length - a[0].length)) {
+    let out = '', rest = text, i;
+    while ((i = rest.indexOf(` ${from} `)) >= 0) { out += rest.slice(0, i) + ` ${to}`; rest = rest.slice(i + from.length + 1); }
+    text = out + rest;
+  }
   return text.trim();
 }
 export function planQuery(query, client) {
@@ -114,9 +150,11 @@ export function planQuery(query, client) {
   }
   const aliases = Object.entries(client.productTypes).flatMap(([type, rule]) => rule.queryAliases.map(alias => [type, normalize(alias)]))
     .sort((a,b) => b[1].length-a[1].length);
-  for (const [type, alias] of aliases) {
-    if (remaining.includes(` ${alias} `)) { plan.productType = type; remaining = remaining.replace(` ${alias} `, ' '); break; }
-  }
+  // With typeFrom "title" the query's head noun names the kind, as in titles: "מעמד טלפון" is a stand, "כיסוי טאבלט" a
+  // case — the alias that starts first wins (the longest there: "מגן מסך" over "מגן"). Otherwise the longest alias.
+  const found = aliases.filter(([, alias]) => remaining.includes(` ${alias} `));
+  if (client.typeFrom === 'title') found.sort((a, b) => remaining.indexOf(` ${a[1]} `) - remaining.indexOf(` ${b[1]} `) || b[1].length - a[1].length);
+  if (found.length) { const [type, alias] = found[0]; plan.productType = type; remaining = remaining.replace(` ${alias} `, ' '); }
   for (const color of Object.keys(client.colors)) {
     if (remaining.includes(` ${color} `)) { plan.colors.push(color); remaining = remaining.replace(` ${color} `, ' '); }
   }
@@ -145,9 +183,18 @@ export function matchesScopedAliases(p,plan){
  return (plan.scopedAliases||[]).every(rule=>rule.productIds.includes(p.id)||rule.mode!=='only'&&` ${normalize([p.title,p.name,p.description,p.summary,...(p.categories||[]),...(p.tags||[]),...Object.values(p.specifications||{})].join(' '))} `.includes(` ${normalize(rule.term)} `));
 }
 
+// The cursor's catalog revision, hashed once per product list: the router and the search service page through every
+// match 50 at a time, and re-hashing a 9k-product catalog (~110 MB of JSON) per page blocked the server for minutes
+// on a broad query ("כיסוי" → 5,000 cases on Shipi).
+const revisions = new WeakMap();
+const catalogRevision = products => {
+  let r = revisions.get(products);
+  if (!r) { r = createHash('sha256').update(JSON.stringify(products)).digest('hex').slice(0,16); revisions.set(products, r); }
+  return r;
+};
 export function search(products, client, {query, cursor, limit = 12} = {}) {
   if (!Number.isInteger(limit) || limit < 1 || limit > 50) throw new Error('Invalid limit');
-  const revision = createHash('sha256').update(JSON.stringify(products)).digest('hex').slice(0,16);
+  const revision = catalogRevision(products);
   let offset = 0;
   if (cursor) {
     if (query !== undefined) throw new Error('Cursor cannot be combined with query');

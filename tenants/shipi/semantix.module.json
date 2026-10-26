@@ -9,10 +9,10 @@
   "dbName": "shipi",
   "collection": "products",
   "tokenPrefix": "shipi-v3:",
-  "revision": 5,
-  "profileHash": "f44cf07b739c9345d8b2843f30af8e48febc6cffe3368e5590b2375e7ed2c9bc",
-  "products": 9110,
-  "builtAt": "2026-10-21T06:21:23.101Z",
+  "revision": 10,
+  "profileHash": "93a089a52447ff9adf2394b84dd3f859a203df0c38320dec00f870c87542ce56",
+  "products": 9112,
+  "builtAt": "2026-10-26T11:45:56.258Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {

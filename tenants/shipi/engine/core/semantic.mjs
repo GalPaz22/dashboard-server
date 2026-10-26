@@ -26,7 +26,7 @@ const plain=s=>s.replace(/[*_`#]+/g,'').replace(/\s+/g,' ').trim();
 // product would otherwise fill the list), each with a bounded description.
 const SELECT_DESCRIPTION=1200;
 const distinctProducts=(list,limit)=>{const seen=new Set(),out=[];for(const x of list){const key=normalize(x.p.title)+'|'+x.p.price;if(seen.has(key))continue;seen.add(key);out.push(x);if(out.length>=limit)break;}return out;};
-export function createSearchService(products, client, generate, {ttlMs=600000,maxEntries=100,maxCandidates=100,maxCandidatesVector=100,selectCandidates=40,timeoutMs=120000,now=Date.now,lightweightRouter=true,routerTimeoutMs=10000,retrieve,rankCandidates,expansion='always',expandBelow=8,deepModel=null,deepThinking=null,fillTo=0,hooks=null}={}) {
+export function createSearchService(products, client, generate, {ttlMs=600000,maxEntries=100,maxCandidates=100,maxCandidatesVector=100,selectCandidates=40,timeoutMs=120000,now=Date.now,lightweightRouter=true,routerTimeoutMs=10000,retrieve,rankCandidates,expansion='always',expandBelow=8,deepModel=null,deepThinking=null,fillTo=0,hooks=null,llmConcurrency=2,queueMs=0,lexicalFirst=false}={}) {
   const visible=products.filter(p=>p.tenantId===client.tenantId&&sellable(p,client));
   const selectLimit=Math.min(maxCandidates,selectCandidates);
   const categories=[...new Set(visible.flatMap(p=>p.categories))].sort();
@@ -203,8 +203,21 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     // closest alternatives are labelled as such. A real typo of a rare word (מאיר שליו) still passes the model's check.
     const realWords=!!literal.plan?.corrections?.some(c=>c.relaxed);
     if(realWords){const {corrections,...plan}=literal.plan;literal={...literal,plan,status:'empty',matches:[],total:0,nextCursor:null};}
-    const complex=normalize(query).split(/\s+/).length>=4||/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalize(query));
+    const negated=/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalize(query));
+    const complex=normalize(query).split(/\s+/).length>=4||negated;
     const spelled=literal.plan?.spelling?.to||normalize(query);
+    // A long request whose every word is in product titles ("כיסוי לאייפון 18 פרו מקס"): those titles stay first whatever
+    // the model decides. Its knowledge lags the catalog — it rejects a phone released after its training — and must not
+    // veto the store's own title. Negations ("בלי", "שמתאים") are the model's alone.
+    let titledLiteral=[];
+    if(complex&&!negated&&literal.matches.length&&!literal.plan?.corrections?.length){
+      // A title word may carry a one-letter Hebrew prefix ("אייפון" in "לאייפון"); the product's category names count as
+      // its title ("מגני מסך").
+      const words=spelled.split(' ').filter(Boolean),inTitle=p=>{const t=normalize([p.title,...(p.categories||[])].join(' ')).split(' ');return words.every(w=>t.some(x=>x===w||x.length===w.length+1&&/^[ולבהמשכ]/.test(x)&&x.endsWith(w)));};
+      const all=[...literal.matches];let token=literal.nextCursor;
+      while(token){const next=search(products,client,{cursor:token,limit:50});all.push(...next.matches);token=next.nextCursor;}
+      titledLiteral=all.filter(inTitle);
+    }
     const scopedWithConstraints=!!literal.plan?.scopedProductIds&&!literal.plan.scopedAliases?.some(r=>normalize(r.term)===spelled);
     // Tenant policy for short queries that already have literal matches: "always" adds LLM expansion (slower, broader),
     // "sparse" only when there are fewer than expandBelow literal matches, "off" never — those answer from the index.
@@ -215,6 +228,14 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     const guessed=!!literal.plan?.corrections?.length&&!literal.plan.corrections.every(c=>literal.matches.some(p=>titleWords(p).some(w=>(c.to||[]).includes(w))));
     const literalOnly=!guessed&&!complex&&literal.matches.length>0&&(expansion==='off'||expansion==='sparse'&&literal.total>=expandBelow);
     const expandLiteral=!literalOnly&&!complex&&literal.matches.length>0&&!literal.plan?.scopedProductIds&&literal.plan?.strategy!=='identifier';
+    // Lexical first (pipeline.lexicalFirst): whatever the index finds — exact words, inflections, spelling rules, fuzzy and
+    // partial words — is the answer, long requests included; the model is the fallback for what the index cannot find
+    // (no match, words that never occur together) and for negations ("בלי", "שמתאים"), which only it can read.
+    if(lexicalFirst&&literal.matches.length&&!negated&&literal.plan?.strategy!=='identifier'){
+      const all=[...literal.matches];let token=literal.nextCursor;
+      while(token){const next=search(products,client,{cursor:token,limit:50});all.push(...next.matches);token=next.nextCursor;}
+      return page(await store(key,{...literal,matches:all,metadata:{mode:'text',phase:'lexical-first',indexKind:literal.indexKind||(retrieve?'local-inverted':'local-scan'),fullMatch:!literal.plan?.corrections?.length,...((literal.plan?.spelling||literal.plan?.corrections)&&{correction:literal.plan.spelling||literal.plan.corrections}),llmUsed:false,llmCalls:0}}),0,limit);
+    }
     if(expandLiteral&&(literal.plan?.spelling||literal.plan?.corrections&&!guessed)){
       const all=[...literal.matches];let token=literal.nextCursor;
       while(token){const next=search(products,client,{cursor:token,limit:50});all.push(...next.matches);token=next.nextCursor;}
@@ -227,8 +248,11 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     }
     const spelling=complex||expandLiteral||scopedWithConstraints||realWords?null:repairSpelling(query);
     if(spelling?.matches?.length){spelling.metadata={...spelling.metadata,phase:'spelling',fullMatch:true};return page(await store(key,spelling),0,limit);}
-    if(active>=2&&expandLiteral)return page(await store(key,{...literal,metadata:{phase:'lexical',expansionUnavailable:true,llmUsed:false,llmCalls:0}}),0,limit);
-    if(active>=2)return page(await store(key,await closest(query,noVerifiedMatches(query,planQuery(query,client),'llm-concurrency',{mode:'catalog-fallback',llmUsed:false,llmCalls:0}),false)),0,limit);
+    // A burst of model searches waits briefly for a slot (pipeline.queueMs) before falling back. The fallbacks answer only
+    // this moment: they are not cached, so the same query a minute later gets the model's answer.
+    for(const until=Date.now()+queueMs;active>=llmConcurrency&&Date.now()<until;)await new Promise(r=>setTimeout(r,100));
+    if(active>=llmConcurrency&&expandLiteral){const id=await store(key,{...literal,metadata:{phase:'lexical',expansionUnavailable:true,llmUsed:false,llmCalls:0}});cache.delete(key);return page(id,0,limit);}
+    if(active>=llmConcurrency){const id=await store(key,await closest(query,noVerifiedMatches(query,planQuery(query,client),'llm-concurrency',{mode:'catalog-fallback',llmUsed:false,llmCalls:0}),false));cache.delete(key);return page(id,0,limit);}
     active++;
     const work=(async()=>{
       const routing=lightweightRouter&&!complex&&!expandLiteral&&!scopedWithConstraints?await route(query):null;
@@ -249,6 +273,10 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
         const ids=new Set(exact.map(p=>p.id)),additional=result.matches.filter(p=>!ids.has(p.id));
         const merged=[...titled,...additional,...loose];
         result=merged.length?{...result,status:'matched',message:result.status==='degraded'?'מוצגות התאמות מילוליות; הרחבת החיפוש אינה זמינה כרגע.':null,matches:merged,metadata:{...result.metadata,indexKind:literal.indexKind||(retrieve?'local-inverted':'local-scan'),exactCount:exact.length,expandedCount:additional.length,expansionUnavailable:result.status==='degraded'}}:result;
+      }
+      if(titledLiteral.length){
+        const ids=new Set(titledLiteral.map(p=>p.id)),verified=result.metadata?.closestFallback?[]:result.matches.filter(p=>!ids.has(p.id));
+        result={...result,status:'matched',message:null,matches:[...titledLiteral,...verified],metadata:{...result.metadata,closestFallback:false,titledCount:titledLiteral.length}};
       }
       {const {considered,verifiedIds,...clean}=result;result=clean;}
       result.metadata={...result.metadata,phase:'deep-llm',storeContext:{tenant:client.tenantId,platform:client.platform,domain:client.domain||'retail',schemaVersion:client.version}};

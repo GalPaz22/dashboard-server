@@ -1,6 +1,6 @@
 # Semantix tenant module — שיפי אביזרים לסלולר (shipi)
 
-Revision 5, 9110 product cards, built 2026-10-21T06:21:23.101Z.
+Revision 10, 9112 product cards, built 2026-10-26T11:45:56.258Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 

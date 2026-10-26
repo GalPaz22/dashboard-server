@@ -1,4 +1,4 @@
-import {processProduct,autocomplete,normalize,stockPolicy,stockLast} from './core/core.mjs';
+import {processProduct,typeFromTitle,autocomplete,normalize,stockPolicy,stockLast} from './core/core.mjs';
 import {applyRanking,wordMatches} from './core/ranking.mjs';
 import {createSearchService} from './core/semantic.mjs';
 import {generate} from './core/gemini.mjs';
@@ -22,6 +22,17 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   for(const r of profile.badgeRules)if((raw[r.field]||[]).includes(r.value)&&!p.badges.some(b=>b.text===r.text))p.badges.push({text:r.text,kind:'merchant',order:r.order,source:'tenant-rule'});
   p.badges.sort((a,b)=>(a.order||0)-(b.order||0));return p;
  });
+ // Saved cards are reused while the profile is unchanged, so a card saved before title typing existed keeps no type:
+ // one with no categories gets the type its title gives now, as processProduct would (the index follows the content).
+ if(products===project.productCards&&products.some(p=>!p.productType&&!p.categories?.length&&typeFromTitle(p.title,profile.productTypes)))
+  products=products.map(p=>{const type=!p.productType&&!p.categories?.length&&typeFromTitle(p.title,profile.productTypes);return type?{...p,productType:type,provenance:{...p.provenance,productType:'title'}}:p;});
+ // A tag no product carries (its classification never ran — Shipi's 8 definitions in Oct 2026) would filter every
+ // query that says it ("כיסוי מקורי") down to nothing: until products carry it, its words are matched as text.
+ if(Object.keys(profile.tagDefinitions||{}).length&&!profile.hooks?.transformProduct){const carried=new Set(products.flatMap(p=>p.tags||[]));profile.tagDefinitions=Object.fromEntries(Object.entries(profile.tagDefinitions).filter(([tag])=>carried.has(tag)));}
+ // WooCommerce's popular products (tag isWooPopular, from the store's own flag) are lifted by default, among equally
+ // relevant results, unless the tenant already ranks by that tag.
+ if(products.some(p=>p.tags?.includes('isWooPopular'))&&!(profile.rankingRules||[]).some(r=>r.field==='tags'&&r.values?.includes('isWooPopular')))
+  profile.rankingRules=[...(profile.rankingRules||[]),{id:'rank-woo-popular',name:'מוצרים פופולריים (isWooPopular) קודם',action:'boost',field:'tags',values:['isWooPopular'],terms:[],match:'direct'}];
  const index=project.searchIndex?.tokenizer===TOKENIZER&&project.searchIndex?.contentHash===hash(products)?project.searchIndex:buildSearchIndex(products,profile.version);
  const retrieve=overrideRetrieve||createIndexRetriever(products,profile,index);
  // A build's vector index (exact content) wins; otherwise the studio's per-product vectors from the processing lab.
