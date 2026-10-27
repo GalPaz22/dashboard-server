@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {applyRanking} from './ranking.mjs';
-import { normalize, planQuery, search, matchesScopedAliases, sellable, stockPolicy, stockLast } from './core.mjs';
+import { normalize, planQuery, search, matchesScopedAliases, sellable, stockPolicy, stockLast, authorMatch } from './core.mjs';
 import { createSpellingResolver } from './spelling.mjs';
 import { createLightRouter } from './router.mjs';
 
@@ -243,7 +243,8 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
         // A literal match whose title carries the shopper's words stays first. One that matched only through its
         // description is weaker evidence than a model-verified product: it follows the verified ones, and is dropped
         // when the model read it and rejected it ("the love hypothesis" in an unrelated blurb).
-        const words=normalize(query).split(' ').filter(Boolean),inTitle=p=>{const t=normalize(p.title).split(' ');return words.every(w=>t.includes(w));};
+        // A book by the author the shopper named is as strong as a title match.
+        const words=normalize(query).split(' ').filter(Boolean),inTitle=p=>{const t=normalize(p.title).split(' ');return words.every(w=>t.includes(w))||authorMatch(p,query);};
         const rejected=p=>result.considered?.has(p.id)&&!result.verifiedIds?.has(p.id);
         const titled=exact.filter(inTitle),loose=exact.filter(p=>!inTitle(p)&&!rejected(p));
         const ids=new Set(exact.map(p=>p.id)),additional=result.matches.filter(p=>!ids.has(p.id));

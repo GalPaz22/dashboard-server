@@ -9,9 +9,17 @@ export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||(s
 // except a product whose title is exactly what the shopper typed: exact titles lead (in-stock ones first), so a short
 // title ("הסערה") is not buried behind dozens of in-stock books that merely contain the word. A title written
 // "name / author" counts by its name too.
+// The shopper typed an author's name: every query word is a word of one of the product's authors (any order, so
+// "נבון חיים" too). A one-word query must be the whole name, so "עמנואל" does not lift every author called Emanuel.
+const authorsOf=p=>[p.specifications?.author,p.specifications?.['מחבר'],p.author].filter(v=>typeof v==='string'&&v).flatMap(v=>v.split(/[,;/|]/));
+export function authorMatch(p,query){
+ const q=normalize(query).split(' ').filter(Boolean);if(!q.length)return false;
+ return authorsOf(p).some(a=>{const w=normalize(a).split(' ').filter(Boolean);return q.length>1?q.every(t=>w.includes(t)):w.length===1&&w[0]===q[0];});
+}
 export function stockLast(matches,query){
  const q=normalize(query),inStock=p=>p.stockStatus==='instock';
- const exact=p=>{const t=String(p.title||p.name||'');return !!q&&(normalize(t)===q||normalize(t.split(' / ')[0])===q);};
+ // A book by the author the shopper named leads like an exact title, sold-out ones after the in-stock ones.
+ const exact=p=>{const t=String(p.title||p.name||'');return !!q&&(normalize(t)===q||normalize(t.split(' / ')[0])===q||authorMatch(p,q));};
  if(!matches.some(p=>!inStock(p)))return matches;
  const lead=matches.filter(exact),rest=matches.filter(p=>!exact(p));
  return [...lead.filter(inStock),...lead.filter(p=>!inStock(p)),...rest.filter(inStock),...rest.filter(p=>!inStock(p))];

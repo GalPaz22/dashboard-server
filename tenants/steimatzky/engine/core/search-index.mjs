@@ -1,4 +1,4 @@
-import {normalize,planQuery,matchesScopedAliases,sellable} from './core.mjs';
+import {normalize,planQuery,matchesScopedAliases,sellable,authorMatch} from './core.mjs';
 import {hash} from './hash.mjs';
 // Bump when tokenization changes so a saved index is rebuilt instead of reused.
 export const TOKENIZER=3;
@@ -76,8 +76,10 @@ export function createIndexRetriever(products,client,index) {
     if(corrections.length)plan.corrections=corrections;
     const rankTerms=plan.terms.length?plan.terms:(plan.scopedAliases||[]).map(r=>normalize(r.term)).filter(Boolean);
     const titleHits=p=>{const words=new Set(normalize(p.title).split(' ').filter(Boolean));return rankTerms.reduce((n,t)=>n+(words.has(t)?1:0),0);};
+    // A query that names an author puts that author's books first ("חיים נבון" over blurbs that mention both words).
     // Among equally good matches, products shoppers chose more often (production clicks and carts) come first.
-    matches.sort((a,b)=>(penalty.get(a.id)||0)-(penalty.get(b.id)||0)||titleHits(b)-titleHits(a)||Number(normalize(b.title)===normalize(query))-Number(normalize(a.title)===normalize(query))||(b.popularity||0)-(a.popularity||0)||a.id.localeCompare(b.id));
+    const byAuthor=new Set(rankTerms.length?matches.filter(p=>authorMatch(p,rankTerms.join(' '))).map(p=>p.id):[]);
+    matches.sort((a,b)=>(penalty.get(a.id)||0)-(penalty.get(b.id)||0)||Number(byAuthor.has(b.id))-Number(byAuthor.has(a.id))||titleHits(b)-titleHits(a)||Number(normalize(b.title)===normalize(query))-Number(normalize(a.title)===normalize(query))||(b.popularity||0)-(a.popularity||0)||a.id.localeCompare(b.id));
     if(exact)matches=matches.map(p=>{const variant=(p.variants||[]).find(v=>[v.id,v.sku,v.mpn,v.gtin].filter(Boolean).some(id=>normalize(id)===normalized));return variant?{...p,matchedVariant:variant}:p;});
     if(!exact){plan.termHits=plan.terms.map((term,i)=>{const r=best.resolved[i],exactCount=index.terms[term]?.length||0;return {term,exact:exactCount,kind:r?.kind||'none',to:r?.to,postings:r?.postings.size??0};});
       if(!matches.length)plan.why=plan.scopedProductIds&&!plan.terms.length?{kind:'scoped-only',term:plan.scopedAliases[0]?.term,products:plan.scopedProductIds.length}:plan.termHits.some(t=>!t.postings)?{kind:'missing-terms',terms:plan.termHits.filter(t=>!t.postings).map(t=>t.term)}:plan.termHits.length>1&&plan.termHits.every(t=>t.exact)?{kind:'no-intersection',terms:plan.termHits.map(t=>`${t.term} (${t.exact})`)}:{kind:'filtered'};}

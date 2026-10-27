@@ -63,6 +63,13 @@ export function applySpelling(query, aliases = {}) {
     while (text.includes(` ${from} `)) text = text.replace(` ${from} `, ` ${to} `);
   return text.trim();
 }
+// The shopper typed an author's name: every query word is a word of one of the product's authors (any order, so
+// "נבון חיים" too). A one-word query must be the whole name, so "עמנואל" does not lift every author called Emanuel.
+const authorsOf=p=>[p.specifications?.author,p.specifications?.['מחבר'],p.author].filter(v=>typeof v==='string'&&v).flatMap(v=>v.split(/[,;/|]/));
+export function authorMatch(p,query){
+ const q=normalize(query).split(' ').filter(Boolean);if(!q.length)return false;
+ return authorsOf(p).some(a=>{const w=normalize(a).split(' ').filter(Boolean);return q.length>1?q.every(t=>w.includes(t)):w.length===1&&w[0]===q[0];});
+}
 export function planQuery(query, client) {
   const spelled = applySpelling(query, client.queryAliases);
   let remaining = ` ${spelled} `;
