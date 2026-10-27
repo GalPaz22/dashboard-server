@@ -15,7 +15,9 @@ import { fileURLToPath } from 'url';
 import { AsyncLocalStorage } from 'async_hooks';
 import {mountExperimentPublication} from './experiment-publication.mjs';
 import { applyExperimentVariant, applyPermanentRules, recordSessionAlias } from './experiments-hook.mjs';
-import { mountConcierge, conciergeSearchTrigger } from './concierge.mjs';
+import { mountConcierge, conciergeSearchTrigger, conciergeWeakQueryTrigger } from './concierge.mjs';
+import { createWeakQueryIndex } from './concierge-weak-queries.mjs';
+import { mountConciergeExperiment } from './concierge-experiment.mjs';
 import { liveConciergeSettings } from './concierge-settings.mjs';
 import { searchBeautics } from './tenants/beautics/search.mjs';
 import { storefrontResponse } from './tenants/beautics/response.mjs';
@@ -3085,6 +3087,11 @@ async function getStoreConfigByApiKey(apiKey) {
       conciergeContext: userDoc.conciergeContext || userDoc.credentials?.conciergeContext || "",          // merchant's own description of the shop, for the system prompt
       conciergeSystemPrompt: userDoc.conciergeSystemPrompt || userDoc.credentials?.conciergeSystemPrompt || null, // full override, for a merchant with a specific voice
       conciergeInstructions: userDoc.conciergeInstructions || userDoc.credentials?.conciergeInstructions || '',
+      // Opens the concierge on searches this store's logs know shoppers don't
+      // buy after (concierge-weak-queries.mjs). Opt-in: top-level `conciergeWeakQueries: true`.
+      conciergeWeakQueries: (userDoc.conciergeWeakQueries ?? userDoc.credentials?.conciergeWeakQueries) === true,
+      // A/B exposure of the storefront concierge: { id, mode: "off"|"all"|"test", percent }. See concierge-experiment.mjs.
+      conciergeExperiment: userDoc.conciergeExperiment && typeof userDoc.conciergeExperiment === "object" ? userDoc.conciergeExperiment : null,
     };
   }, 300); // 5-minute TTL — short enough to pick up config changes
 }
@@ -3391,12 +3398,16 @@ const conciergeDeps = {
   getQueryEmbedding: (text) => getQueryEmbedding(text),
   getRedis: () => (redisClient && redisReady ? redisClient : null),
 };
+conciergeDeps.weakQueries = createWeakQueryIndex(conciergeDeps);
 const defaultConciergeTrigger=conciergeSearchTrigger(conciergeDeps);
+const weakQueryConciergeTrigger=conciergeWeakQueryTrigger(conciergeDeps);
 app.use((req,res,next)=>{
-  if(process.env.GARMIN_SEARCH_V2==='true'&&req.store?.dbName==='garmin'&&req.method==='POST'&&req.path==='/search')return next();
+  // Garmin's v2 engine skips the full trigger; it still gets the known-weak one.
+  if(process.env.GARMIN_SEARCH_V2==='true'&&req.store?.dbName==='garmin'&&req.method==='POST'&&req.path==='/search')return weakQueryConciergeTrigger(req,res,next);
   return defaultConciergeTrigger(req,res,next);
 });
 mountConcierge(app, conciergeDeps);
+mountConciergeExperiment(app, { getMongoClient });
 
 async function connectToMongoDB(mongodbUri) {
   return await getMongoClient();
