@@ -1,7 +1,7 @@
 import 'dotenv/config';
 import { GoogleGenAI } from '@google/genai';
 let ai;
-export const searchModel=()=>process.env.STUDIO_SEARCH_MODEL||'gemini-3.1-flash-lite';
+export const searchModel=()=>process.env.STUDIO_SEARCH_MODEL||'gemini-3.5-flash-lite';
 // Models a tenant's pipeline may pick for the deep stages (interpret/select) instead of the global default.
 export const DEEP_MODELS=['gemini-3.1-flash-lite','gemini-3.5-flash-lite','gemini-2.5-flash','gemini-3.8-flash','gemini-3.1-pro-preview'];
 // Thinking level of the search-time LLM stages (gemini-3 models): higher is slower. STUDIO_SEARCH_THINKING sets the
