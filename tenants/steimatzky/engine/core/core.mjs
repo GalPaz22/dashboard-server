@@ -32,8 +32,19 @@ export function stockLast(matches,query){
 //   older feeds/scrapes. On Steimatzky (2026-10-21) 3,635 such rows were marked instock; 3,334 pages were 404 and 301
 //   live (32 LEGO sets among them), with no field in the row that tells them apart — only the page check does.
 // An in-stock row that was stamped once is never retired by the stamp rules (a weekly sync can skip live products).
+// - one side of a print/digital pair: the store feeds a digital edition as its own row, linked to the printed row by the
+//   digital sku (specialLabel.digital.sku), and either row's card already shows both formats and prices. The link decides,
+//   never the name: same-named books with another sku stay. The printed row stays, unless only the digital one can be bought.
 export const pageStatus=r=>Number(r?.pageCheck?.status)||null;
-export function retiredRows(rows,{graceMs=3*864e5}={}){
+const rowTail=r=>String(r?.id??r?._id??'').split(':').pop(),rowStock=r=>r.stockStatus||r.stock_status;
+export function retiredRows(rows,options){
+ const dead=deadRows(rows,options),off=r=>r.hidden===true||r.notInStore===true||r.catalog_visibility==='hidden'||dead(r);
+ const pairs=new Map();for(const r of rows){const key=r.specialLabel?.digital?.sku;if(!key||off(r))continue;const pair=pairs.get(String(key))||pairs.set(String(key),{printed:[],digital:[]}).get(String(key));(rowTail(r)===String(key)?pair.digital:pair.printed).push(r);}
+ const folded=new Set();for(const {printed,digital} of pairs.values()){if(!printed.length||!digital.length)continue;
+  const sold=printed.some(r=>rowStock(r)==='instock')||!digital.some(r=>rowStock(r)==='instock');for(const r of sold?digital:printed)folded.add(r);}
+ return r=>dead(r)||folded.has(r);
+}
+function deadRows(rows,{graceMs=3*864e5}={}){
  const at=v=>v==null||v===''?NaN:new Date(v).getTime();let newest=-Infinity,stamped=0;
  for(const r of rows){const t=at(r.lastSeenAt);if(Number.isFinite(t)){stamped++;if(t>newest)newest=t;}}
  const tracked=rows.length>0&&stamped>=rows.length/2;
@@ -47,6 +58,9 @@ export const normalize = value => String(value ?? '').replace(/[®™℠]/g,'').
   .normalize('NFD').replace(/\p{M}/gu,'')
   .replace(/[׳״'’`"“”„«»″‟]/g, '').replace(/[-–—()[\],:;!?]/g, ' ').replace(/\s+/g, ' ').trim();
 const list = value => Array.isArray(value) ? value.filter(x => typeof x === 'string') : [];
+// The merchant feed's own departments (Google product types and the custom "category N" labels): a store whose rows have
+// no categories still says what each product is ("בלשנות ושפות", "מחשבים ואביזרים"), and search can use that.
+export const feedCategories = row => [...new Set([...list(row?.productTypes),...(Array.isArray(row?.customAttributes)?row.customAttributes:[]).filter(a=>/^category [2-9]$/.test(a?.name)).map(a=>a.value).filter(v=>typeof v==='string'&&v)])];
 export function productUrl(value) {
   try {
     const u = new URL(value);
@@ -98,8 +112,13 @@ export function processProduct(raw, client, observations = [], observedAt = null
 // Tenant typo corrections; keys may be phrases ("מאיר שליו"), longest first, whole words only.
 export function applySpelling(query, aliases = {}) {
   let text = ` ${normalize(query)} `;
-  for (const [from, to] of Object.entries(aliases || {}).map(([f, t]) => [normalize(f), normalize(t)]).filter(([f]) => f).sort((a, b) => b[0].length - a[0].length))
-    while (text.includes(` ${from} `)) text = text.replace(` ${from} `, ` ${to} `);
+  // One left-to-right pass per alias: replaced text is never rescanned, so an alias whose correction contains it
+  // ("fenix" → "fēnix" normalizes to itself, "ספא" → "מוצרי ספא") cannot loop forever and hang the server.
+  for (const [from, to] of Object.entries(aliases || {}).map(([f, t]) => [normalize(f), normalize(t)]).filter(([f, t]) => f && f !== t).sort((a, b) => b[0].length - a[0].length)) {
+    let out = '', rest = text, i;
+    while ((i = rest.indexOf(` ${from} `)) >= 0) { out += rest.slice(0, i) + ` ${to}`; rest = rest.slice(i + from.length + 1); }
+    text = out + rest;
+  }
   return text.trim();
 }
 export function planQuery(query, client) {
