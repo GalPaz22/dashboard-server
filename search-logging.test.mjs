@@ -18,7 +18,8 @@ test('v2 engine searches are logged once to the store queries collection; pages,
  const settle=()=>new Promise(r=>setTimeout(r,20));
  try{
   assert.equal((await post({query:'טופ',modern:true,session_id:'s1'})).products.length,2);await settle();
-  assert.deepEqual(logged[0],{collection:'queries@woo-beautics-shop-co-il',query:'טופ',products:['טופ 1','טופ 2'],options:{session_id:'s1',sessionId:undefined,zeroResults:false,searchEngine:'beautics-v2'}});
+  assert.deepEqual(logged[0],{collection:'queries@woo-beautics-shop-co-il',query:'טופ',products:['טופ 1','טופ 2'],options:{session_id:'s1',sessionId:undefined,zeroResults:false,searchEngine:'beautics-v2',searchMeta:{elapsedMs:logged[0].options.searchMeta.elapsedMs}}});
+  assert.ok(Number.isFinite(logged[0].options.searchMeta.elapsedMs),'the wall time of every search is recorded');
   await post({query:'בילדר גל'});await settle();assert.equal(logged[1].options.zeroResults,true,'a zero-result search is flagged');
   await post({cursor:'abc'});await settle();assert.equal(logged.length,2,'cursor pages are not new searches');
   assert.deepEqual(await post({query:'x'},'other-store'),{legacy:true});await settle();assert.equal(logged.length,2,'the legacy pipeline logs itself');

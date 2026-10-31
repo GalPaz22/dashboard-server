@@ -36,7 +36,9 @@ const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).
 // document switches it on (users.users → semantix:{module,enabled,percent}); failures fall through to the existing routes.
 import {createSemantixTenants} from './tenants/semantix-registry.mjs';
 import {createV2SearchLogger} from './search-logging.mjs';
+import {createLearnedRewrites} from './learned-rewrites.mjs';
 const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoClient()).db(name),merchandise:merchandiseV2});
+const learnedRewrites=createLearnedRewrites({getDb:async name=>(await getMongoClient()).db(name)});
 
 // ES modules compatibility
 const __filename = fileURLToPath(import.meta.url);
@@ -6630,6 +6632,10 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
   }
 
   if (options.searchEngine) queryDocument.searchEngine = options.searchEngine; // which v2 engine answered
+  // The chain from a search to its order: the id the storefront gave this search, and the visitor's A/B groups.
+  if (typeof options.search_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(options.search_id)) queryDocument.search_id = options.search_id;
+  if (options.ab_tests && typeof options.ab_tests === "object" && !Array.isArray(options.ab_tests) && JSON.stringify(options.ab_tests).length <= 500) queryDocument.ab_tests = options.ab_tests;
+  if (options.searchMeta) Object.assign(queryDocument, options.searchMeta); // v2: mode, llmUsed, elapsedMs, rewrites, learnedRewrite
 
   // Explicit zero-result flag for callers that know the native result count
   // but never ran a product search here (e.g. the lightweight /log-query path).
@@ -8936,6 +8942,22 @@ app.get("/search/auto-load-more", async (req, res) => {
 */
 
 app.get('/semantix/status',(req,res)=>semantixTenants.statusRoute(req,res));
+// Learned rewrites of a store (learned-rewrites.mjs), for operators: requires SEMANTIX_ADMIN_TOKEN in X-Semantix-Admin.
+// GET ?db=<dbName>[&status=active] lists them; POST {db,query,status:"revoked"|"active"} revokes or restores one.
+const semantixAdmin=req=>!!process.env.SEMANTIX_ADMIN_TOKEN&&req.get('X-Semantix-Admin')===process.env.SEMANTIX_ADMIN_TOKEN;
+app.get('/semantix/learned',async(req,res)=>{
+  if(!semantixAdmin(req))return res.status(404).end();
+  if(typeof req.query.db!=='string'||!req.query.db)return res.status(400).json({error:'db is required'});
+  try{res.set('Cache-Control','no-store').json(await learnedRewrites.list(req.query.db,{status:typeof req.query.status==='string'?req.query.status:undefined}));}
+  catch(error){res.status(500).json({error:error.message});}
+});
+app.post('/semantix/learned',async(req,res)=>{
+  if(!semantixAdmin(req))return res.status(404).end();
+  const {db,query,status}=req.body||{};
+  if(typeof db!=='string'||!db||typeof query!=='string'||!['revoked','active'].includes(status))return res.status(400).json({error:'db, query and status (revoked|active) are required'});
+  try{res.json({updated:await learnedRewrites.setStatus(db,query,status,'operator')});}
+  catch(error){res.status(500).json({error:error.message});}
+});
 app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, createBeauticsLoadMore(async (request, store) => {
   const db = (await getMongoClient()).db(store.dbName);
   return searchBeautics({sessions:db.collection('beautics_search_sessions'),request});
@@ -10192,7 +10214,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
               logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
 
               // Log query (fire-and-forget — does not block response)
-              logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
+              logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
                 console.error(`[${requestId}] Failed to log query:`, err.message)
               );
 
@@ -10272,7 +10294,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         }));
 
         // Log simple query (vector fallback path — fire-and-forget)
-        logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
+        logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
           console.error(`[${requestId}] Failed to log query:`, err.message)
         );
 
@@ -10495,7 +10517,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     }
 
     // Log simple query (text matches path — fire-and-forget)
-    logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
+    logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -10712,7 +10734,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     })).toString('base64') : null;
 
     // Log simple query (category-filtered path — fire-and-forget)
-    logQuery(querycollection, query, categoryFilteredHardFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId }).catch(err =>
+    logQuery(querycollection, query, categoryFilteredHardFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -13526,8 +13548,11 @@ app.post("/simple-search", async (req, res) => {
 });
 
 // v2 engines answer before the legacy logQuery runs; this logs their searches to the store's `queries` collection.
-const logV2Search=createV2SearchLogger({logQuery,getQueries:async dbName=>(await getMongoClient()).db(dbName).collection("queries")});
-app.post("/search", logV2Search, semantixTenants.search, garminRoutes.search, async (req, res) => {
+// Each logged search also feeds learned-rewrites.mjs: a query the model only respelled is searched by its respelling
+// next time (learnedRewrites.apply before the modules; restore puts back what was typed when no module answered).
+const logV2Search=createV2SearchLogger({logQuery,getQueries:async dbName=>(await getMongoClient()).db(dbName).collection("queries"),
+  onLogged:(dbName,search)=>learnedRewrites.observe(dbName,search).catch(error=>console.error('[LEARNED REWRITES]',error.message))});
+app.post("/search", logV2Search, learnedRewrites.apply, semantixTenants.search, learnedRewrites.restore, garminRoutes.search, async (req, res) => {
   const requestId = Math.random().toString(36).substr(2, 9);
   const searchStartTime = Date.now();
   console.log(`[${requestId}] SEARCH "${req.body.query}" | db:${req.store?.dbName}`);
@@ -20982,6 +21007,8 @@ app.post("/product-click", async (req, res) => {
       product_id: String(product_id),
       product_name: product_name || null,
       search_query: search_query || null,
+      ...(typeof req.body.search_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.search_id) && { search_id: req.body.search_id }),
+      ...(req.body.ab_tests && typeof req.body.ab_tests === 'object' && !Array.isArray(req.body.ab_tests) && { ab_tests: req.body.ab_tests }),
       session_id: normalizedSessionId,
       sessionId: normalizedSessionId,
       interaction_type: interactionType,
