@@ -4,7 +4,8 @@ import { createHash } from 'node:crypto';
 // ones after all in-stock results; "show" shows them in their natural place. Hidden products are never shown.
 export const stockPolicy=client=>['last','show'].includes(client?.pipeline?.outOfStock)?client.pipeline.outOfStock:'hide';
 // An out-of-stock product without a price is not shown under any policy: the store no longer sells it.
-export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||(stockPolicy(client)!=='hide'&&Number(p.price)>0));
+// A backorder product can be bought from the store's own page (Shipi: 667 of them), so search treats it like stock.
+export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||p.stockStatus==='onbackorder'||(stockPolicy(client)!=='hide'&&Number(p.price)>0));
 // Order for the "last" policy: out-of-stock products follow every in-stock one, keeping the order inside each group —
 // except a product whose title is exactly what the shopper typed: exact titles lead (in-stock ones first), so a short
 // title ("הסערה") is not buried behind dozens of in-stock books that merely contain the word. A title written
