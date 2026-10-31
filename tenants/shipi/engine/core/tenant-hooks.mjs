@@ -80,7 +80,22 @@ export function createHookRunner(hooks,data={},{tenant='',timeoutMs=100,batchTim
   async rewriteQuery(query){const q=await call('rewriteQuery',[query],timeoutMs);if(typeof q!=='string'||q.length>300)throw Error('rewriteQuery חייב להחזיר מחרוזת עד 300 תווים');return q.trim()||query;},
   // One call for the whole catalog; protected fields always come from the source product.
   async transformProducts(products){
-   const out=await call('transformProduct',[products],batchTimeoutMs);if(!Array.isArray(out)||out.length!==products.length)throw Error('transformProduct חייב להחזיר מוצר לכל מוצר');
+   // A full enriched catalog can be larger than the worker heap (Shipi: >80 MB). Bound each JSON message while
+   // retaining the catalog-wide deadline and returning nothing until every batch has passed validation.
+   const out=[],deadline=Date.now()+batchTimeoutMs;
+   let batch=[],bytes=0;
+   const flush=async()=>{
+    if(!batch.length)return;
+    const remaining=deadline-Date.now();if(remaining<=0)throw Error('הפונקציה transformProduct חרגה מזמן הריצה');
+    const result=await call('transformProduct',[batch],remaining);
+    if(!Array.isArray(result)||result.length!==batch.length)throw Error('transformProduct חייב להחזיר מוצר לכל מוצר');
+    out.push(...result);batch=[];bytes=0;
+   };
+   for(const p of products){const size=JSON.stringify(p).length;
+    if(batch.length&&(batch.length>=50||bytes+size>256000))await flush();
+    batch.push(p);bytes+=size;
+   }
+   await flush();
    return out.map((p,i)=>{const src=products[i];if(!p||typeof p!=='object'||Array.isArray(p))throw Error('transformProduct החזיר ערך שאינו מוצר: '+src.id);
     const merged={...src,...p};for(const k of PROTECTED)if(Object.hasOwn(src,k))merged[k]=src[k];
     for(const k of ['categories','tags'])merged[k]=Array.isArray(merged[k])?merged[k].filter(x=>typeof x==='string').slice(0,100):src[k]||[];

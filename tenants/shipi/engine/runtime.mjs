@@ -42,8 +42,14 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
  let hooks=null,hookError=null;if(hasHooks(profile))try{hooks=createHookRunner(profile.hooks,profile.hookData,{tenant:project.id});}catch(e){hookError=e.message;}
  const service=list=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:10,retrieve:list===products?retrieve:overrideRetrieve||createIndexRetriever(list,profile,buildSearchIndex(list,profile.version)),rankCandidates,hooks});
  let search=service(products);
+ let suggestIndex=index,suggestRetrieve=retrieve,prepareProducts=null;
  if(hooks?.has('transformProduct')){const base=search;let ready=null;
-  const prepare=()=>ready??=hooks.transformProducts(products).then(list=>service(list)).catch(e=>{hookError='transformProduct: '+e.message;return base;});
+  const prepare=()=>ready??=hooks.transformProducts(products).then(list=>{
+   suggestIndex=buildSearchIndex(list,profile.version);
+   suggestRetrieve=overrideRetrieve||createIndexRetriever(list,profile,suggestIndex);
+   return service(list);
+  }).catch(e=>{hookError='transformProduct: '+e.message;return base;});
+  prepareProducts=prepare;
   search=async request=>(await prepare())(request);search.ready=prepare;}
  // Suggestions while the shopper types. The same rules as search decide (the tenant's rewriteQuery function, spelling
  // and linked terms, tag / type / price filters, hidden products and the stock policy, the index's order) — but only
@@ -55,16 +61,17 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
  async function suggest(query,{limit=8}={}){
   if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   let q=typeof query==='string'?query.trim().slice(0,300):'';if(normalize(q).length<2)return {query:q,matches:[],total:0};
+  if(prepareProducts)await prepareProducts();
   if(hooks?.has('rewriteQuery'))try{q=String(await hooks.rewriteQuery(q)||q);}catch{}
   // One row per title: catalogs carry the same product under more than one id.
   const seen=new Set(),titles=new Set(),matches=[],applied=new Set();
   const take=(r,words)=>{const ranked=applyRanking(r?.matches||[],profile.rankingRules,words);for(const name of ranked.applied)applied.add(name);
    for(const p of ranked.matches){const t=normalize(p.title);if(seen.has(p.id)||titles.has(t))continue;seen.add(p.id);titles.add(t);matches.push(p);}};
-  const literal=await retrieve(q);take(literal,q);
+  const literal=await suggestRetrieve(q);take(literal,q);
   const words=q.split(/\s+/),last=normalize(words.at(-1)),completed=[];
   if(matches.length<limit&&last.length>=2&&!last.includes(' ')){
-   const terms=Object.keys(index.terms||{}).filter(t=>t!==last&&t.startsWith(last)).sort((a,b)=>index.terms[b].length-index.terms[a].length||a.localeCompare(b)).slice(0,6);
-   for(const t of terms){if(matches.length>=limit*3)break;const before=matches.length;const full=[...words.slice(0,-1),t].join(' ');take(await retrieve(full),full);if(matches.length>before)completed.push(t);}
+   const terms=Object.keys(suggestIndex.terms||{}).filter(t=>t!==last&&t.startsWith(last)).sort((a,b)=>suggestIndex.terms[b].length-suggestIndex.terms[a].length||a.localeCompare(b)).slice(0,6);
+   for(const t of terms){if(matches.length>=limit*3)break;const before=matches.length;const full=[...words.slice(0,-1),t].join(' ');take(await suggestRetrieve(full),full);if(matches.length>before)completed.push(t);}
   }
   const typed=normalize(q).split(' ').filter(Boolean),inTitle=p=>{const title=normalize(p.title).split(' ');return typed.every(w=>title.some(t=>t.startsWith(w))||wordMatches(w,title))?1:0;};
   let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
