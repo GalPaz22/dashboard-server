@@ -76,10 +76,10 @@ test('assignment records exposure for tested sessions; events are only accepted 
   assert.equal(db.data.concierge_ab_sessions.length, 2);
   assert.equal(db.data.concierge_ab_sessions.find((s) => s.session_id === treatment).exposures, 2);
 
-  const send = (session_id) => call('POST /concierge/events', { body: { session_id, experiment_id: 'cx-1', events: [{ type: 'nudge_shown' }, { type: 'bogus' }] } });
-  assert.equal((await send(treatment)).body.accepted, 1);
+  const send = (session_id) => call('POST /concierge/events', { body: { session_id, experiment_id: 'cx-1', events: [{ type: 'nudge_shown' }, { type: 'widget_clicked' }, { type: 'bogus' }] } });
+  assert.equal((await send(treatment)).body.accepted, 2);
   assert.equal((await send(control)).body.accepted, 0);
-  assert.equal(db.data.concierge_ab_events.length, 1);
+  assert.equal(db.data.concierge_ab_events.length, 2);
 });
 
 test('the report needs the admin token', async () => {

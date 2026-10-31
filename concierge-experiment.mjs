@@ -27,7 +27,7 @@ const ARMS = new Set(["treatment", "control"]);
 const EVENT_TYPES = new Set([
   "nudge_shown", "nudge_submitted", "nudge_dismissed",
   "panel_opened", "panel_closed", "message_sent", "product_clicked",
-  "prompt_bar_submitted",
+  "prompt_bar_submitted", "widget_clicked",
 ]);
 const MAX_EVENTS_PER_BATCH = 20;
 
@@ -147,7 +147,7 @@ export async function experimentReport(db, experimentId, { from = null, to = nul
     engagement[key] = engagement[key] || { events: 0, sessions: new Set() };
     engagement[key].events++;
     engagement[key].sessions.add(e.session_id);
-    if (["nudge_submitted", "message_sent", "product_clicked", "prompt_bar_submitted"].includes(e.type)) engagedSessions.add(e.session_id);
+    if (["nudge_submitted", "message_sent", "product_clicked", "prompt_bar_submitted", "widget_clicked"].includes(e.type)) engagedSessions.add(e.session_id);
   }
   const engagementOut = Object.fromEntries(Object.entries(engagement).map(([k, v]) => [k, { events: v.events, sessions: v.sessions.size }]));
 
