@@ -67,11 +67,15 @@ export function createHookRunner(hooks,data={},{tenant='',timeoutMs=100,batchTim
  }
  function call(name,args,timeout){
   if(!worker)spawn();const id=++seq,w=worker;
+  const input=JSON.stringify(args);
+  // Broad collection reranks include megabytes of source attributes. JSON parsing runs inside the
+  // same VM deadline as the merchant function; allow 100ms per full MiB, capped at 900ms extra.
+  const budget=timeout+(name==='rerank'?Math.min(900,Math.floor(input.length/1048576)*100):0);
   return new Promise((resolve,reject)=>{
    // The VM limit stops a runaway loop inside the worker; this outer limit also covers a stuck or memory-starved worker.
-   const timer=setTimeout(()=>{pending.delete(id);reject(Error(`הפונקציה ${name} חרגה מזמן הריצה`));w.terminate();if(worker===w)worker=null;},timeout+1000);
+   const timer=setTimeout(()=>{pending.delete(id);reject(Error(`הפונקציה ${name} חרגה מזמן הריצה`));w.terminate();if(worker===w)worker=null;},budget+1000);
    pending.set(id,{resolve:out=>{try{resolve(JSON.parse(out));}catch{reject(Error('הפונקציה החזירה ערך לא תקין'));}},reject,timer});
-   w.postMessage({id,name,input:JSON.stringify(args),timeout});
+   w.postMessage({id,name,input,timeout:budget});
   });
  }
  const runner={
