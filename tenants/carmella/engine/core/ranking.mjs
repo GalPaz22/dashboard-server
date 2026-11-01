@@ -13,7 +13,7 @@ export const RANK_FIELDS=/^(categories|tags|productType|title|brand|specificatio
 
 // Light Hebrew morphology: עגבנייה/עגבניה/עגבניות/עגבניית and תפוח/תפוחים share a stem of length-2 (min 3).
 const stem=w=>w.length<=3?w:w.slice(0,Math.max(3,w.length-2));
-const words=s=>normalize(s).replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(Boolean);
+const words=s=>normalize(s).replace(/\bsx(?:guard|avoid)0[a-z0-9]+\b/g,' ').replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(Boolean);
 export function wordMatches(word,list){const s=stem(word);return list.some(w=>w===word||w.length>=3&&(w.startsWith(s)||word.startsWith(stem(w))));}
 const covers=(query,title)=>{const t=words(title);return query.length>0&&query.every(w=>wordMatches(w,t));};
 

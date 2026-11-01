@@ -41,3 +41,8 @@ test('lexical-first answers a guarded compound food query without calling the mo
  let calls=0;const products=[product('oil',{title:'שמן זית כתית חדש',tags:['sxguard0kindoil','sxguard0termolive']}),product('tuna',{title:'טונה בשמן זית',tags:['sxguard0kindtuna']})];
  const service=createSearchService(products,profile(true),async()=>{calls++;throw Error('unneeded model');},{lexicalFirst:true,retrieve:()=>({status:'matched',matches:products.slice(0,1),total:1,plan:{terms:[]}})});const r=await service({query:'שמן זית sxguard0kindoil sxguard0termolive'});assert.ok(r.matches.length);assert.equal(r.metadata.llmUsed,false);assert.equal(calls,0);
 });
+
+test('internal identity guards preserve the merchant ranking of fresh products',async()=>{
+ const {applyRanking}=await import(process.env.CARMELLA_SEARCH_RANKING||'./tenants/carmella/engine/core/ranking.mjs');const products=[{id:'can',title:'עגבניות קלופות',categories:['שימורים']},{id:'fresh',title:'עגבניות טריות',categories:['ירקות']}],rules=[{action:'boost',field:'categories',values:['ירקות'],terms:[],match:'direct',weight:5}];
+ assert.equal(applyRanking(products,rules,'עגבניות sxguard0kindtomato').matches[0].id,'fresh');
+});
