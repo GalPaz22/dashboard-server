@@ -20820,7 +20820,7 @@ const zeroSearchIndexedDbs = new Set();
 app.post("/log-query", async (req, res) => {
   try {
     const { dbName } = req.store;
-    const { query, session_id, sessionId, zero_results } = req.body;
+    const { query, session_id, sessionId, zero_results, search_id, visit_id, ab_tests, typed } = req.body;
     const q = (query || "").toString().trim();
 
     if (!q) {
@@ -20833,7 +20833,11 @@ app.post("/log-query", async (req, res) => {
     await logQuery(db.collection("queries"), q, {}, [], false, {
       session_id,
       sessionId,
-      zeroResults: typeof zero_results === "boolean" ? zero_results : undefined
+      search_id,
+      visit_id,
+      ab_tests,
+      zeroResults: typeof zero_results === "boolean" ? zero_results : undefined,
+      ...(typed === true && { searchMeta: { searchMode: "typed" } }) // a pick from the list shown while typing, no search ran
     });
 
     return res.json({ success: true });
@@ -21019,7 +21023,7 @@ app.post("/product-click", async (req, res) => {
       search_query: search_query || null,
       ...(typeof req.body.search_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.search_id) && { search_id: req.body.search_id }),
       ...(typeof req.body.visit_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.visit_id) && { visit_id: req.body.visit_id }),
-      ...(['results_page', 'autocomplete', 'none'].includes(req.body.search_link) && { search_link: req.body.search_link }),
+      ...(['results_page', 'typed_results', 'autocomplete', 'none'].includes(req.body.search_link) && { search_link: req.body.search_link }),
       ...(req.body.ab_tests && typeof req.body.ab_tests === 'object' && !Array.isArray(req.body.ab_tests) && { ab_tests: req.body.ab_tests }),
       session_id: normalizedSessionId,
       sessionId: normalizedSessionId,
