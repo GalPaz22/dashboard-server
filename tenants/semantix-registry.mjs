@@ -1,8 +1,9 @@
 import {readdir,readFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
+import {getHeapStatistics} from 'node:v8';
 export const REGISTRY_VERSION=5;
-// Mounts every tenants/<slug>/ folder that has a semantix.module.json. Modules load lazily on the first request.
+// Mounts every tenants/<slug>/ folder that has a semantix.module.json. Modules load on the first request, or at startup through warm().
 // Whether a module answers is a field on the merchant's user document (users.users), which dashboard-server copies into
 // req.store.semantix:  {module:"<slug>", enabled:true, percent:100}
 //   - module must be this module's slug and the store's dbName must be the module's dbName;
@@ -45,7 +46,21 @@ export function createSemantixTenants({getDb,merchandise=null,dir=new URL('./',i
  const chain=kind=>async(req,res,next)=>{let routes;try{routes=await load();}catch(e){console.error('[SEMANTIX]',e.message);return next();}
   // A module exported before a route kind existed simply has no say in it.
   let i=0;const step=()=>{while(i<routes.length&&typeof routes[i][kind]!=='function')i++;return i<routes.length?routes[i++][kind](req,res,step):next();};return step();};
+ // Loads every switched-on module through its own autocomplete route, one at a time and the largest first (its peak
+ // memory comes while the heap is smallest). Called before the port opens: a lazy load made the first shopper after each
+ // restart wait 20-50 s, and its CPU held every other store's searches on the server meanwhile.
+ async function warm(){const routes=await load();
+  const users=await (await getDb('users')).collection('users').find({'semantix.enabled':true},{projection:{_id:0,dbName:1,collections:1,semantix:1}}).toArray();
+  for(const route of [...routes].sort((a,b)=>(b.manifest.products||0)-(a.manifest.products||0))){const m=route.manifest,user=users.find(u=>u.semantix?.module===m.slug&&u.dbName===m.dbName);
+   if(!user||typeof route.autocomplete!=='function')continue;
+   // Past 80% of the heap limit the rest load on demand: a crash here would keep the whole server from opening.
+   if(process.memoryUsage().heapUsed>getHeapStatistics().heap_size_limit*0.8){console.log('[SEMANTIX] warm-up stopped before',m.slug,'- heap is full');break;}
+   const started=now(),req={store:{dbName:user.dbName,products:user.collections?.products||'products',semantix:{...user.semantix,percent:100}},query:{query:'warm'},body:{},get:()=>undefined};
+   await new Promise(done=>route.autocomplete(req,{setHeader(){},json:done},done));
+   console.log('[SEMANTIX] warmed',m.slug,'in',now()-started,'ms');}
+ }
  return {
+  warm,
   search:chain('search'),loadMore:chain('loadMore'),autocomplete:chain('autocomplete'),
   // Per module: what is loaded, which users switch it on (users.users.semantix), circuit state and counters since start.
   async status(){const routes=await load();let users=[],usersError=null;

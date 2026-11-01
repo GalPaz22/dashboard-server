@@ -20261,6 +20261,14 @@ app.get("/demo-concierge", (req, res) => {
 \* =========================================================== */
 
 const PORT = process.env.PORT || 8000;
+// On Render the port opens only when the tenant modules are in memory, so no shopper pays for the load. A slow or failed
+// warm-up never keeps the server down: after two minutes it listens anyway and the modules finish beside the traffic.
+if (process.env.RENDER) {
+  await Promise.race([
+    semantixTenants.warm().catch(error => console.error('[SEMANTIX] warm-up failed:', error.message)),
+    new Promise(resolve => setTimeout(resolve, 120000)),
+  ]);
+}
 const server = app.listen(PORT, async () => {
   console.log(`Server is running on port ${PORT}`);
   console.log(`Redis URL: ${process.env.REDIS_URL || 'redis://localhost:6379'}`);
