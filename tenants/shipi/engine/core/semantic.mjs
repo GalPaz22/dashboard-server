@@ -62,6 +62,23 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
   async function store(key,result){
     const ranked=applyRanking(result.matches,client.rankingRules,key);if(ranked.applied.length)result={...result,matches:ranked.matches,metadata:{...result.metadata,ranking:ranked.applied}};
     if(hooks?.has('rerank')&&result.matches.length){try{result={...result,matches:await hooks.rerank(result.matches,key),metadata:{...result.metadata,functions:[...(result.metadata?.functions||[]),'rerank']}};}catch(e){result={...result,metadata:{...result.metadata,functionErrors:[...(result.metadata?.functionErrors||[]),'rerank: '+e.message]}};}}
+    // Shipi can opt into always returning sellable alternatives, even after its exact-match guard.
+    if(client.hookData?.shipiSearchRules?.alwaysResults===true){
+      if(!result.matches.length&&visible.length){
+        result=await closest(key,result,false);
+        if(hooks?.has('rerank'))try{result={...result,matches:await hooks.rerank(result.matches,key)};}catch{}
+        if(!result.matches.length)result={...result,matches:visible.slice(0,12)};
+      }
+      const required=key.match(/\bsxguard0[a-z0-9]+\b/g)||[];
+      const forbidden=(key.match(/\bsxavoid0[a-z0-9]+\b/g)||[]).map(t=>t.replace(/^sxavoid0/,'sxguard0'));
+      const differs=p=>required.some(t=>!(p.tags||[]).includes(t))||forbidden.some(t=>(p.tags||[]).includes(t));
+      if(result.metadata?.closestFallback||result.matches.some(differs)){
+        result={...result,status:result.matches.length?'matched':result.status,
+          message:'לא נמצאה התאמה מלאה — אלה המוצרים הקרובים ביותר הזמינים בחנות.',
+          matches:result.matches.map(p=>({...p,matchQuality:'alternative',alternativeReason:p.alternativeReason||'חלופה מהקטלוג; יש לבדוק את הדגם והמאפיינים בכותרת המוצר.',missingRequirements:p.missingRequirements?.length?p.missingRequirements:['לא אומתה התאמה לכל פרטי הבקשה']})),
+          metadata:{...result.metadata,phase:'closest-alternatives',exactMatch:false,fullMatch:false,closestFallback:true,verifiedCount:0,filledCount:result.matches.length,alwaysResults:true}};
+      }
+    }
     // "last" is a guarantee, so it goes after the function too: out-of-stock products follow every in-stock one, except an
     // exact title match (stockLast). The sort is stable — the rules' and the function's order holds within each part.
     if(stockPolicy(client)==='last'&&result.matches.some(p=>p.stockStatus!=='instock'))result={...result,matches:stockLast(result.matches,key)};
