@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {buildSystemPrompt,decideTrigger,catalogFacets,searchCatalog,createTurnRecorder,conciergeModelConfig} from '../../concierge.mjs';
+import {buildSystemPrompt,decideTrigger,catalogFacets,searchCatalog,createTurnRecorder,conciergeModelConfig,toolCallAction} from '../../concierge.mjs';
 import client from '../../pilot/beautics/client.json' with {type:'json'};
 import {createTopSearch} from './top-search.mjs';
 import {createSearchService} from '../../pilot/beautics/semantic.mjs';
@@ -9,10 +9,23 @@ const store={dbName:'woo-beautics-shop-co-il',products:'products',conciergeEnabl
 
 test('Beautics uses Flash-Lite with minimal thinking while other stores retain their configured model',()=>{
   assert.deepEqual(conciergeModelConfig(store),{model:'gemini-3.5-flash-lite',thinkingLevel:'MINIMAL'});
+  assert.deepEqual(conciergeModelConfig({dbName:'garmin'}),{model:'gemini-3.5-flash-lite',thinkingLevel:'LOW'});
   assert.deepEqual(conciergeModelConfig({dbName:'other'}),{
     model:process.env.CONCIERGE_MODEL||'gemini-3.7-flash',
     thinkingLevel:{minimal:'MINIMAL',low:'LOW'}[process.env.CONCIERGE_EFFORT||'low']||'MEDIUM',
   });
+});
+
+test('a response that repeats present_products runs it once and is cut off, whatever ids the copies carry',()=>{
+  const seen=new Set();
+  const call=(i,ids=['1'])=>toolCallAction(seen,{name:'present_products',id:'c'+i,args:{product_ids:ids}});
+  assert.deepEqual([call(0),call(1),call(2,['2']),call(3)],['run','skip','skip','stop']);
+});
+
+test('identical research calls run once, different ones all run',()=>{
+  const seen=new Set();
+  const search=(query,id)=>toolCallAction(seen,{name:'search_catalog',id,args:{query}});
+  assert.deepEqual([search('a','1'),search('a','2'),search('b','3')],['run','skip','run']);
 });
 
 test('top advice reaches the model router instead of being treated as a failed literal product filter',async()=>{

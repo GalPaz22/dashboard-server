@@ -44,9 +44,10 @@ const EFFORT = process.env.CONCIERGE_EFFORT || "low";
 // "minimal" only on models that accept it — gemini-3.7-flash answers MINIMAL with a 400.
 const THINKING_LEVEL = { minimal: "MINIMAL", low: "LOW" }[EFFORT] || "MEDIUM";
 export function conciergeModelConfig(store) {
-  return isBeautics(store)
-    ? { model: "gemini-3.5-flash-lite", thinkingLevel: "MINIMAL" }
-    : { model: MODEL, thinkingLevel: THINKING_LEVEL };
+  if (isBeautics(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "MINIMAL" };
+  // Garmin: MINIMAL left "lily" with no answer at all in the 2026-11-01 benchmark; LOW didn't.
+  if (store?.dbName === "garmin") return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
+  return { model: MODEL, thinkingLevel: THINKING_LEVEL };
 }
 const MAX_TOKENS = Number(process.env.CONCIERGE_MAX_TOKENS) || 8000;
 
@@ -55,6 +56,9 @@ const MAX_TOOL_ROUNDS = 8;         // one shopper turn = at most this many API c
 // research rounds without a selection, the next round may only call
 // present_products, so a shopper never waits through eight of them.
 const FORCE_PRESENT_AFTER_ROUNDS = 3;
+// A round needs one selection. Past this many in a row it is a runaway response
+// (168 present_products calls in one Garmin turn: 75 s and 432K input tokens).
+const MAX_PRESENT_CALLS_PER_ROUND = 3;
 const PREFETCH_LIMIT = 12;
 const MAX_TOOL_RESULT_CHARS = 24000;
 const MAX_TURNS_PER_CONVERSATION = 30;
@@ -1248,6 +1252,24 @@ function serializeToolResult(value) {
     : json;
 }
 
+/**
+ * What to do with a function call read from the model's stream: "run" it, "skip"
+ * a repeat, or "stop" reading a response that keeps asking for selections.
+ * The repeat key ignores the call id, since a runaway response gives every copy
+ * its own id.
+ */
+export function toolCallAction(seenCalls, call) {
+  if (call.name === "present_products") {
+    seenCalls.presentCalls = (seenCalls.presentCalls || 0) + 1;
+    if (seenCalls.presentCalls > MAX_PRESENT_CALLS_PER_ROUND) return "stop";
+    return seenCalls.presentCalls === 1 ? "run" : "skip";
+  }
+  const key = `${call.name}:${JSON.stringify(call.args || {})}`;
+  if (seenCalls.has(key)) return "skip";
+  seenCalls.add(key);
+  return "run";
+}
+
 async function runTool(block, ctx, onEvent) {
   const handler = toolHandlers[block.name];
   const started = Date.now();
@@ -1267,6 +1289,7 @@ async function runTool(block, ctx, onEvent) {
       tool: block.name,
       ms: Date.now() - started,
       products,
+      ...(block.name === "search_catalog" ? { count: result?.total_matched ?? 0 } : {}),
       ...(block.name === "present_products" ? { layout: products.length > 5 ? "grid" : "recommendations" } : {}),
     });
     return { name: block.name, id: block.id, value: result, content: serializeToolResult(result) };
@@ -1320,6 +1343,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     const seenCalls = new Set();
     let finishReason = null;
     let usageMetadata = null;
+    let runaway = false;
     for await (const chunk of stream) {
       usageMetadata = chunk.usageMetadata || usageMetadata;
       finishReason = chunk.candidates?.[0]?.finishReason || finishReason;
@@ -1331,9 +1355,9 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
           onEvent({ type: "thinking", text: part.text });
         }
         if (part.functionCall?.name) {
-          const key = part.functionCall.id || `${part.functionCall.name}:${JSON.stringify(part.functionCall.args || {})}`;
-          if (!seenCalls.has(key)) {
-            seenCalls.add(key);
+          const action = toolCallAction(seenCalls, part.functionCall);
+          if (action === "stop") runaway = true;
+          if (action === "run") {
             const block = {
               id: part.functionCall.id || `call_${round}_${toolBlocks.length}`,
               name: part.functionCall.name,
@@ -1341,10 +1365,15 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
               part,
             };
             toolBlocks.push(block);
-            onEvent({ type: "tool_start", tool: block.name });
+            onEvent({ type: "tool_start", tool: block.name, ...(block.name === "search_catalog" && block.input.query ? { query: block.input.query } : {}) });
           }
         }
       }
+      if (runaway) break;
+    }
+    if (runaway) {
+      console.warn(`[CONCIERGE] runaway present_products response stopped for ${ctx.store.dbName}`);
+      abortController.abort();
     }
 
     if (roundText) modelParts.push({ text: roundText });
@@ -2006,5 +2035,5 @@ export function mountConcierge(app, deps) {
     }
   });
 
-  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal`);
+  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal; Garmin gemini-3.5-flash-lite, effort low`);
 }
