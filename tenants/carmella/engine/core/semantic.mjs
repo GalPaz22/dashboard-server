@@ -26,7 +26,7 @@ const plain=s=>s.replace(/[*_`#]+/g,'').replace(/\s+/g,' ').trim();
 // product would otherwise fill the list), each with a bounded description.
 const SELECT_DESCRIPTION=1200;
 const distinctProducts=(list,limit)=>{const seen=new Set(),out=[];for(const x of list){const key=normalize(x.p.title)+'|'+x.p.price;if(seen.has(key))continue;seen.add(key);out.push(x);if(out.length>=limit)break;}return out;};
-export function createSearchService(products, client, generate, {ttlMs=600000,maxEntries=100,maxCandidates=100,maxCandidatesVector=100,selectCandidates=40,timeoutMs=120000,now=Date.now,lightweightRouter=true,routerTimeoutMs=10000,retrieve,rankCandidates,expansion='always',expandBelow=8,deepModel=null,deepThinking=null,hooks=null}={}) {
+export function createSearchService(products, client, generate, {ttlMs=600000,maxEntries=100,maxCandidates=100,maxCandidatesVector=100,selectCandidates=40,timeoutMs=120000,now=Date.now,lightweightRouter=true,routerTimeoutMs=10000,retrieve,rankCandidates,expansion='always',expandBelow=8,deepModel=null,deepThinking=null,hooks=null,lexicalFirst=false}={}) {
   const visible=products.filter(p=>p.tenantId===client.tenantId&&sellable(p,client));
   const selectLimit=Math.min(maxCandidates,selectCandidates);
   const categories=[...new Set(visible.flatMap(p=>p.categories))].sort();
@@ -61,6 +61,23 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
     // "last": out-of-stock products follow every in-stock one, keeping the order inside each group.
     if(stockPolicy(client)==='last'&&result.matches.some(p=>p.stockStatus!=='instock'))result={...result,matches:[...result.matches.filter(p=>p.stockStatus==='instock'),...result.matches.filter(p=>p.stockStatus!=='instock')]};
     if(hooks?.has('rerank')&&result.matches.length){try{result={...result,matches:await hooks.rerank(result.matches,key),metadata:{...result.metadata,functions:[...(result.metadata?.functions||[]),'rerank']}};}catch(e){result={...result,metadata:{...result.metadata,functionErrors:[...(result.metadata?.functionErrors||[]),'rerank: '+e.message]}};}}
+    // A tenant can opt into always returning sellable alternatives, even after its exact-match guard.
+    if(client.hookData?.catalogSearchRules?.alwaysResults===true){
+      if(!result.matches.length&&visible.length){
+        result=await closest(key,result,false);
+        if(hooks?.has('rerank'))try{result={...result,matches:await hooks.rerank(result.matches,key)};}catch{}
+        if(!result.matches.length)result={...result,matches:visible.slice(0,12)};
+      }
+      const required=key.match(/\bsxguard0[a-z0-9]+\b/g)||[];
+      const forbidden=(key.match(/\bsxavoid0[a-z0-9]+\b/g)||[]).map(t=>t.replace(/^sxavoid0/,'sxguard0'));
+      const differs=p=>required.some(t=>!(p.tags||[]).includes(t))||forbidden.some(t=>(p.tags||[]).includes(t));
+      if(result.metadata?.closestFallback||result.matches.some(differs)){
+        result={...result,status:result.matches.length?'matched':result.status,
+          message:'לא נמצאה התאמה מלאה — אלה המוצרים הקרובים ביותר הזמינים בחנות.',
+          matches:result.matches.map(p=>({...p,matchQuality:'alternative',alternativeReason:p.alternativeReason||'חלופה מהקטלוג; יש לבדוק את הדגם והמאפיינים בכותרת המוצר.',missingRequirements:p.missingRequirements?.length?p.missingRequirements:['לא אומתה התאמה לכל פרטי הבקשה']})),
+          metadata:{...result.metadata,phase:'closest-alternatives',exactMatch:false,fullMatch:false,closestFallback:true,verifiedCount:0,filledCount:result.matches.length,alwaysResults:true}};
+      }
+    }
     return save(key,result);
   }
   function save(key,result){
@@ -174,7 +191,8 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
     const key=query.trim();if(cache.has(key))return page(cache.get(key),0,limit,true);
     if(pending.has(key))return page(await pending.get(key),0,limit,true);
     const literal=retrieve?await retrieve(query):search(products,client,{query,limit:50});
-    const complex=normalize(query).split(/\s+/).length>=4||/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalize(query));
+    const negated=/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalize(query));
+    const complex=normalize(query).split(/\s+/).length>=4||negated;
     const spelled=literal.plan?.spelling?.to||normalize(query);
     const scopedWithConstraints=!!literal.plan?.scopedProductIds&&!literal.plan.scopedAliases?.some(r=>normalize(r.term)===spelled);
     // Tenant policy for short queries that already have literal matches: "always" adds LLM expansion (slower, broader),
@@ -185,6 +203,11 @@ DATA ${JSON.stringify({query,requirements:plan.requirements,intent:plan.intent,c
       const all=[...literal.matches];let token=literal.nextCursor;
       while(token){const next=search(products,client,{cursor:token,limit:50});all.push(...next.matches);token=next.nextCursor;}
       return page(await store(key,{...literal,matches:all,metadata:{mode:'spelling',phase:'spelling',indexKind:literal.indexKind||(retrieve?'local-inverted':'local-scan'),fullMatch:true,correction:literal.plan.spelling||literal.plan.corrections,llmUsed:false,llmCalls:0}}),0,limit);
+    }
+    if(lexicalFirst&&literal.matches.length&&!negated&&literal.plan?.strategy!=='identifier'){
+      const all=[...literal.matches];let token=literal.nextCursor;
+      while(token){const next=search(products,client,{cursor:token,limit:50});all.push(...next.matches);token=next.nextCursor;}
+      return page(await store(key,{...literal,matches:all,metadata:{mode:'text',phase:'lexical-first',indexKind:literal.indexKind||(retrieve?'local-inverted':'local-scan'),fullMatch:!literal.plan?.corrections?.length,...((literal.plan?.spelling||literal.plan?.corrections)&&{correction:literal.plan.spelling||literal.plan.corrections}),llmUsed:false,llmCalls:0}}),0,limit);
     }
     if(!normalize(query)||literal.matches.length&&(literalOnly||!complex&&literal.plan?.scopedProductIds&&!scopedWithConstraints||literal.plan?.strategy==='identifier')){
       const all=[...literal.matches];let token=literal.nextCursor;
