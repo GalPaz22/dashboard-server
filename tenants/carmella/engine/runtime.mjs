@@ -7,7 +7,7 @@ import {hash} from './core/hash.mjs';
 import {createIndexRetriever,buildSearchIndex,TOKENIZER} from './core/search-index.mjs';
 import {createVectorRanker,createPackedRanker} from './core/embeddings.mjs';
 import {createHookRunner,hasHooks} from './core/tenant-hooks.mjs';
-export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}={}) {
+export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve,releaseBase=false}={}) {
  const profile={...revision.profile,storeContext:project.storeContext,tenantId:project.id,platform:project.platform,sourceUrl:project.url,version:`studio-${revision.number}`,publishedStatuses:['ACTIVE','publish'],indexPlan:{text:['title','description','specifications'],filter:['productType','colors','finishes','tags','price','stockStatus'],exact:['id','sku','mpn','gtin']}};
  const classifiedTags=new Map();
  for(const [tag,assignment] of Object.entries(project.tagAssignments||{})) {
@@ -22,21 +22,23 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   for(const r of profile.badgeRules)if((raw[r.field]||[]).includes(r.value)&&!p.badges.some(b=>b.text===r.text))p.badges.push({text:r.text,kind:'merchant',order:r.order,source:'tenant-rule'});
   p.badges.sort((a,b)=>(a.order||0)-(b.order||0));return p;
  });
- const index=project.searchIndex?.tokenizer===TOKENIZER&&project.searchIndex?.contentHash===hash(products)?project.searchIndex:buildSearchIndex(products,profile.version);
- const retrieve=overrideRetrieve||createIndexRetriever(products,profile,index);
+ let index=project.searchIndex?.tokenizer===TOKENIZER&&project.searchIndex?.contentHash===hash(products)?project.searchIndex:buildSearchIndex(products,profile.version);
+ let retrieve=overrideRetrieve||createIndexRetriever(products,profile,index);
  // A build's vector index (exact content) wins; otherwise the studio's per-product vectors from the processing lab.
  const rankCandidates=project.vectorIndex?.contentHash===hash(products)?createVectorRanker(project.vectorIndex):project.studioVectors?.ids?.length?createPackedRanker(project.studioVectors):null;
  // Tenant functions: rewriteQuery/rerank run per search; transformProduct reshapes the catalog once (in its isolated
  // worker) and the index is rebuilt on the result. If the transform fails, the untransformed catalog keeps serving.
  let hooks=null,hookError=null;if(hasHooks(profile))try{hooks=createHookRunner(profile.hooks,profile.hookData,{tenant:project.id});}catch(e){hookError=e.message;}
- const service=list=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:10,retrieve:list===products?retrieve:overrideRetrieve||createIndexRetriever(list,profile,buildSearchIndex(list,profile.version)),rankCandidates,hooks});
+ const service=(list,listRetrieve=retrieve)=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:10,retrieve:listRetrieve,rankCandidates,hooks});
  let search=service(products);
  let suggestIndex=index,suggestRetrieve=retrieve,prepareProducts=null;
- if(hooks?.has('transformProduct')){const base=search;let ready=null;
+ if(hooks?.has('transformProduct')){let base=search;let ready=null;
   const prepare=()=>ready??=hooks.transformProducts(products).then(list=>{
    suggestIndex=buildSearchIndex(list,profile.version);
    suggestRetrieve=overrideRetrieve||createIndexRetriever(list,profile,suggestIndex);
-   return service(list);
+   // A long-lived module keeps one catalog: holding the untransformed one too cost Shipi 216 MB of a 1 GB heap (Nov 2026).
+   if(releaseBase){products=list;index=suggestIndex;retrieve=suggestRetrieve;base=null;project.productCards=null;}
+   return service(list,suggestRetrieve);
   }).catch(e=>{hookError='transformProduct: '+e.message;return base;});
   prepareProducts=prepare;
   search=async request=>(await prepare())(request);search.ready=prepare;}
@@ -68,7 +70,7 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,24)),q);functions.push('rerank');}catch{}
   return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
  }
- return {search,suggest,autocomplete:query=>autocomplete(products,profile,query),products,profile,index,functions:hooks?.names||[],get functionError(){return hookError;}};
+ return {search,suggest,autocomplete:query=>autocomplete(products,profile,query),get products(){return products;},profile,get index(){return index;},functions:hooks?.names||[],get functionError(){return hookError;}};
 }
 export function indexDefinition(profile={}) {
  const fields={name:[{type:'string'},{type:'autocomplete'}],id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'},variants:{type:'document',dynamic:false,fields:{id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'}}},description:{type:'string'},specifications:{type:'document',dynamic:true},tenantId:{type:'token'},categories:{type:'token'},tags:{type:'token'},colors:{type:'token'},finishes:{type:'token'},productType:{type:'token'},price:{type:'number'},stockStatus:{type:'token'},hidden:{type:'boolean'}};

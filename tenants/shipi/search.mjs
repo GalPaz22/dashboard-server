@@ -107,7 +107,7 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
   // Rows slimmed against an earlier edition that this one does not carry are read again in full.
   if(loadRows.reload&&uncovered(s.productCards,rows))rows=await loadRows.reload(collection);
   const seen=new Set(),cards=mergeLive(s.productCards,rows,e.profile,manifest.tenantId,seen);
-  const next=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile});
+  const next=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile},{releaseBase:true});
   next.revision=e.revision;next.attach=withSource(rows);runtime=next;fingerprint=e.digest+':'+rowsPrint(rows);builtDigest=e.digest;builtAt=now();covered=seen;delete e.snapshot;
   if(loadRows.reload)compact(rows,seen);
  }
