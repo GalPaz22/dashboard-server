@@ -79,6 +79,17 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve,r
   let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
   const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,60)),q);functions.push('rerank');}catch{}
   // Same as search: out-of-stock last is applied after the tenant's function.
+  if(!ranked.length&&profile.hookData?.shipiSearchRules?.alwaysResults===true){
+   const candidates=(await suggestRetrieve('')).matches||[],terms=normalize(query).split(' ').filter(t=>t.length>1);
+   ranked=candidates.map((p,i)=>({p,i,s:terms.reduce((s,t)=>s+(normalize(p.title).includes(t)?1:0),0)})).sort((a,b)=>b.s-a.s||a.i-b.i).slice(0,Math.max(limit*3,60)).map(x=>x.p);
+   if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked,q);}catch{}
+   if(!ranked.length)ranked=candidates.slice(0,limit);
+   ranked=ranked.map(p=>({...p,matchQuality:'alternative',alternativeReason:'הצעה קרובה מהקטלוג; יש לבדוק את הדגם והמאפיינים בכותרת.'}));
+  }
+  if(profile.hookData?.shipiSearchRules?.alwaysResults===true){
+   const required=q.match(/\bsxguard0[a-z0-9]+\b/g)||[],forbidden=(q.match(/\bsxavoid0[a-z0-9]+\b/g)||[]).map(t=>t.replace(/^sxavoid0/,'sxguard0'));
+   ranked=ranked.map(p=>required.some(t=>!(p.tags||[]).includes(t))||forbidden.some(t=>(p.tags||[]).includes(t))?{...p,matchQuality:'alternative',alternativeReason:'הצעה קרובה מהקטלוג; יש לבדוק את הדגם והמאפיינים בכותרת.'}:p);
+  }
   if(stockPolicy(profile)==='last')ranked=stockLast(ranked,q);
   return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
  }

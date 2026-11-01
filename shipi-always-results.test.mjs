@@ -1,6 +1,7 @@
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-const {createSearchService}=await import('./tenants/shipi/engine/core/semantic.mjs');
+import {pathToFileURL} from 'node:url';
+const {createSearchService}=await import(process.env.SHIPI_SEARCH_ENGINE||'./tenants/shipi/engine/core/semantic.mjs');
 const profile=enabled=>({tenantId:'shipi',productTypes:{},queryAliases:{},semanticAliases:{},scopedAliases:[],colors:{},finishes:{},tagDefinitions:{},rankingRules:[],hookData:{shipiSearchRules:{alwaysResults:enabled}}});
 const product=(id,extra={})=>({id,title:'כיסוי לאייפון 18 פרו '+id,tenantId:'shipi',description:'',categories:[],tags:['sxguard0familyiphone18'],colors:[],finishes:[],specifications:{},price:50,stockStatus:'instock',hidden:false,...extra});
 const unavailable=async()=>{throw Error('provider unavailable');};
@@ -26,4 +27,12 @@ test('relaxed tenant matches are alternatives, matching family results remain di
 test('the fallback is opt-in and cannot invent results for an empty eligible catalog',async()=>{
  const products=[product('a')];const search=createSearchService(products,profile(false),unavailable,{expansion:'off',hooks:{has:n=>n==='rerank',rerank:async()=>[]},retrieve:()=>({status:'matched',plan:{terms:[]},matches:products,total:1})});assert.equal((await search({query:'sxguard0modeliphone99'})).total,0);
  const empty=createSearchService([product('hidden',{hidden:true})],profile(true),unavailable,{lightweightRouter:false,expansion:'off',retrieve:()=>({status:'empty',plan:{terms:[]},matches:[],total:0})});assert.equal((await empty({query:'xyz'})).total,0);
+});
+
+test('autocomplete returns source-backed alternatives without calling a model for an unknown query',async()=>{
+ const runtime=process.env.SHIPI_SEARCH_RUNTIME?pathToFileURL(process.env.SHIPI_SEARCH_RUNTIME).href:new URL('./tenants/shipi/engine/runtime.mjs',import.meta.url).href;
+ const {createDraftRuntime}=await import(runtime),client={...profile(true),badgeRules:[],badgeCandidates:{},pipeline:{}};
+ const p={id:'shipi',url:'https://shipi.co.il/',platform:'woocommerce',catalog:{products:[{id:'a',name:'כיסוי לאייפון 18 פרו',status:'ACTIVE',stockStatus:'instock',categories:[],tags:[],price:50},{id:'b',name:'כבל חדש',status:'ACTIVE',stockStatus:'instock',categories:[],tags:[],price:30}]}};
+ const rt=createDraftRuntime(p,{number:1,profile:client}),r=await rt.suggest('zxqv999999');assert.ok(r.matches.length);assert.ok(r.matches.every(p=>p.matchQuality==='alternative'));
+ const relaxed=await rt.suggest('כיסוי sxguard0modeliphone99');assert.ok(relaxed.matches.length);assert.ok(relaxed.matches.every(p=>p.matchQuality==='alternative'));
 });
