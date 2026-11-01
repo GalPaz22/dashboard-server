@@ -1,4 +1,5 @@
 import {test} from 'node:test';
+import {readFileSync} from 'node:fs';
 import assert from 'node:assert/strict';
 import express from 'express';
 import {createV2SearchLogger} from './search-logging.mjs';
@@ -35,4 +36,11 @@ test('dashboard previews do not enter shopper analytics', async () => {
  const original = res.json;
  logger(req,res,()=>{continued=true});
  assert.equal(continued,true); assert.equal(touched,false); assert.equal(res.json,original);
+});
+
+test('/fast-search keeps the search id and A/B groups on every query it logs',()=>{
+ const source=readFileSync(new URL('./server.js',import.meta.url),'utf8'),start=source.indexOf('app.post("/fast-search"'),route=source.slice(start,source.indexOf('app.post("/simple-search"',start));
+ assert.match(route,/const logTags = \{ session_id, search_id: req\.body\?\.search_id, ab_tests: req\.body\?\.ab_tests \}/);
+ const calls=route.match(/logQuery\([^\n]*/g);assert.ok(calls.length>=8);
+ assert.deepEqual(calls.filter(line=>!line.includes('logTags')),[]);
 });

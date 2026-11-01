@@ -12048,6 +12048,7 @@ app.post("/fast-search", async (req, res) => {
   try {
     let { query, session_id } = req.body;
     session_id = normalizeSessionId(session_id, req.body?.sessionId);
+    const logTags = { session_id, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }; // same chain as /search: a native-group search counts for its visitor's group
     const FAST_LIMIT = 10;
 
     if (!query || query.trim() === "") {
@@ -12101,7 +12102,7 @@ app.post("/fast-search", async (req, res) => {
     {
       const skuProducts = await resolveSkuQueryProducts(collection, query, requestId);
       if (skuProducts.length > 0) {
-        logQuery(querycollection, query, {}, skuProducts, false, { session_id }).catch(err =>
+        logQuery(querycollection, query, {}, skuProducts, false, logTags).catch(err =>
           console.error(`[${requestId}] Failed to log SKU query:`, err.message)
         );
         return res.json({
@@ -12166,7 +12167,7 @@ app.post("/fast-search", async (req, res) => {
         }));
 
         const executionTime = Date.now() - searchStartTime;
-        logQuery(querycollection, query, {}, formattedAlternatives, false, { session_id }).catch(err =>
+        logQuery(querycollection, query, {}, formattedAlternatives, false, logTags).catch(err =>
           console.error(`[${requestId}] Failed to log fast stock relaxed query:`, err.message)
         );
 
@@ -12227,7 +12228,7 @@ app.post("/fast-search", async (req, res) => {
         const exactSearchMode = isAuthorSearch ? 'author-match' : (isModelNumberMatch ? 'model-number-match' : (isLlmFilterMatch ? 'llm-filter-catalog-match' : (isTranslatedTextMatch ? 'translated-text-match' : 'exact-text-match')));
         console.log(`[${requestId}] ⚡ FAST ${exactSearchMode.toUpperCase()} completed in ${executionTime}ms - returning ${exactProducts.length} products without LLM/recommendations`);
 
-        logQuery(querycollection, query, {}, exactProducts, false, { session_id }).catch(err =>
+        logQuery(querycollection, query, {}, exactProducts, false, logTags).catch(err =>
           console.error(`[${requestId}] Failed to log fast exact text query:`, err.message)
         );
 
@@ -12564,7 +12565,7 @@ app.post("/fast-search", async (req, res) => {
 
       if (vectorFallbackProducts.length > 0) {
         const executionTime = Date.now() - searchStartTime;
-        logQuery(querycollection, query, {}, vectorFallbackProducts, false, { session_id }).catch(err =>
+        logQuery(querycollection, query, {}, vectorFallbackProducts, false, logTags).catch(err =>
           console.error(`[${requestId}] Failed to log fast vector fallback query:`, err.message)
         );
 
@@ -12606,7 +12607,7 @@ app.post("/fast-search", async (req, res) => {
         fastSearchMode: 'relaxed-text-alternatives'
       }));
 
-      logQuery(querycollection, query, {}, formattedAlternatives, false, { session_id }).catch(err =>
+      logQuery(querycollection, query, {}, formattedAlternatives, false, logTags).catch(err =>
         console.error(`[${requestId}] Failed to log fast-search empty query:`, err.message)
       );
 
@@ -12738,7 +12739,7 @@ app.post("/fast-search", async (req, res) => {
         const executionTime = Date.now() - searchStartTime;
         console.log(`[${requestId}] ⚡ FAST STOCK RELAXED: ${formattedAlternatives.length} alternatives in ${executionTime}ms`);
 
-        logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false, { session_id }).catch(err =>
+        logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false, logTags).catch(err =>
           console.error(`[${requestId}] Failed to log fast-search relaxed alternatives:`, err.message)
         );
 
@@ -12789,7 +12790,7 @@ app.post("/fast-search", async (req, res) => {
           minPrice: llmExtractedFilters?.minPrice,
           maxPrice: llmExtractedFilters?.maxPrice
         };
-        logQuery(querycollection, query, filters, allProducts, false, { session_id }).catch(err =>
+        logQuery(querycollection, query, filters, allProducts, false, logTags).catch(err =>
           console.error(`[${requestId}] Failed to log fast-search query:`, err.message)
         );
       } catch (err) {
@@ -12837,7 +12838,7 @@ app.post("/fast-search", async (req, res) => {
     }));
 
     const executionTime = Date.now() - searchStartTime;
-    logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false, { session_id }).catch(err =>
+    logQuery(querycollection, query, llmExtractedFilters || {}, formattedAlternatives, false, logTags).catch(err =>
       console.error(`[${requestId}] Failed to log fast-search relaxed fallback:`, err.message)
     );
 
