@@ -40,7 +40,7 @@ test('dashboard previews do not enter shopper analytics', async () => {
 
 test('/fast-search keeps the search id and A/B groups on every query it logs',()=>{
  const source=readFileSync(new URL('./server.js',import.meta.url),'utf8'),start=source.indexOf('app.post("/fast-search"'),route=source.slice(start,source.indexOf('app.post("/simple-search"',start));
- assert.match(route,/const logTags = \{ session_id, search_id: req\.body\?\.search_id, ab_tests: req\.body\?\.ab_tests \}/);
+ assert.match(route,/const logTags = \{ session_id, search_id: req\.body\?\.search_id, visit_id: req\.body\?\.visit_id, ab_tests: req\.body\?\.ab_tests \}/);
  const calls=route.match(/logQuery\([^\n]*/g);assert.ok(calls.length>=8);
  assert.deepEqual(calls.filter(line=>!line.includes('logTags')),[]);
 });

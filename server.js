@@ -6634,6 +6634,7 @@ async function logQuery(queryCollection, query, filters, products = [], isComple
   if (options.searchEngine) queryDocument.searchEngine = options.searchEngine; // which v2 engine answered
   // The chain from a search to its order: the id the storefront gave this search, and the visitor's A/B groups.
   if (typeof options.search_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(options.search_id)) queryDocument.search_id = options.search_id;
+  if (typeof options.visit_id === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(options.visit_id)) queryDocument.visit_id = options.visit_id; // the visit, where session_id is the browser
   if (options.ab_tests && typeof options.ab_tests === "object" && !Array.isArray(options.ab_tests) && JSON.stringify(options.ab_tests).length <= 500) queryDocument.ab_tests = options.ab_tests;
   if (options.searchMeta) Object.assign(queryDocument, options.searchMeta); // v2: mode, llmUsed, elapsedMs, rewrites, learnedRewrite
 
@@ -10214,7 +10215,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
               logBoostedProducts(response, requestId, "LLM-FILTER-SELECTION");
 
               // Log query (fire-and-forget — does not block response)
-              logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
+              logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests }).catch(err =>
                 console.error(`[${requestId}] Failed to log query:`, err.message)
               );
 
@@ -10294,7 +10295,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
         }));
 
         // Log simple query (vector fallback path — fire-and-forget)
-        logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
+        logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests }).catch(err =>
           console.error(`[${requestId}] Failed to log query:`, err.message)
         );
 
@@ -10517,7 +10518,7 @@ async function handleTextMatchesOnlyPhase(req, res, requestId, query, context, n
     }
 
     // Log simple query (text matches path — fire-and-forget)
-    logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
+    logQuery(querycollection, query, extractedFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -10734,7 +10735,7 @@ async function handleCategoryFilteredPhase(req, res, requestId, query, context, 
     })).toString('base64') : null;
 
     // Log simple query (category-filtered path — fire-and-forget)
-    logQuery(querycollection, query, categoryFilteredHardFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }).catch(err =>
+    logQuery(querycollection, query, categoryFilteredHardFilters, response, false, { session_id: req.body?.session_id, sessionId: req.body?.sessionId, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests }).catch(err =>
       console.error(`[${requestId}] Failed to log query:`, err.message)
     );
 
@@ -12048,7 +12049,7 @@ app.post("/fast-search", async (req, res) => {
   try {
     let { query, session_id } = req.body;
     session_id = normalizeSessionId(session_id, req.body?.sessionId);
-    const logTags = { session_id, search_id: req.body?.search_id, ab_tests: req.body?.ab_tests }; // same chain as /search: a native-group search counts for its visitor's group
+    const logTags = { session_id, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests }; // same chain as /search: a native-group search counts for its visitor's group
     const FAST_LIMIT = 10;
 
     if (!query || query.trim() === "") {
@@ -21009,11 +21010,14 @@ app.post("/product-click", async (req, res) => {
       product_name: product_name || null,
       search_query: search_query || null,
       ...(typeof req.body.search_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.search_id) && { search_id: req.body.search_id }),
+      ...(typeof req.body.visit_id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(req.body.visit_id) && { visit_id: req.body.visit_id }),
+      ...(['results_page', 'autocomplete', 'none'].includes(req.body.search_link) && { search_link: req.body.search_link }),
       ...(req.body.ab_tests && typeof req.body.ab_tests === 'object' && !Array.isArray(req.body.ab_tests) && { ab_tests: req.body.ab_tests }),
       session_id: normalizedSessionId,
       sessionId: normalizedSessionId,
       interaction_type: interactionType,
       timestamp: clientTimestamp ? new Date(clientTimestamp) : new Date(),
+      received_at: new Date(), // the server's clock: the proof of a search compares it with the search's own row
       product_url: product_url || null,
       source: source || null, // 'ai', 'manual', etc.
       platform: platform || null, // 'shopify', 'woocommerce', etc.
