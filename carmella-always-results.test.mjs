@@ -46,3 +46,8 @@ test('internal identity guards preserve the merchant ranking of fresh products',
  const {applyRanking}=await import(process.env.CARMELLA_SEARCH_RANKING||'./tenants/carmella/engine/core/ranking.mjs');const products=[{id:'can',title:'עגבניות קלופות',categories:['שימורים']},{id:'fresh',title:'עגבניות טריות',categories:['ירקות']}],rules=[{action:'boost',field:'categories',values:['ירקות'],terms:[],match:'direct',weight:5}];
  assert.equal(applyRanking(products,rules,'עגבניות sxguard0kindtomato').matches[0].id,'fresh');
 });
+
+test('rewriting is applied before retrieval and final alternative labeling',async()=>{
+ let retrieved='';const products=[product('oil',{tags:['sxguard0kindoil']})],service=createSearchService(products,profile(true),unavailable,{lexicalFirst:true,retrieve:q=>{retrieved=q;return {status:'matched',matches:products,total:1,plan:{terms:[]}};},hooks:{has:n=>n==='rewriteQuery',rewriteQuery:async q=>q+' sxguard0kindmissing'}});
+ const r=await service({query:'שמן זית'});assert.ok(retrieved.includes('sxguard0kindmissing'));assert.equal(r.metadata.fullMatch,false);assert.equal(r.metadata.alwaysResults,true);assert.ok(r.matches.every(p=>p.matchQuality==='alternative'));
+});
