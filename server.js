@@ -3402,7 +3402,7 @@ conciergeDeps.weakQueries = createWeakQueryIndex(conciergeDeps);
 const defaultConciergeTrigger=conciergeSearchTrigger(conciergeDeps);
 const weakQueryConciergeTrigger=conciergeWeakQueryTrigger(conciergeDeps);
 app.use((req,res,next)=>{
-  // Garmin's v2 engine skips the full trigger; it still gets the known-weak one.
+  // Garmin's v2 engine skips the full trigger; it gets the consultative and known-weak ones.
   if(process.env.GARMIN_SEARCH_V2==='true'&&req.store?.dbName==='garmin'&&req.method==='POST'&&req.path==='/search')return weakQueryConciergeTrigger(req,res,next);
   return defaultConciergeTrigger(req,res,next);
 });

@@ -969,7 +969,9 @@ const TRIGGER_PATHS = new Set(["/search", "/fast-search"]);
 // known_weak: a search this store's logs show shoppers run and don't buy
 // after (concierge-weak-queries.mjs). rephrased: the storefront saw the same
 // search again in other words with no result clicked in between.
-const TRIGGER_REASONS = new Set(["no_results", "out_of_stock", "non_literal", "known_weak", "rephrased"]);
+// consultative: the search engine's router read the query as a request for
+// advice (comparison, suitability, recommendation), not a product lookup.
+const TRIGGER_REASONS = new Set(["no_results", "out_of_stock", "non_literal", "known_weak", "rephrased", "consultative"]);
 
 const OPENERS = {
   no_results: "לא מצאתי מוצר שתואם בדיוק למה שחיפשת — אבל בוא נראה יחד מה כן מתאים.",
@@ -977,6 +979,7 @@ const OPENERS = {
   non_literal: "החיפוש שלך לא ממש נפתר בשורת חיפוש. ספר לי מה אתה מחפש ואעזור לצמצם.",
   known_weak: "הנה כמה דברים שכדאי לדעת על מה שחיפשת.",
   rephrased: "נראה שאתה מחפש משהו מסוים. בוא נמצא אותו יחד.",
+  consultative: "שאלה טובה. בוא נבחר יחד את מה שהכי מתאים לך.",
 };
 
 function productsFromPayload(payload) {
@@ -1217,6 +1220,32 @@ export function knownWeakTrigger({ payload, query, store, weak }) {
   };
 }
 
+/**
+ * A search the engine's router classified as consultative: the shopper asked
+ * for advice in the search box ("איזה שעון מתאים למתחילים?"). Lookups never
+ * get here, since the router only runs after literal search failed. On by
+ * default wherever the engine reports a route; `conciergeConsultative: false`
+ * on the users doc turns it off.
+ */
+export function consultativeTrigger({ payload, query, store }) {
+  if (store?.conciergeConsultative === false) return null;
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  if (payload.metadata?.routerRoute !== "consultative") return null;
+  if (!query || query.trim().length < 2) return null;
+  const products = productsFromPayload(payload) || [];
+  const autoOpen = store.conciergeAutoOpen !== false;
+  return {
+    enabled: true,
+    should_open: true,
+    display: autoOpen ? "auto" : "pill",
+    reason: "consultative",
+    query,
+    conversation_id: newId("cnv"),
+    opener: OPENERS.consultative,
+    product_ids: products.filter((p) => p && productInStock(p)).slice(0, 6).map((p) => String(p?.id ?? p?.product_id ?? "")).filter(Boolean),
+  };
+}
+
 // Starts the known-weak lookup as the request comes in, so the embedding
 // lookup it may need runs alongside the search instead of after it.
 function startWeakMatch(deps, store, query) {
@@ -1256,20 +1285,26 @@ function searchSessionId(req) {
 }
 
 /**
- * Known-weak only, for search routes that skip the full trigger (Garmin's v2
- * engine answers /search itself and doesn't carry the markers decideTrigger
- * reads).
+ * For search routes that skip the full trigger (Garmin's v2 engine answers
+ * /search itself and doesn't carry the markers decideTrigger reads): the
+ * engine's own consultative route, then the known non-converting queries.
  */
 export function conciergeWeakQueryTrigger(deps) {
   return function conciergeWeakQueryTriggerMiddleware(req, res, next) {
     if (!TRIGGER_PATHS.has(req.path)) return next();
-    if (!req.store || req.store.conciergeEnabled !== true || req.store.conciergeWeakQueries !== true) return next();
+    if (!req.store || req.store.conciergeEnabled !== true) return next();
     if (!assignConcierge(req.store, searchSessionId(req)).show) return next(); // A/B control arm, or mode "off"
     const query = typeof req.body?.query === "string" ? req.body.query : "";
     const weakPromise = startWeakMatch(deps, req.store, query);
     const sendJson = res.json.bind(res);
     res.json = async (payload) => {
-      const trigger = knownWeakTrigger({ payload, query, store: req.store, weak: await weakPromise });
+      let trigger = null;
+      try {
+        trigger = consultativeTrigger({ payload, query, store: req.store })
+          || knownWeakTrigger({ payload, query, store: req.store, weak: await weakPromise });
+      } catch (err) {
+        console.warn("[CONCIERGE] trigger detection failed:", err.message);
+      }
       return trigger ? stampTrigger(deps, req, res, payload, trigger, sendJson) : sendJson(payload);
     };
     next();
@@ -1522,11 +1557,13 @@ function openingMessage(trigger, prefetched = null) {
     out_of_stock: `הלקוח חיפש באתר ${query} וכל מה שהתאים אזל מהמלאי.`,
     non_literal: `הלקוח חיפש באתר ${query} — שאילתה לא מילולית שהתוצאות שלה לא בהכרח עונות עליה.`,
     known_weak: `הלקוח חיפש באתר ${query} וקיבל תוצאות. לפי נתוני החנות, לקוחות שמחפשים את זה${trigger?.weak?.query && trigger.weak.query !== trigger?.query ? ` (או ניסוח דומה: "${trigger.weak.query}")` : ""} בדרך כלל לא לוחצים על התוצאות ולא קונים — כנראה שחסר להם הסבר כדי לבחור.`,
+    consultative: `הלקוח כתב בשורת החיפוש ${query} — זו שאלה שמבקשת ייעוץ (השוואה, התאמה או המלצה), לא חיפוש של מוצר מסוים. התוצאות שהוצגו לו לא עונות על השאלה עצמה.`,
     rephrased: `הלקוח חיפש באתר ${query}, ורגע לפני כן חיפש ${trigger?.previous_query ? `"${trigger.previous_query}"` : "משהו דומה"} בלי ללחוץ על אף תוצאה — כנראה עדיין לא מצא את מה שהוא מחפש.`,
   }[trigger?.reason] || `הלקוח חיפש באתר ${query}.`;
 
   const task = {
     known_weak: "פתח את השיחה בהסבר קצר ומועיל על המוצר הרלוונטי ביותר: מה הוא, למי הוא מתאים, ובמה הוא שונה מהדגמים הקרובים לו בקטלוג. אחר כך שאלה אחת שתעזור לכוון. אל תתנצל ואל תגיד שלא מצאת — התוצאות קיימות.",
+    consultative: "ענה על השאלה עצמה: המלץ על 2–3 מוצרים מהקטלוג שמתאימים לה, עם סיבה קצרה לכל אחד ומה ההבדל ביניהם. אם חסר פרט מכריע כדי לבחור, שאל שאלה אחת ממוקדת אחרי ההמלצה הראשונית. אל תתנצל ואל תגיד שלא מצאת.",
     rephrased: "פתח את השיחה במשפט קצר שמראה שהבנת מה הוא מנסה למצוא (משני הניסוחים יחד), ואז הצעה קונקרטית מהקטלוג או שאלה אחת שתעזור לצמצם.",
   }[trigger?.reason] || "פתח את השיחה: משפט קצר שמסביר ללקוח מה המצב, ואז הצעה קונקרטית או שאלה אחת שתעזור לך לכוון אותו.";
   const note = trigger?.reason === "known_weak" && trigger?.weak?.note
