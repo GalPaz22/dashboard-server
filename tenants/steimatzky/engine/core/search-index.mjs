@@ -82,8 +82,7 @@ export function createIndexRetriever(products,client,index) {
     // A real word elsewhere in the catalog must not hide a title in another Hebrew
     // spelling (אישה בורחת מבשורה → אשה בורחת מבשורה). Resolve all words together,
     // before generic fuzzy guesses, even when several words differ or blurbs match.
-    const negated=/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalized);
-    if(!exact&&!negated&&plan.terms.length>=2&&!best.matches.some(p=>{
+    if(!exact&&plan.terms.length>=2&&!best.matches.some(p=>{
       const name=new Set(normalize(String(p.title).split(' / ')[0]).split(' '));return plan.terms.every(t=>inTitle(name,t));
     })){
       const spelling=orthography(plan.terms),matches=spelling?.ids.map(id=>byId.get(id)).filter(visible)||[];

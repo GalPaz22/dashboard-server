@@ -45,6 +45,14 @@ test('title spelling outranks generic fuzzy candidates and respects title prefix
   assert.ok(retrieve('אישה נוסעת אוטובוס').corrections.some(c=>c.kind==='hebrew-spelling'));
 });
 
+test('negation words can be literal title words, while added negations stay constraints',async()=>{
+  const products=[book('target','אישה בלי רישיון'),book('other','רישיון אחר')],{retrieve}=setup(products);
+  assert.deepEqual(ids(retrieve('אשה בלי רשיון')),['target']);
+  assert.notEqual(retrieve('אשה ללא רשיון').plan.spelling?.source,'catalog-orthography');
+  const rt=createDraftRuntime({id:'t',url:'https://example.com',productCards:products,productCardsProfileHash:hash(profile),catalog:{products:[]}},{number:1,profile});
+  assert.deepEqual(ids(await rt.suggest('אשה בלי רשיון')),['target']);
+});
+
 test('exact title wins over vowel variants; numbers and non-vowel letters are preserved',()=>{
   const {retrieve}=setup([book('literal','סיפור אהבה'),book('variant','ספר אהבה'),book('model','אמא 1234'),book('consonant','אשה בורחת מבשורה')]);
   assert.equal(retrieve('סיפור אהבה').matches[0].id,'literal');
