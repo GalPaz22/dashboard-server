@@ -1,5 +1,6 @@
-import {normalize,planQuery,matchesScopedAliases,sellable,authorMatch} from './core.mjs';
+import {normalize,planQuery,applySpelling,matchesScopedAliases,sellable,authorMatch} from './core.mjs';
 import {hash} from './hash.mjs';
+import {createTitleOrthographyResolver} from './hebrew-orthography.mjs';
 // Bump when tokenization changes so a saved index is rebuilt instead of reused.
 export const TOKENIZER=3;
 export function buildSearchIndex(products,version) {
@@ -69,6 +70,7 @@ export function createIndexRetriever(products,client,index) {
   const withTitleForms=(term,r)=>{const postings=new Map(r.postings);for(const f of prefixedForms(term))if(Object.hasOwn(index.terms,f))for(const id of index.terms[f])if(!postings.has(id)&&titleWords(byId.get(id)).has(f))postings.set(id,0);
     return postings.size===r.postings.size?r:{...r,kind:r.kind==='none'?'exact':r.kind,postings};};
   const resolve=(term,options)=>withTitleForms(term,resolveTerm(index,term,options));
+  const orthography=createTitleOrthographyResolver(products);
   return (query)=>{
     const normalized=normalize(query),plan=planQuery(query,client),exact=Object.hasOwn(index.identifiers,normalized)?index.identifiers[normalized]:null;
     const visible=p=>sellable(p,client)&&(exact||
@@ -77,6 +79,27 @@ export function createIndexRetriever(products,client,index) {
       if(!exact)for(const r of resolved){ids=ids.filter(id=>r.postings.has(id));for(const id of ids)penalty.set(id,(penalty.get(id)||0)+r.postings.get(id));}
       return {penalty,matches:ids.map(id=>byId.get(id)).filter(visible),resolved};};
     let resolved=exact?[]:plan.terms.map(term=>resolve(term)),best=run(resolved);
+    // A real word elsewhere in the catalog must not hide a title in another Hebrew
+    // spelling (אישה בורחת מבשורה → אשה בורחת מבשורה). Resolve all words together,
+    // before generic fuzzy guesses, even when several words differ or blurbs match.
+    const negated=/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalized);
+    if(!exact&&!negated&&plan.terms.length>=2&&!best.matches.some(p=>{
+      const name=new Set(normalize(String(p.title).split(' / ')[0]).split(' '));return plan.terms.every(t=>inTitle(name,t));
+    })){
+      const spelling=orthography(plan.terms),matches=spelling?.ids.map(id=>byId.get(id)).filter(visible)||[];
+      if(matches.length){
+        const titleResolved=spelling.resolved.map(r=>{
+          const corrected=matches.filter(p=>r.postings.get(p.id)>0),to=[...new Set(corrected.map(p=>r.spellings.get(p.id)))];
+          return {kind:to.length?'hebrew-spelling':'exact',to,edits:corrected.length?Math.min(...corrected.map(p=>r.postings.get(p.id))):0,postings:r.postings};
+        });
+        best={...run(titleResolved),matches,titled:true};
+        const rewrites=new Set(matches.map(p=>spelling.resolved.map(r=>r.spellings.get(p.id)).join(' ')));
+        if(rewrites.size===1){
+          const words=[...rewrites][0].split(' '),aliases=Object.fromEntries(plan.terms.map((term,i)=>[term,words[i]]));
+          plan.spelling={from:normalized,to:applySpelling(plan.spelling?.to||normalized,aliases),source:'catalog-orthography'};
+        }
+      }
+    }
     // Every term exists but not together: approximate one term at a time, fewest edits first. When the approximation is
     // the same word in another Hebrew spelling (with or without י / ו: איילת, אילת) and a product's own title then carries
     // every word, that product is the answer ("איילת אוטובוס" → "אילת נוסעת באוטובוס"): only such products are kept and the
