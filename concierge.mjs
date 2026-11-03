@@ -34,6 +34,7 @@ import { ExpiringMap } from './memory-lifecycle.mjs';
 import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
+import {CLASSIFY_PROMPT, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
    Config
@@ -46,7 +47,7 @@ const THINKING_LEVEL = { minimal: "MINIMAL", low: "LOW" }[EFFORT] || "MEDIUM";
 export function conciergeModelConfig(store) {
   if (isBeautics(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "MINIMAL" };
   // Garmin: MINIMAL left "lily" with no answer at all in the 2026-11-01 benchmark; LOW didn't.
-  if (store?.dbName === "garmin") return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
+  if (store?.dbName === "garmin" || isSteimatzky(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
   return { model: MODEL, thinkingLevel: THINKING_LEVEL };
 }
 const MAX_TOKENS = Number(process.env.CONCIERGE_MAX_TOKENS) || 8000;
@@ -242,7 +243,7 @@ const PRODUCT_PROJECTION = {
   type: 1, category: 1, softCategory: 1, colors: 1, stockStatus: 1,
   stock_status: 1, specialSales: 1, ItemID: 1,
   categories: 1, tags: 1, status: 1, hidden: 1,
-  regularPrice: 1, regular_price: 1,
+  regularPrice: 1, regular_price: 1, author: 1, notInStore: 1,
 };
 
 /** The pre-sale price, only when the product is actually selling below it. */
@@ -255,6 +256,7 @@ function shapeProduct(product) {
   return {
     product_id: String(product.id ?? product.ItemID ?? product._id),
     name: product.name || null,
+    author: product.author || null,
     price: typeof product.price === "number" ? product.price : null,
     regular_price: regularPriceOf(product),
     in_stock: productInStock(product),
@@ -343,6 +345,7 @@ async function textCandidates(ctx, query, { inStock }) {
             // shopper typed against the spelling the merchant catalogued.
             { text: { query, path: taxonomyPaths, fuzzy: { maxEdits: 1 }, score: { boost: { value: 2 } } } },
             { text: { query, path: "description" } },
+            ...(isSteimatzky(ctx.store) ? [{ text: { query, path: "author", score: { boost: { value: 4 } } } }] : []),
           ],
           filter,
           minimumShouldMatch: 1,
@@ -479,6 +482,7 @@ export async function searchCatalog(args, ctx) {
 
   let results = pool.filter((p) => p && passesPostFilters(p, args));
   if (isBeautics(ctx.store)) results = results.filter(p=>p.hidden!==true && ['ACTIVE','publish'].includes(p.status));
+  if (isSteimatzky(ctx.store)) results = results.filter(p => p.hidden !== true && p.notInStore !== true && Number(p.price) > 0);
   if (inStock) results = results.filter(productInStock);
 
   if (args.sort === "price_asc") results.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
@@ -793,7 +797,7 @@ function extractProducts(result) {
 
 export function buildSystemPrompt(store) {
   const instructions = typeof store.conciergeInstructions === 'string' ? store.conciergeInstructions.trim() : '';
-  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store) + (instructions ? `\n\n## הוראות נוספות של החנות\n${instructions}` : '');
+  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store) + steimatzkyConciergeInstructions(store) + (instructions ? `\n\n## הוראות נוספות של החנות\n${instructions}` : '');
 }
 
 function buildBaseSystemPrompt(store) {
@@ -969,7 +973,7 @@ async function consumeQuota(deps, key, limit, windowSeconds) {
 
 const TRIGGER_PATHS = new Set(["/search", "/fast-search"]);
 
-const TRIGGER_REASONS = new Set(["no_results", "out_of_stock", "non_literal"]);
+const TRIGGER_REASONS = new Set(["no_results", "out_of_stock", "non_literal", "consultative", "repeated"]);
 
 const OPENERS = {
   no_results: "לא מצאתי מוצר שתואם בדיוק למה שחיפשת — אבל בוא נראה יחד מה כן מתאים.",
@@ -1180,6 +1184,54 @@ export async function decideTrigger({ payload, query, store, ctx }) {
     opener: OPENERS[reason],
     product_ids: products.slice(0, 6).map((p) => String(p?.id ?? p?.product_id ?? "")).filter(Boolean),
   };
+}
+
+const classified = new Map();
+const CLASSIFY_CACHE = 2000;
+const CLASSIFY_TIMEOUT_MS = 4000;
+const CLASSIFY_LIMIT = 30; // per shopper per hour
+
+/** true / false, or null when the model didn't answer in time (treated as "not advice", and not remembered). */
+async function asksForAdvice(query, visitor, deps) {
+  const key = query.toLocaleLowerCase("he");
+  if (classified.has(key)) return classified.get(key);
+  const quota = await consumeQuota(deps, `concierge:classify:steimatzky:${visitor || "anonymous"}`, CLASSIFY_LIMIT, SHOPPER_WINDOW_SECONDS);
+  if (!quota.allowed) return null;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), CLASSIFY_TIMEOUT_MS);
+  try {
+    const response = await getGemini().models.generateContent({
+      model: "gemini-3.5-flash-lite",
+      contents: `Search: ${JSON.stringify(query)}`,
+      config: {
+        abortSignal: controller.signal,
+        maxOutputTokens: 60,
+        systemInstruction: CLASSIFY_PROMPT,
+        responseMimeType: "application/json",
+        responseJsonSchema: { type: "object", properties: { advice: { type: "boolean" } }, required: ["advice"], additionalProperties: false },
+        thinkingConfig: { thinkingLevel: "MINIMAL" },
+      },
+    });
+    const advice = JSON.parse(response.text || "{}").advice === true;
+    if (classified.size >= CLASSIFY_CACHE) classified.delete(classified.keys().next().value);
+    classified.set(key, advice);
+    return advice;
+  } catch (err) {
+    console.warn("[CONCIERGE] classify failed:", err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function decideMoment({ query, visitor, repeats, shown, ctx }) {
+  const ids = shown.map((b) => b.id).filter(Boolean).slice(0, 6);
+  const candidates = soldOutPossible(query, shown) ? await textCandidates(ctx, query, { inStock: false }) : [];
+  const soldOut = soldOutNamed(query, candidates.filter(productInStock).map((p) => ({ title: p.name, author: p.author, inStock: true })).concat(shown), candidates.filter((p) => !productInStock(p)));
+  if (soldOut.length) return { reason: "out_of_stock", product_ids: soldOut.slice(0, 6).map((p) => String(p.id ?? p._id)) };
+  if (repeats >= 3) return { reason: "repeated", product_ids: ids };
+  if (worthClassifying(query, shown) && await asksForAdvice(query, visitor, ctx.deps)) return { reason: "consultative", product_ids: ids };
+  return null;
 }
 
 /**
@@ -1464,6 +1516,18 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
 async function prefetchOpeningSearch(trigger, ctx) {
   if (!trigger?.query) return null;
   try {
+    if (isSteimatzky(ctx.store) && trigger.reason === "out_of_stock" && trigger.product_ids?.length) {
+      const collection = await getCollection(ctx);
+      const id = trigger.product_ids[0];
+      const book = await collection.findOne({ $or: [{ id }, { id: Number(id) }] }, { projection: { name: 1, author: 1 } });
+      if (book) {
+        const [similar, sameAuthor] = await Promise.all([
+          findAlternatives({ product_id: id, limit: 8 }, ctx),
+          book.author ? searchCatalog({ query: book.author, limit: 8 }, ctx) : null,
+        ]);
+        return { sold_out: { name: book.name, author: book.author || null }, same_author: sameAuthor?.products || [], similar: similar.products };
+      }
+    }
     return await searchCatalog({ query: trigger.query, limit: PREFETCH_LIMIT }, ctx);
   } catch (err) {
     console.warn("[CONCIERGE] opening prefetch failed:", err.message);
@@ -1473,10 +1537,13 @@ async function prefetchOpeningSearch(trigger, ctx) {
 
 function openingMessage(trigger, prefetched = null) {
   const query = trigger?.query ? `"${trigger.query}"` : "משהו";
-  const situation = {
+  const soldOut = prefetched?.sold_out;
+  const situation = soldOut ? `הלקוח חיפש באתר ${query}. הספר "${soldOut.name}"${soldOut.author ? ` של ${soldOut.author}` : ""} אזל מהמלאי: אמור זאת במשפט הראשון, בשם הספר, ואז הצע חלופה.` : {
     no_results: `הלקוח חיפש באתר ${query} ולא הוחזרו לו תוצאות.`,
     out_of_stock: `הלקוח חיפש באתר ${query} וכל מה שהתאים אזל מהמלאי.`,
     non_literal: `הלקוח חיפש באתר ${query} — שאילתה לא מילולית שהתוצאות שלה לא בהכרח עונות עליה.`,
+    consultative: `הלקוח כתב בחיפוש באתר ${query} — זו בקשת ייעוץ. התוצאות כבר מוצגות לו ליד השיחה; ענה על הבקשה עצמה בהמלצה.`,
+    repeated: `הלקוח חיפש באתר שוב ושוב דברים דומים, אחרון ${query}, ולא פתח אף תוצאה. כנראה עדיין לא מצא את מה שהוא מחפש.`,
   }[trigger?.reason] || `הלקוח חיפש באתר ${query}.`;
 
   return `[הודעת פתיחה אוטומטית — הלקוח עדיין לא כתב כלום]
@@ -1656,12 +1723,34 @@ export function mountConcierge(app, deps) {
       res.status(401).json({ error: "Invalid or missing API key" });
       return false;
     }
-    if (req.store.conciergeEnabled !== true) {
+    if (req.store.conciergeEnabled !== true && !conciergeRolloutOpen(req.store, req.body?.session_id)) {
       res.status(403).json({ error: "concierge_disabled", message: "Concierge is not enabled for this store." });
       return false;
     }
     return true;
   }
+
+  /**
+   * POST /concierge/decide
+   *   { query, session_id, repeats, shown: [{ id, title, author, inStock }] }
+   *
+   * Asked by the page after its results are on screen, so a slow answer only
+   * means the chat opens a moment later. Any failure answers open:false.
+   */
+  app.post("/concierge/decide", async (req, res) => {
+    if (!req.store) return res.status(401).json({ error: "Invalid or missing API key" });
+    const visitor = sanitizeId(req.body?.session_id);
+    if (!isSteimatzky(req.store) || !conciergeRolloutOpen(req.store, visitor)) return res.json({ open: false });
+    try {
+      const query = sanitizeShopperText(req.body?.query, 200);
+      if (!query || query.length < 2) return res.json({ open: false });
+      const reason = await decideMoment({ query, visitor, repeats: Number(req.body?.repeats) || 0, shown: shownBooks(req.body?.shown), ctx: { store: req.store, deps } });
+      return res.json(reason ? { open: true, trigger: { reason: reason.reason, query, product_ids: reason.product_ids } } : { open: false });
+    } catch (err) {
+      console.warn("[CONCIERGE] decide failed:", err.message);
+      return res.json({ open: false });
+    }
+  });
 
   /**
    * POST /concierge/chat
