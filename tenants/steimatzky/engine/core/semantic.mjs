@@ -42,6 +42,8 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
   // model's terms on every search, and re-normalising tens of thousands of descriptions per term took seconds.
   const texts=new Map(),textOf=p=>{let t=texts.get(p.id);if(!t){t={title:normalize(p.title),rest:normalize([p.description,...(p.categories||[]),...Object.values(p.specifications||{})].join(' '))};texts.set(p.id,t);}return t;};
   const repairSpelling=createSpellingResolver(products,client);
+  // A word found in a large share of the catalog ("of", "the", "של", "books") ranks nothing, it only buries the useful words.
+  const commonWords=new Map(),common=t=>{if(commonWords.has(t))return commonWords.get(t);let n=0,hit=false;const max=Math.max(20,visible.length*0.05);for(const p of visible){const x=textOf(p);if((x.title.includes(t)||x.rest.includes(t))&&++n>max){hit=true;break;}}commonWords.set(t,hit);return hit;};
   const route=createLightRouter(products,client,generate,{timeoutMs:routerTimeoutMs});
   function noVerifiedMatches(query, plan, reason, metadata={}) {
     const failed=['llm-failure','llm-concurrency'].includes(reason);
@@ -132,8 +134,11 @@ DATA ${JSON.stringify({query,detected:literal.plan,categories,colors:Object.keys
       const colors=[...new Set([...required.colors,...plan.colors])], finishes=[...new Set([...required.finishes,...plan.finishes])], tags=required.tags;
       const eligible=visible.filter(p=>(!literal.matches.length&&!required.scopedAliases?.some(r=>r.mode==='only')||matchesScopedAliases(p,required))&&(!required.productType||p.productType===required.productType)&&colors.every(c=>p.colors.includes(c))&&finishes.every(f=>p.finishes.includes(f))&&
         ((maxPrice===Infinity&&plan.minPrice===null)||(p.price!==null&&p.price<=maxPrice&&p.price>=(plan.minPrice??0))));
-      const terms=plan.terms.map(normalize);
-      let scored=eligible.map(p=>({p,score:tags.filter(t=>(p.tags||[]).includes(t)).length*4+plan.categories.filter(c=>p.categories.includes(c)).length*4+terms.filter(t=>{const x=textOf(p);return x.title.includes(t)||x.rest.includes(t);}).length*3})).filter(x=>x.score>0)
+      // A retrieval word the model adds that is common across the catalog ("books", "ספרים") scores thousands of products
+      // like the author or title the shopper named, and the named books lose the tie to the first ids ("Frieda McFadden").
+      // A word the request names also outweighs a category hint, which otherwise tied with it the same way.
+      const allTerms=plan.terms.map(normalize).filter(Boolean),specific=allTerms.filter(t=>!common(t)),terms=specific.length?specific:allTerms;
+      let scored=eligible.map(p=>({p,score:tags.filter(t=>(p.tags||[]).includes(t)).length*4+plan.categories.filter(c=>p.categories.includes(c)).length*4+terms.filter(t=>{const x=textOf(p);return x.title.includes(t)||x.rest.includes(t);}).length*5})).filter(x=>x.score>0)
         .sort((a,b)=>b.score-a.score||a.p.id.localeCompare(b.p.id));
       if(rankCandidates){const ranked=await rankCandidates(query,eligible);const combined=new Map(scored.slice(0,maxCandidates).map((x,i)=>[x.p.id,{p:x.p,score:1/(60+i)}]));for(const [i,x] of ranked.slice(0,maxCandidatesVector).entries()){const old=combined.get(x.p.id);combined.set(x.p.id,{p:x.p,score:(old?.score||0)+1/(60+i)});}scored=[...combined.values()].sort((a,b)=>b.score-a.score);}
       // The literal matches are judged too: a short query's word hits (often in a blurb) must not reach the shopper unread.
@@ -188,8 +193,6 @@ ${wantAlternatives?'ONLY when no product qualifies for matches: leave matches em
     if(!visible.length)return previous;
     // The interpretation's terms (a translated title, the author of a book the store does not carry) count beside the
     // shopper's own words, so the alternatives can be the same author's books rather than products sharing a word.
-    // A word found in a large share of the catalog ("of", "the", "של") ranks nothing, it only buries the useful words.
-    const common=t=>{let n=0;const max=Math.max(20,visible.length*0.05);for(const p of visible){const x=textOf(p);if((x.title.includes(t)||x.rest.includes(t))&&++n>max)return true;}return false;};
     const terms=normalize(query).split(/\s+/).filter(t=>t&&!common(t)),hinted=[...new Set((previous.metadata?.retrievalTerms||[]).map(normalize).filter(t=>t.length>=2&&!common(t)))];
     let ranked=visible.map(p=>({p,score:terms.reduce((sum,t)=>{const x=textOf(p);return sum+(x.title.includes(t)?4:0)+(x.rest.includes(t)?1:0);},0)+hinted.reduce((sum,t)=>{const x=textOf(p);return sum+(x.title.includes(t)?10:0)+(x.rest.includes(t)?8:0);},0)})).sort((a,b)=>b.score-a.score||a.p.id.localeCompare(b.p.id));
     if(rankCandidates){try{const vectors=await rankCandidates(query,visible);const scores=new Map(ranked.map((x,i)=>[x.p.id,1/(60+i)]));for(const [i,x] of vectors.entries())scores.set(x.p.id,(scores.get(x.p.id)||0)+1/(60+i));ranked.sort((a,b)=>scores.get(b.p.id)-scores.get(a.p.id));}catch{}}
