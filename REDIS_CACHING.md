@@ -1,5 +1,47 @@
 # Redis Caching Implementation Guide
 
+## Search payloads and traffic diagnostics
+
+Simple search uses `simple-search:v2:...` keys (60-second TTL). Product queries exclude
+`embedding` in MongoDB, and the cache boundary strips it defensively while preserving
+merchant-specific fields and match metadata. Seed vectors for similarity search are
+fetched separately with a projection containing only `_id`, `name`, and `embedding`.
+
+Pagination uses `pagination:v2:<sessionId>` hashes. The `embeddings` field is written
+at session creation; `state` contains delivered IDs, batch number, and update time.
+An atomic Lua update appends new IDs without reading or sending the vector field.
+Both fields share one expiry, refreshed together on updates (one hour by default).
+Old `pagination:<sessionId>` JSON sessions remain readable and migrate once on update.
+Restoring vectors for server-side similarity searches does not put them in the next
+pagination token.
+
+Every active minute, `[NETWORK]` emits JSON counters for the current process:
+
+- `redis.get.*`, `redis.setEx.*`, `redis.hmGet.*`, `redis.eval.*`: argument/reply bytes,
+  grouped into `simple-search`, `pagination`, `search-pagination`, and `other`.
+- `gemini.image` and `gemini.text`: estimated request JSON bytes and response text bytes
+  for calls through the server's shared Gemini client.
+- Each bucket reports `operations`, `failures`, `sentBytes`, and `receivedBytes`.
+  Failed attempts count toward sent bytes; completions may land in a later window.
+
+To compare outgoing volume, sum `sentBytes` by destination over the same time range
+and across all server instances. The logs contain counters only, without cache keys,
+queries, product contents, or image data. Idle windows are quiet; shutdown flushes
+the partial window. These measure application payloads, not billed network traffic:
+Redis protocol overhead and commands outside the four methods, HTTP/TLS headers,
+SDK request transformations/retries, image downloads, and other service clients are
+not included. Full-size image uploads are still unchanged; use the image bucket to
+measure their contribution before choosing thumbnail dimensions and quality.
+
+Run the regression suite with:
+
+```bash
+node --test network-traffic.test.mjs search-cache-payload.test.mjs pagination-store.test.mjs
+```
+
+The pagination integration tests require `redis-server` on `PATH`; they start an
+isolated temporary instance using a Unix socket, with TCP and persistence disabled.
+
 ## Overview
 
 This server now uses **Redis** as the primary caching layer, replacing the previous in-memory NodeCache implementation. Redis provides:

@@ -1,5 +1,8 @@
 import { ExpiringMap, withTimeout } from './memory-lifecycle.mjs';
 import { createMemoryMonitor } from './memory-monitor.mjs';
+import { createTrafficMonitor, observeRedisTraffic, observeGeminiTraffic } from './network-traffic.mjs';
+import { savePaginationState, readPaginationState, appendPaginationIds } from './pagination-store.mjs';
+import { compactSearchPayload, paginationTokenCategories } from './search-cache-payload.mjs';
 import {hasTrackingEventId, insertTrackingEvent} from './tracking-events.mjs';
 import express from "express";
 import bodyParser from "body-parser";
@@ -47,6 +50,10 @@ const __dirname = path.dirname(__filename);
 
 dotenv.config();
 
+const trafficMonitor = createTrafficMonitor();
+const trafficLogTimer = setInterval(() => trafficMonitor.flush(), 60000);
+trafficLogTimer.unref();
+
 // Redis Configuration - Robust distributed caching
 let redisClient = null;
 let redisReady = false;
@@ -59,7 +66,7 @@ async function initializeRedis() {
   const redisUrl = process.env.REDIS_URL || 'redis://localhost:6379';
   
   try {
-    redisClient = createClient({
+    redisClient = observeRedisTraffic(createClient({
       url: redisUrl,
       socket: {
         reconnectStrategy: (retries) => {
@@ -78,7 +85,7 @@ async function initializeRedis() {
       },
       // 🎯 CRITICAL: Disable offline queue to prevent memory buildup
       disableOfflineQueue: true,
-    });
+    }), trafficMonitor);
 
 
     redisClient.on('error', (err) => {
@@ -513,7 +520,7 @@ async function findDirectExactNameMatches(collection, query, limit = 10) {
     const exactMatches = await collection.find({ name: { $in: variants }, ...HIDDEN_MONGO_FILTER })
       .limit(limit)
       .maxTimeMS(100)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
 
     if (exactMatches.length > 0) return exactMatches;
   } catch (error) {
@@ -584,7 +591,7 @@ async function findBroadSingleTokenNameMatches(collection, query, limit = 75) {
       // normal 15-item validation window without running a separate count.
       .limit(limit + 1)
       .maxTimeMS(600)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
 
     const visible = docs.filter(product => isProductVisible(product) && isProductInStock(product));
     if (visible.length <= 15) return [];
@@ -648,7 +655,7 @@ async function findDirectTranslatedNameMatches(collection, translatedQuery, limi
     })
       .limit(Math.max(limit * 3, 20))
       .maxTimeMS(600)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
 
     return preferInStockThenAnyVisible(docs, tokens, limit);
   } catch (error) {
@@ -689,7 +696,7 @@ async function findDirectCatalogFieldMatches(collection, query, limit = 15) {
     })
       .limit(Math.max(limit * 3, 20))
       .maxTimeMS(700)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
 
     return preferInStockThenAnyVisible(docs, tokens, limit);
   };
@@ -740,7 +747,7 @@ async function findHeadCollocationNameMatches(collection, query, limit = 15) {
     })
       .limit(Math.max(limit * 3, 20))
       .maxTimeMS(700)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
     return preferInStockThenAnyVisible(docs, words, limit);
   } catch (error) {
     if (!isAtlasSearchIndexUnavailable(error)) {
@@ -872,7 +879,7 @@ async function findPreciseFilterCatalogMatches(collection, extracted, store, lim
     const docs = await collection.find({ $and: conditions })
       .limit(Math.max(limit * 2, 20))
       .maxTimeMS(800)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
     const rankTokens = [
       ...requestedSoft,
       ...categories,
@@ -963,7 +970,7 @@ async function findDirectAuthorMatches(collection, query, limit = 20) {
     })
       .limit(limit)
       .maxTimeMS(600)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
 
     return docs.filter(product => isProductVisible(product) && isProductInStock(product));
   } catch (error) {
@@ -1007,7 +1014,7 @@ async function findFuzzyAuthorMatches(collection, query, limit = 20) {
         }
       },
       { $limit: limit }
-    ], { maxTimeMS: 1500 }).toArray();
+    ], { maxTimeMS: 1500 }).project({ embedding: 0 }).toArray();
   } catch (error) {
     if (!isAtlasSearchIndexUnavailable(error)) {
       console.warn(`[AUTHOR SEARCH] Fuzzy lookup failed for "${query}":`, error.message);
@@ -1406,7 +1413,7 @@ async function findDirectSpecificSoftCategoryNameMatches(collection, matchedSoft
   return collection.find(query)
     .limit(limit)
     .maxTimeMS(600)
-    .toArray();
+    .project({ embedding: 0 }).toArray();
 }
 
 // Stable re-rank: literal name matches first, original (Atlas) order preserved on ties.
@@ -1541,7 +1548,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
         }
       },
       { $limit: Math.max(limit * 3, 20) }
-    ], { maxTimeMS: 800 }).toArray();
+    ], { maxTimeMS: 800 }).project({ embedding: 0 }).toArray();
 
     const rankedAtlasResults = filterAndRank(atlasResults);
     if (rankedAtlasResults.length > 0) return rankedAtlasResults;
@@ -1555,7 +1562,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
     const nameMatches = await collection.find({ name: numericTokenRegex, ...HIDDEN_MONGO_FILTER })
       .limit(limit * 2)
       .maxTimeMS(350)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
 
     if (nameMatches.length > 0) {
       return filterAndRank(nameMatches);
@@ -1578,7 +1585,7 @@ async function findDirectNumericModelMatches(collection, query, limit = 10) {
     })
       .limit(limit)
       .maxTimeMS(200)
-      .toArray();
+      .project({ embedding: 0 }).toArray();
   } catch (error) {
     if (!isAtlasSearchIndexUnavailable(error)) {
       console.warn(`[NUMERIC MODEL] Identifier lookup failed for "${query}":`, error.message);
@@ -1646,8 +1653,7 @@ async function storePaginationSession(sessionId, data, ttl = PAGINATION_SESSION_
   }
 
   try {
-    const key = `pagination:${sessionId}`;
-    await redisClient.setEx(key, ttl, JSON.stringify(data));
+    await savePaginationState(redisClient, sessionId, data, ttl);
     // Pagination session stored
     return true;
   } catch (error) {
@@ -1668,14 +1674,7 @@ async function getPaginationSession(sessionId) {
   }
 
   try {
-    const key = `pagination:${sessionId}`;
-    const data = await redisClient.get(key);
-    if (!data) {
-      return null;
-    }
-
-    const parsed = JSON.parse(data);
-    return parsed;
+    return await readPaginationState(redisClient, sessionId);
   } catch (error) {
     console.error(`[PAGINATION] Failed to retrieve session ${sessionId}:`, error.message);
     return null;
@@ -1701,23 +1700,7 @@ async function updatePaginationSession(sessionId, newDeliveredIds, batchNumber) 
       throw new Error(`Maximum pagination depth exceeded (${MAX_PAGINATION_DEPTH} batches)`);
     }
 
-    const session = await getPaginationSession(sessionId);
-    if (!session) {
-      return null;
-    }
-
-    // Append new delivered IDs
-    const updatedDeliveredIds = [...(session.deliveredIds || []), ...newDeliveredIds];
-    const updatedSession = {
-      ...session,
-      deliveredIds: updatedDeliveredIds,
-      batchNumber: batchNumber,
-      lastUpdate: Date.now()
-    };
-
-    // Store updated session
-    await storePaginationSession(sessionId, updatedSession);
-    return updatedSession;
+    return await appendPaginationIds(redisClient, sessionId, newDeliveredIds, batchNumber, PAGINATION_SESSION_TTL);
   } catch (error) {
     console.error(`[PAGINATION] Failed to update session ${sessionId}:`, error.message);
     throw error;
@@ -2754,6 +2737,7 @@ app.use(memoryMonitoringMiddleware);
 
 // Initialize Google Generative AI client
 const genAI = new GoogleGenAI({ apiKey: process.env.GOOGLE_API_KEY });
+observeGeminiTraffic(genAI.models, trafficMonitor);
 // Complex/non-literal searches get one bounded reasoning pass even when the
 // merchant has not enabled the shopper-facing Concierge. Literal searches stay
 // on the fast deterministic path and pay no model cost here.
@@ -9667,7 +9651,7 @@ app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, cr
       offset: nextOffset,
       timestamp: timestamp, // Keep original timestamp
             type: type,
-            extractedCategories: extractedCategories, // Lightweight categories (no embeddings)
+            extractedCategories: paginationTokenCategories(extractedCategories),
             session_id: session_id, // 👤 Maintain personalization context
             paginationSessionId: paginationSessionId // 🎯 Reference to Redis session
           })).toString('base64');
@@ -9675,14 +9659,16 @@ app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, cr
           // Updated pagination session (verbose log removed)
         } catch (sessionError) {
           console.error(`[${requestId}] Failed to update pagination session:`, sessionError.message);
-          // Fallback to basic token without session
+          // Keep the session reference so a later request can restore vectors if Redis recovers.
           nextToken = Buffer.from(JSON.stringify({
             query,
             filters,
             offset: nextOffset,
             timestamp: timestamp,
-            extractedCategories: extractedCategories,
-            session_id: session_id
+            type: type,
+            extractedCategories: paginationTokenCategories(extractedCategories),
+            session_id: session_id,
+            paginationSessionId: paginationSessionId
           })).toString('base64');
         }
       } else {
@@ -9693,7 +9679,7 @@ app.get("/search/load-more", semantixTenants.loadMore, garminRoutes.loadMore, cr
           offset: nextOffset,
           timestamp: timestamp,
           type: type,
-          extractedCategories: extractedCategories,
+          extractedCategories: paginationTokenCategories(extractedCategories),
           session_id: session_id
         })).toString('base64');
       }
@@ -11096,8 +11082,10 @@ async function findRelaxedTextAlternatives(collection, query, excludeIds = [], l
  */
 async function performSimpleSearch(db, collection, query, store, limit = 10, silent = false, translatedQuery = null) {
   const normalizedTranslation = String(translatedQuery || '').toLowerCase().trim();
-  const cacheKey = `simple-search:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${normalizedTranslation}:${limit}:he${store.hebrewTranslate ? 1 : 0}`;
-  return withCache(cacheKey, () => _performSimpleSearchInner(db, collection, query, store, limit, silent, translatedQuery), 60);
+  const cacheKey = `simple-search:v2:${store.dbName}:${store.products}:${query.toLowerCase().trim()}:${normalizedTranslation}:${limit}:he${store.hebrewTranslate ? 1 : 0}`;
+  return withCache(cacheKey, async () => compactSearchPayload(
+    await _performSimpleSearchInner(db, collection, query, store, limit, silent, translatedQuery)
+  ), 60);
 }
 
 const MAX_FILTER_MATCH_RESULTS = 75;
@@ -11504,7 +11492,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       ];
 
       try {
-        results = await collection.aggregate(perfectMatchPipeline, { maxTimeMS: 1500 }).toArray();
+        results = await collection.aggregate(perfectMatchPipeline, { maxTimeMS: 1500 }).project({ embedding: 0 }).toArray();
         if (!silent) console.log(`[SIMPLE-SEARCH] Atlas Search perfect match: ${results.length} results`);
       } catch (atlasError) {
         if (!isAtlasSearchIndexUnavailable(atlasError)) throw atlasError;
@@ -11543,7 +11531,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
           results = await collection.find(directQuery)
             .limit(perfectMatchLimit)
             .maxTimeMS(1000)
-            .toArray();
+            .project({ embedding: 0 }).toArray();
 
           if (!silent) console.log(`[SIMPLE-SEARCH] Direct Mongo perfect match fallback: ${results.length} results`);
         } catch (directErr) {
@@ -11596,7 +11584,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
           })
             .limit(perfectMatchLimit)
             .maxTimeMS(1000)
-            .toArray();
+            .project({ embedding: 0 }).toArray();
           const newDirectSoftMatches = directSoftMatches.filter(product =>
             !existingIds.has(product._id.toString()) &&
             isProductVisible(product) &&
@@ -11876,7 +11864,7 @@ async function _performSimpleSearchInner(db, collection, query, store, limit = 1
       ];
 
       try {
-        results = await collection.aggregate(atlasPipeline, { maxTimeMS: 1500 }).toArray();
+        results = await collection.aggregate(atlasPipeline, { maxTimeMS: 1500 }).project({ embedding: 0 }).toArray();
       } catch (atlasError) {
         if (!isAtlasSearchIndexUnavailable(atlasError)) throw atlasError;
         if (!silent) console.warn(`[SIMPLE-SEARCH] Atlas Search unavailable for "${query}"; using direct Mongo fallback:`, atlasError.message);
@@ -16957,7 +16945,7 @@ app.post("/search", logV2Search, learnedRewrites.apply, semantixTenants.search, 
           const productsWithEmbeddings = await collection.find({
             _id: { $in: productIds },
             embedding: { $exists: true, $ne: null }
-          }).toArray();
+          }).project({ _id: 1, name: 1, embedding: 1 }).toArray();
           
           if (productsWithEmbeddings.length > 0) {
             // Store embeddings in tier-2 token for similarity search
@@ -20495,6 +20483,8 @@ const server = app.listen(PORT, async () => {
 
 async function gracefulShutdown(signal) {
   console.log(`\n[${signal}] Shutting down gracefully...`);
+  clearInterval(trafficLogTimer);
+  trafficMonitor.flush();
   
   // Stop accepting new connections
   server.close(() => {
