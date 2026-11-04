@@ -68,3 +68,13 @@ test('all filters and visibility apply, and description/author text cannot certi
   assert.ok(!r.matches.some(p=>['hidden','sold','expensive'].includes(p.id)));
   assert.notEqual(setup([book('n','אשה בורחת מבשורה')]).retrieve('אישה בורחת ללא בשורה').plan.spelling?.source,'catalog-orthography');
 });
+
+test('titles in the other spelling join titles in the typed one; equal when the catalog mostly spells it that way',()=>{
+  const products=[book('doll','פו הדוב בובה',{popularity:1}),book('b1','פו הדב',{popularity:9}),book('b2','פו הדב מהדורה צבעונית',{popularity:5}),book('other','דב אחר')];
+  const {retrieve}=setup(products);
+  assert.deepEqual(ids(retrieve('פו הדוב')),['b1','b2','doll']);
+  assert.deepEqual(ids(retrieve('פו הדב')),['b1','b2','doll']);
+  // Few titles in the other spelling (ספר אהבה for סיפור אהבה): they follow the typed spelling.
+  const r=setup([book('story','סיפור אהבה'),book('story2','סיפור אהבה בעיר'),book('book','ספר אהבה',{popularity:9})]).retrieve('סיפור אהבה');
+  assert.deepEqual(ids(r),['story','story2','book']);
+});

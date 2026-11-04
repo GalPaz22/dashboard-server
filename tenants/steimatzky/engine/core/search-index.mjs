@@ -82,11 +82,16 @@ export function createIndexRetriever(products,client,index) {
     // A real word elsewhere in the catalog must not hide a title in another Hebrew
     // spelling (אישה בורחת מבשורה → אשה בורחת מבשורה). Resolve all words together,
     // before generic fuzzy guesses, even when several words differ or blurbs match.
-    if(!exact&&plan.terms.length>=2&&!best.matches.some(p=>{
-      const name=new Set(normalize(String(p.title).split(' / ')[0]).split(' '));return plan.terms.every(t=>inTitle(name,t));
-    })){
+    // Both spellings are right (דוב, דב): titles in the other spelling join the titles in the shopper's spelling, so
+    // "פו הדוב" and "פו הדב" find the same books. When most such titles use the other spelling it is the catalog's own
+    // and they rank as equals; otherwise they follow, since the same letters can be another word (סיפור, ספר).
+    let titleSpelling=null;
+    if(!exact&&plan.terms.length>=2){
+      const literal=best.matches.filter(p=>{const name=new Set(normalize(String(p.title).split(' / ')[0]).split(' '));return plan.terms.every(t=>inTitle(name,t));}).length;
       const spelling=orthography(plan.terms),matches=spelling?.ids.map(id=>byId.get(id)).filter(visible)||[];
-      if(matches.length){
+      if(literal){const seen=new Set(best.matches.map(p=>p.id)),extra=matches.filter(p=>!seen.has(p.id)),equal=extra.length>literal;
+        if(extra.length){for(const p of extra)best.penalty.set(p.id,equal?0:Math.max(...spelling.resolved.map(r=>r.postings.get(p.id))));best={...best,matches:[...best.matches,...extra]};if(equal)titleSpelling=spelling;}}
+      else if(matches.length){
         const titleResolved=spelling.resolved.map(r=>{
           const corrected=matches.filter(p=>r.postings.get(p.id)>0),to=[...new Set(corrected.map(p=>r.spellings.get(p.id)))];
           return {kind:to.length?'hebrew-spelling':'exact',to,edits:corrected.length?Math.min(...corrected.map(p=>r.postings.get(p.id))):0,postings:r.postings};
@@ -111,7 +116,7 @@ export function createIndexRetriever(products,client,index) {
     const corrections=best.resolved.flatMap((r,i)=>r.kind!=='exact'&&r.kind!=='none'?[{term:plan.terms[i],kind:r.kind,to:r.to,...(r.edits&&{edits:r.edits}),...(r.relaxed&&!best.titled&&{relaxed:true})}]:[]);
     if(corrections.length)plan.corrections=corrections;
     const rankTerms=plan.terms.length?plan.terms:(plan.scopedAliases||[]).map(r=>normalize(r.term)).filter(Boolean);
-    const titleHits=p=>{const words=titleWords(p);return rankTerms.reduce((n,t)=>n+(inTitle(words,t)?1:0),0);};
+    const titleHits=p=>{const words=titleWords(p);return rankTerms.reduce((n,t,i)=>n+(inTitle(words,t)||titleSpelling&&rankTerms===plan.terms&&titleSpelling.resolved[i].spellings.has(p.id)&&inTitle(words,titleSpelling.resolved[i].spellings.get(p.id))?1:0),0);};
     // A query that names an author puts that author's books first ("חיים נבון" over blurbs that mention both words).
     // Among equally good matches, products shoppers chose more often (production clicks and carts) come first.
     const byAuthor=new Set(rankTerms.length?matches.filter(p=>authorMatch(p,rankTerms.join(' '))).map(p=>p.id):[]);
