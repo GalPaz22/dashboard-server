@@ -851,6 +851,10 @@ function buildBaseSystemPrompt(store) {
 - אל תבטיח זמינות, זמן אספקה, החזרות, משלוח או מבצע שלא הופיעו בתוצאות הכלים.
 - אין לך יכולת להתקשר לחנות, לשלוח לה הודעה, לבדוק איתה מאוחר יותר או לבצע פעולה מחוץ לשיחה. לעולם אל תציע שתעשה זאת. אם מידע חסר, אמור ללקוח לפנות לחנות בעצמו או בחר חלופה שיש עליה מידע מלא בקטלוג.
 - אם החנות באמת לא מוכרת את מה שהלקוח מחפש, אמור זאת ישירות במשפט אחד — ומיד הצע את הדבר הקרוב ביותר שכן קיים במלאי.
+- לפני שאתה אומר שהחנות לא מוכרת משהו, חפש אותו שוב בשם אחר שבו הקטלוג עשוי לקרוא לו — מילה נרדפת, תיאור של המוצר או המונח באנגלית (למשל "מטען" ← "כבל טעינה", "charging cable"), וגם עם \`in_stock: false\`. רק אם גם אלה לא החזירו מוצר מתאים — הוא באמת לא נמכר. אם הוא קיים אבל אזל, אמור שהוא אזל, לא שהוא לא נמכר.
+- כשהלקוח ביקש דגם, סוג או מידה מסוימים ואתה מציע משהו אחר (למשל Quick Release במקום QuickFit), אמור במפורש שזה מוצר אחר ומה ההבדל — לעולם אל תציג חלופה כאילו היא מה שהוא ביקש.
+- אם הכלים החזירו מוצר שהשם שלו הוא מה שהלקוח הקליד (גם כשחסר בו שם המותג, יש סימן ® או שהצבע/המידה מופיעים בשם), המוצר קיים — זה בדיוק מה שהלקוח חיפש. אל תכתוב שהוא "לא קיים" או "לא נמצא", ואל תסתור את עצמך באותה תשובה. פתח ישר במוצר, במחיר ובאפשרויות שלו.
+- התשובה ללקוח היא רק הטקסט שהוא קורא. לעולם אל תכתוב בה מחשבות, תכנון, רשימת מזהים או משפטים כמו "נציג כמה מהם".
 - המלץ רק על מוצרים שנמצאים במלאי. מוצר שאזל אפשר להזכיר רק כדי להסביר ללקוח מה קרה, ומיד להציע חלופה.
 - מחירים נאמרים כפי שהוחזרו, בשקלים.
 
@@ -1006,18 +1010,21 @@ function normalizedLiteralWords(value) {
  * their text tier; the direct comparison is the fallback for older/early
  * response builders that do not include those tags.
  */
-function hasLiteralResult(payload, products, query) {
+function hasLiteralResult(payload, products, query, store = null) {
   const tierCount = payload && !Array.isArray(payload)
     ? payload.metadata?.tiers?.highTextMatches
     : null;
-  if (typeof tierCount === "number") return tierCount > 0;
+  if (typeof tierCount === "number" && tierCount > 0) return true;
 
   if (products.some((product) => product?.highTextMatch === true ||
       Number(product?.exactMatchBonus || product?.textMatchBonus || 0) > 0)) {
     return true;
   }
 
-  const queryWords = normalizedLiteralWords(query);
+  // The store's own name is rarely in a product title: "Garmin Forerunner 970"
+  // is a literal hit on "Forerunner® 970", not a miss that needs a chat.
+  const storeWords = new Set(normalizedLiteralWords(`${store?.dbName || ""} ${store?.name || ""}`));
+  const queryWords = normalizedLiteralWords(query).filter((word) => !storeWords.has(word));
   if (!queryWords.length) return false;
 
   return products.some((product) => {
@@ -1143,7 +1150,7 @@ export async function decideTrigger({ payload, query, store, ctx }) {
   if (tenantDecision === 'resolved') return null;
 
   const isComplex = !Array.isArray(payload) && payload?.metadata?.isComplex === true;
-  const hasLiteral = hasLiteralResult(payload, products, query);
+  const hasLiteral = hasLiteralResult(payload, products, query, store);
 
   let reason = null;
   if (tenantDecision === 'consultative') {
@@ -1541,7 +1548,7 @@ function openingMessage(trigger, prefetched = null) {
   const situation = soldOut ? `הלקוח חיפש באתר ${query}. הספר "${soldOut.name}"${soldOut.author ? ` של ${soldOut.author}` : ""} אזל מהמלאי: אמור זאת במשפט הראשון, בשם הספר, ואז הצע חלופה.` : {
     no_results: `הלקוח חיפש באתר ${query} ולא הוחזרו לו תוצאות.`,
     out_of_stock: `הלקוח חיפש באתר ${query} וכל מה שהתאים אזל מהמלאי.`,
-    non_literal: `הלקוח חיפש באתר ${query} — שאילתה לא מילולית שהתוצאות שלה לא בהכרח עונות עליה.`,
+    non_literal: `הלקוח חיפש באתר ${query}, והחיפוש לא היה בטוח שהתוצאות עונות עליו. ייתכן שהן כן — בדוק בעצמך.`,
     consultative: `הלקוח כתב בחיפוש באתר ${query} — זו בקשת ייעוץ. התוצאות כבר מוצגות לו ליד השיחה; ענה על הבקשה עצמה בהמלצה.`,
     repeated: `הלקוח חיפש באתר שוב ושוב דברים דומים, אחרון ${query}, ולא פתח אף תוצאה. כנראה עדיין לא מצא את מה שהוא מחפש.`,
   }[trigger?.reason] || `הלקוח חיפש באתר ${query}.`;
