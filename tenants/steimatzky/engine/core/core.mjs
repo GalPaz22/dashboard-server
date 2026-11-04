@@ -11,15 +11,20 @@ export const sellable=(p,client)=>!!p&&!p.hidden&&(p.stockStatus==='instock'||(s
 // "name / author" counts by its name too.
 // The shopper typed an author's name: every query word is a word of one of the product's authors (any order, so
 // "נבון חיים" too). A one-word query must be the whole name, so "עמנואל" does not lift every author called Emanuel.
-const authorsOf=p=>[p.specifications?.author,p.specifications?.['מחבר'],p.author].filter(v=>typeof v==='string'&&v).flatMap(v=>v.split(/[,;/|]/));
+// English editions write one author "LAST, FIRST" ("MCFADDEN, FREIDA"): that comma is the name's order, not a second
+// author. The whole name is one author, and the surname alone stays one too (a search for "mcfadden").
+export const authorsOf=p=>[p.specifications?.author,p.specifications?.['מחבר'],p.author].filter(v=>typeof v==='string'&&v).flatMap(v=>/^[^,;/|\u0590-\u05ff]+,[^,;/|\u0590-\u05ff]+$/.test(v)?[v.replace(/\s*,\s*/,' '),v.split(',')[0]]:v.split(/[,;/|]/));
 export function authorMatch(p,query){
  const q=normalize(query).split(' ').filter(Boolean);if(!q.length)return false;
  return authorsOf(p).some(a=>{const w=normalize(a).split(' ').filter(Boolean);return q.length>1?q.every(t=>w.includes(t)):w.length===1&&w[0]===q[0];});
 }
+// The product's own name is the query: its title, the name part of "name / author", or the store's current name for it
+// when the published card still carries an older one (sourceTitle).
+export const exactTitle=(p,query)=>{const q=normalize(query);return !!q&&[p.title||p.name,p.sourceTitle].some(t=>t&&(normalize(t)===q||normalize(String(t).split(' / ')[0])===q));};
 export function stockLast(matches,query){
  const q=normalize(query),inStock=p=>p.stockStatus==='instock';
  // A book by the author the shopper named leads like an exact title, sold-out ones after the in-stock ones.
- const exact=p=>{const t=String(p.title||p.name||'');return !!q&&(normalize(t)===q||normalize(t.split(' / ')[0])===q||authorMatch(p,q));};
+ const exact=p=>!!q&&(exactTitle(p,q)||authorMatch(p,q));
  if(!matches.some(p=>!inStock(p)))return matches;
  const lead=matches.filter(exact),rest=matches.filter(p=>!exact(p));
  return [...lead.filter(inStock),...lead.filter(p=>!inStock(p)),...rest.filter(inStock),...rest.filter(p=>!inStock(p))];

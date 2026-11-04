@@ -977,7 +977,7 @@ async function consumeQuota(deps, key, limit, windowSeconds) {
 
 const TRIGGER_PATHS = new Set(["/search", "/fast-search"]);
 
-const TRIGGER_REASONS = new Set(["no_results", "out_of_stock", "non_literal", "consultative", "repeated"]);
+const TRIGGER_REASONS = new Set(["no_results", "out_of_stock", "non_literal", "consultative", "repeated", "alternatives"]);
 
 const OPENERS = {
   no_results: "לא מצאתי מוצר שתואם בדיוק למה שחיפשת — אבל בוא נראה יחד מה כן מתאים.",
@@ -1231,11 +1231,15 @@ async function asksForAdvice(query, visitor, deps) {
   }
 }
 
-export async function decideMoment({ query, visitor, repeats, shown, ctx }) {
+// alternatives: the search found nothing that fully matches and the page shows the closest products instead
+// (metadata.closestFallback of the Semantix answer). The shopper is helped at once, after a named sold-out book, which
+// says more.
+export async function decideMoment({ query, visitor, repeats, shown, alternatives = false, ctx }) {
   const ids = shown.map((b) => b.id).filter(Boolean).slice(0, 6);
   const candidates = soldOutPossible(query, shown) ? await textCandidates(ctx, query, { inStock: false }) : [];
   const soldOut = soldOutNamed(query, candidates.filter(productInStock).map((p) => ({ title: p.name, author: p.author, inStock: true })).concat(shown), candidates.filter((p) => !productInStock(p)));
   if (soldOut.length) return { reason: "out_of_stock", product_ids: soldOut.slice(0, 6).map((p) => String(p.id ?? p._id)) };
+  if (alternatives) return { reason: "alternatives", product_ids: ids };
   if (repeats >= 3) return { reason: "repeated", product_ids: ids };
   if (worthClassifying(query, shown) && await asksForAdvice(query, visitor, ctx.deps)) return { reason: "consultative", product_ids: ids };
   return null;
@@ -1550,6 +1554,7 @@ function openingMessage(trigger, prefetched = null) {
     out_of_stock: `הלקוח חיפש באתר ${query} וכל מה שהתאים אזל מהמלאי.`,
     non_literal: `הלקוח חיפש באתר ${query}, והחיפוש לא היה בטוח שהתוצאות עונות עליו. ייתכן שהן כן — בדוק בעצמך.`,
     consultative: `הלקוח כתב בחיפוש באתר ${query} — זו בקשת ייעוץ. התוצאות כבר מוצגות לו ליד השיחה; ענה על הבקשה עצמה בהמלצה.`,
+    alternatives: `הלקוח חיפש באתר ${query} ולא נמצא מוצר שתואם בדיוק; ליד השיחה מוצגות לו חלופות קרובות. אמור בקצרה שהמוצר המבוקש לא נמצא בחנות, ועזור לו לבחור חלופה טובה: מאותו סוג מוצר, מאותו סופר או יוצר, או מאותה סדרה.`,
     repeated: `הלקוח חיפש באתר שוב ושוב דברים דומים, אחרון ${query}, ולא פתח אף תוצאה. כנראה עדיין לא מצא את מה שהוא מחפש.`,
   }[trigger?.reason] || `הלקוח חיפש באתר ${query}.`;
 
@@ -1739,7 +1744,7 @@ export function mountConcierge(app, deps) {
 
   /**
    * POST /concierge/decide
-   *   { query, session_id, repeats, shown: [{ id, title, author, inStock }] }
+   *   { query, session_id, repeats, shown: [{ id, title, author, inStock }], alternatives? }
    *
    * Asked by the page after its results are on screen, so a slow answer only
    * means the chat opens a moment later. Any failure answers open:false.
@@ -1751,7 +1756,7 @@ export function mountConcierge(app, deps) {
     try {
       const query = sanitizeShopperText(req.body?.query, 200);
       if (!query || query.length < 2) return res.json({ open: false });
-      const reason = await decideMoment({ query, visitor, repeats: Number(req.body?.repeats) || 0, shown: shownBooks(req.body?.shown), ctx: { store: req.store, deps } });
+      const reason = await decideMoment({ query, visitor, repeats: Number(req.body?.repeats) || 0, shown: shownBooks(req.body?.shown), alternatives: req.body?.alternatives === true, ctx: { store: req.store, deps } });
       return res.json(reason ? { open: true, trigger: { reason: reason.reason, query, product_ids: reason.product_ids } } : { open: false });
     } catch (err) {
       console.warn("[CONCIERGE] decide failed:", err.message);

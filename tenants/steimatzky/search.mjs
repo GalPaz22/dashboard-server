@@ -2,7 +2,7 @@ import {readFileSync,existsSync} from 'node:fs';
 import {gunzipSync} from 'node:zlib';
 import {createHash} from 'node:crypto';
 import {createDraftRuntime} from './engine/runtime.mjs';
-import {processProduct,retiredRows,feedCategories} from './engine/core/core.mjs';
+import {processProduct,retiredRows,feedCategories,normalize} from './engine/core/core.mjs';
 import {hash} from './engine/core/hash.mjs';
 import {createSessions} from './sessions.mjs';
 const read=name=>JSON.parse(readFileSync(new URL(name,import.meta.url),'utf8'));
@@ -33,10 +33,14 @@ export function adaptRow(row,retired=()=>false){
 }
 // Enriched snapshot cards with live commercial fields; new products are processed with the same profile. seen collects
 // the ids of the live rows the cards cover.
+// A product the store has renamed since the edition was built keeps its enriched card and title, and its current name
+// rides along as sourceTitle, which search indexes and matches like the title: "הקוף השובב" finds the game whose card
+// still reads "MONKEY AROUND קופים מסביב".
 export function mergeLive(cards,rows,profile,tenantId,seen=new Set()){
  const retired=retiredRows(rows),live=new Map(rows.map(r=>{const a=adaptRow(r,retired);return [a.id,a];})),out=[];
  for(const c of cards){const key=String(c.id).split(':').pop(),row=live.get(String(c.id))||live.get(key);if(!row)continue;seen.add(row.id);
-  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];if(!next.categories?.length&&row.categories.length)next.categories=row.categories;out.push(next);}
+  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];if(!next.categories?.length&&row.categories.length)next.categories=row.categories;
+  if(row.name&&normalize(row.name)!==normalize(c.title))next.sourceTitle=row.name;else delete next.sourceTitle;out.push(next);}
  const client={...profile,tenantId,version:'semantix-mini',publishedStatuses:['ACTIVE','publish']};
  for(const [id,row] of live)if(!seen.has(id))out.push(processProduct(row,client));
  return out;
@@ -57,15 +61,15 @@ export async function loadEdition(store,head){
 }
 const snapshotOf=async(e,store)=>e.snapshot??(e.digest==='local'?read('./snapshot.json'):(await loadEdition(store,e)).snapshot);
 const local=()=>{const has=n=>existsSync(new URL(n,import.meta.url));return has('./profile.json')&&has('./snapshot.json')?{revision:manifest.revision,profile:read('./profile.json'),digest:'local'}:null;};
-// The live-rows part of the fingerprint, once per rows array (the loader returns the same array until it refreshes,
+// The live-rows part of the fingerprint (with the store's name, so a rename is searchable after the next rebuild), once per rows array (the loader returns the same array until it refreshes,
 // and a refresh is a new array): hashing the whole catalog on every search and suggestion cost CPU and garbage.
 const prints=new WeakMap();
-const rowsPrint=rows=>{let p=prints.get(rows);if(p===undefined)prints.set(rows,p=hash(rows.map(r=>[r.id??r._id,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null,r.pageCheck?.status??null])));return p;};
-// Live rows the built edition already covers with enriched cards are cut down to what the fingerprint, the live fields,
+const rowsPrint=rows=>{let p=prints.get(rows);if(p===undefined)prints.set(rows,p=hash(rows.map(r=>[r.id??r._id,r.name??r.title??null,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null,r.pageCheck?.status??null])));return p;};
+// Live rows the built edition already covers with enriched cards are cut down to what the fingerprint, the live fields, the name,
 // the hidden rule and withSource read; their text (description, specifications, images...) stays only in the runtime.
 // Rows the edition lacks keep everything: a build processes them as new products. Only the module's own row loader
 // (it can reload) has its rows slimmed, in place, so a caller's own array is never changed.
-const SLIM_FIELDS=['_id','id','price','regularPrice','regular_price','currency','stockStatus','stock_status','status','hidden','notInStore','catalog_visibility','lastSeenAt','pageCheck','url','permalink','image',...SOURCE_FIELDS];
+const SLIM_FIELDS=['_id','id','name','title','price','regularPrice','regular_price','currency','stockStatus','stock_status','status','hidden','notInStore','catalog_visibility','lastSeenAt','pageCheck','url','permalink','image',...SOURCE_FIELDS];
 const slim=new WeakSet();
 function slimRow(r){const s={};for(const k of SLIM_FIELDS)if(r[k]!==undefined)s[k]=r[k];if(!r.categories?.length&&!r.category?.length){const feed=feedCategories(r);if(feed.length)s.productTypes=feed;}if(!r.image&&r.images?.length)s.images=[r.images[0]];slim.add(s);return s;}
 function compact(rows,covered){for(let i=0;i<rows.length;i++){const r=rows[i];if(!slim.has(r)&&covered.has(String(r.id??r._id)))rows[i]=slimRow(r);}}

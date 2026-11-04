@@ -6,7 +6,8 @@ export const TOKENIZER=3;
 export function buildSearchIndex(products,version) {
   const terms=Object.create(null),identifiers=Object.create(null);
   for(const p of products){const values=[p.id,p.sku,p.mpn,p.gtin,...(p.variants||[]).filter(v=>v.stockStatus!=='outofstock').flatMap(v=>[v.id,v.sku,v.mpn,v.gtin])];for(const k of new Set(values.filter(Boolean).map(normalize)))(identifiers[k]??=[]).push(p.id);
-    const text=normalize([p.title,p.description,p.summary,...p.categories,...p.tags,...Object.values(p.specifications||{})].join(' '));
+    // sourceTitle: the store's current name for a product whose published card carries an older one (search.mjs mergeLive).
+    const text=normalize([p.title,p.sourceTitle,p.description,p.summary,...p.categories,...p.tags,...Object.values(p.specifications||{})].join(' '));
     for(const token of new Set(text.split(' ').filter(Boolean)))(terms[token]??=[]).push(p.id);
   }
   return {version,kind:'local-inverted',tokenizer:TOKENIZER,documents:products.length,contentHash:hash(products),terms,identifiers,builtAt:new Date().toISOString()};
@@ -65,7 +66,7 @@ export function resolveTerm(index,term,{relax=false}={}){
 export function createIndexRetriever(products,client,index) {
   if(index.contentHash!==hash(products))throw Error('האינדקס אינו תואם לגרסת המוצרים');
   const byId=new Map(products.map(p=>[p.id,p]));
-  const titleCache=new Map(),titleWords=p=>{let w=titleCache.get(p.id);if(!w){w=new Set(normalize(p.title).split(' ').filter(Boolean));titleCache.set(p.id,w);}return w;};
+  const titleCache=new Map(),titleWords=p=>{let w=titleCache.get(p.id);if(!w){w=new Set(normalize([p.title,p.sourceTitle].filter(Boolean).join(' ')).split(' ').filter(Boolean));titleCache.set(p.id,w);}return w;};
   const inTitle=(words,term)=>words.has(term)||prefixedForms(term).some(f=>words.has(f));
   const withTitleForms=(term,r)=>{const postings=new Map(r.postings);for(const f of prefixedForms(term))if(Object.hasOwn(index.terms,f))for(const id of index.terms[f])if(!postings.has(id)&&titleWords(byId.get(id)).has(f))postings.set(id,0);
     return postings.size===r.postings.size?r:{...r,kind:r.kind==='none'?'exact':r.kind,postings};};

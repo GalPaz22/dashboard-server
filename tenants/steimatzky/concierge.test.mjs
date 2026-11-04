@@ -54,6 +54,13 @@ test('the three moments, in order', async () => {
   assert.equal(await decideMoment({query: 'פוטר', repeats: 2, shown, ctx: ctxWith([])}), null);
 });
 
+test('closest alternatives on screen open the concierge, after a named sold-out book', async () => {
+  const shown = [{...instock('קטאן'), id: 'g1'}, {...instock('דוביל'), id: 'g2'}];
+  const r = await decideMoment({query: 'שם קוד דואט', repeats: 0, shown, alternatives: true, ctx: ctxWith([])});
+  assert.deepEqual(r, {reason: 'alternatives', product_ids: ['g1', 'g2']});
+  assert.equal((await decideMoment({query: 'אבן החכמים', repeats: 0, shown, alternatives: true, ctx: ctxWith([sold('הארי פוטר ואבן החכמים', {id: 7})])})).reason, 'out_of_stock');
+});
+
 test('an in-stock edition found in the catalog stops the sold-out moment', async () => {
   const rows = [sold('הארי פוטר ואבן החכמים', {id: 7}), {name: 'הארי פוטר ואבן החכמים', id: 8, price: 60, stockStatus: 'instock'}];
   assert.equal(await decideMoment({query: 'אבן החכמים', repeats: 0, shown: [], ctx: ctxWith(rows)}), null);
