@@ -109,7 +109,8 @@ DATA ${JSON.stringify({query,detected:literal.plan,categories,colors:Object.keys
         !strings(plan.colors)||!plan.colors.every(c=>Object.hasOwn(client.colors,c))||!strings(plan.finishes)||!plan.finishes.every(f=>Object.hasOwn(client.finishes||{},f))||
         !strings(plan.tags)||!plan.tags.every(t=>Object.hasOwn(client.tagDefinitions||{},t))||
         ![plan.minPrice,plan.maxPrice].every(n=>n===null||(Number.isFinite(n)&&n>=0)))throw Error('Invalid interpretation');
-      if(plan.clarification && !plan.requirements?.length)return {status:'clarify',matches:[],message:plan.clarification,metadata:meta({intent:plan.intent})};
+      // No requirement at all: not a product request ("החזרות", "משלוחים" — store service questions). No alternatives.
+      if(plan.clarification && !plan.requirements?.length)return {status:'clarify',matches:[],message:plan.clarification,metadata:meta({intent:plan.intent,notProduct:true})};
       if(plan.clarification)return {status:'clarify',matches:[],message:plan.clarification,metadata:meta({intent:plan.intent})};
       const required=planQuery(query,client);
       const maxPrice=Math.min(required.maxPrice??Infinity,plan.maxPrice??Infinity);
@@ -221,7 +222,7 @@ ${wantAlternatives?'ONLY when no product qualifies for matches: leave matches em
       result.metadata={...result.metadata,phase:'deep-llm',storeContext:{tenant:client.tenantId,platform:client.platform,domain:client.domain||'retail',schemaVersion:client.version}};
       if(routing){const m=result.metadata;result.metadata={...m,...routing.metadata,mode:m.mode,llmCalls:m.llmCalls+1,usage:[...routing.metadata.usage,...m.usage],elapsedMs:m.elapsedMs};}
       const {alternatives,...clean}=result;result=clean;
-      if(!result.matches.length)result=await closest(query,result,true,alternatives);
+      if(!result.matches.length&&!result.metadata?.notProduct)result=await closest(query,result,true,alternatives);
       return result;
     })().then(async result=>{const id=await store(key,result);if(result.status==='degraded'||result.metadata?.expansionUnavailable||result.metadata?.closestFallback&&!result.metadata?.rankedByModel)cache.delete(key);return id;}).finally(()=>{active--;pending.delete(key);});
     pending.set(key,work);return page(await work,0,limit);
