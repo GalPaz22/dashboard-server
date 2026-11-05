@@ -35,6 +35,7 @@ import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import {createReplyCleaner} from './concierge-script.mjs';
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
+import {isGarmin, looksLikeGarminSku} from './tenants/garmin/concierge.mjs';
 import {alternativesWorthOpening, CLASSIFY_PROMPT, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
@@ -1145,6 +1146,7 @@ async function reviewNonLiteralQuery({ query, products, store, ctx }) {
  */
 export async function decideTrigger({ payload, query, store, ctx }) {
   if (!query || query.trim().length < 2) return null;
+  if (isGarmin(store) && looksLikeGarminSku(query)) return null;
 
   const products = productsFromPayload(payload);
   if (products === null) return null;
