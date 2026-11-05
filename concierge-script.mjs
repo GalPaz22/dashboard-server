@@ -1,8 +1,8 @@
-// Flash-Lite sometimes slips a letter from another alphabet into a Hebrew word: "לקроא", "בمבנה", "המותحן", "סόג" —
-// 18 of 183 Steimatzky replies in the first two days. The prompt already forbids it, so the reply is repaired as it
-// streams: inside a word that holds Hebrew, a Cyrillic, Arabic or Greek letter becomes the Hebrew letter it stands for
-// and any other foreign letter is dropped. A word with no Hebrew in it is a name and stays, unless it is in a script no
-// catalog here uses (Thai, CJK, Indic…), which is dropped.
+// Flash-Lite sometimes slips a letter or a word from another alphabet into Hebrew: "לקроא", "בمבנה", "המותحן", "סόג",
+// "מתאים لما מחפשת" — 18 of 183 Steimatzky replies in the first two days. The prompt already forbids it, so the reply
+// is repaired as it streams: a Cyrillic, Arabic or Greek letter becomes the Hebrew letter it stands for, inside a
+// Hebrew word or as a lone foreign word between Hebrew ones. Two foreign words in a row are a name ("Мир Дедушки", an
+// Arabic title) and stay. Scripts no catalog here uses (Thai, CJK, Indic…) are dropped.
 
 const HEBREW = /[א-ת]/;
 const FOREIGN = /[Ͱ-Ͽἀ-῿Ѐ-ӿ؀-ۿݐ-ݿऀ-෿฀-໿぀-ヿ㐀-鿿가-힯]/u;
@@ -21,25 +21,40 @@ const AS_HEBREW = {
   ο: 'ו', ό: 'ו', π: 'פ', ρ: 'ר', σ: 'ס', ς: 'ס', τ: 'ט', υ: 'ו', ύ: 'ו', φ: 'פ', χ: 'ח', ω: 'ו', ώ: 'ו',
 };
 
-export function cleanWord(word) {
+const asHebrew = word => [...word].map(ch => FOREIGN.test(ch) ? (AS_HEBREW[ch.toLowerCase()] ?? '') : ch).join('');
+const foreignOnly = word => !!word && FOREIGN.test(word) && !HEBREW.test(word);
+
+// prev/next: the neighbouring words, so a lone foreign word can be told from part of a name.
+export function cleanWord(word, prev = '', next = '') {
   if (!FOREIGN.test(word)) return word;
-  if (!HEBREW.test(word)) return NEVER_A_NAME.test(word) ? '' : word;
-  return [...word].map(ch => FOREIGN.test(ch) ? (AS_HEBREW[ch.toLowerCase()] ?? '') : ch).join('');
+  if (NEVER_A_NAME.test(word) && !HEBREW.test(word)) return '';
+  if (HEBREW.test(word)) return asHebrew(word);
+  return foreignOnly(prev) || foreignOnly(next) ? word : asHebrew(word);
 }
 
-export const cleanReplyText = text => String(text).replace(/\S+/g, cleanWord);
+const split = text => String(text).split(/(\s+)/);
 
-// Streaming: a word can arrive split across chunks ("מש" + "вחים"), so the last unfinished word waits for the next
-// chunk or for flush().
+function cleanTokens(tokens, from, to) {
+  let out = '';
+  for (let i = from; i < to; i++) out += i % 2 ? tokens[i] : cleanWord(tokens[i], tokens[i - 2] || '', tokens[i + 2] || '');
+  return out;
+}
+
+export const cleanReplyText = text => { const tokens = split(text); return cleanTokens(tokens, 0, tokens.length); };
+
+// Streaming: a word can arrive split across chunks ("מש" + "вחים"), and a word's fate depends on the word after it, so
+// the last two words wait for more text or for flush().
 export function createReplyCleaner() {
-  let pending = '';
+  let raw = '', sent = 0;
   return {
     push(chunk) {
-      const text = pending + chunk, cut = text.search(/\S*$/);
-      pending = text.slice(cut);
-      return cleanReplyText(text.slice(0, cut));
+      raw += chunk;
+      // Words sit at even indexes; the last two (indexes length-3 and length-1) wait.
+      const tokens = split(raw), stable = Math.max(sent, tokens.length - 3);
+      const out = cleanTokens(tokens, sent, stable);
+      sent = stable;
+      return out;
     },
-    flush() { const rest = cleanReplyText(pending); pending = ''; return rest; },
-    reset() { pending = ''; },
+    flush() { const tokens = split(raw), out = cleanTokens(tokens, sent, tokens.length); raw = ''; sent = 0; return out; },
   };
 }

@@ -11,6 +11,11 @@ test('foreign letters inside a Hebrew word become Hebrew', () => {
   assert.equal(cleanReplyText('סوج, סاءלון'), 'סוג, סאלון');
 });
 
+test('a lone foreign word between Hebrew words becomes Hebrew', () => {
+  assert.equal(cleanReplyText('האם אחד מהכיוונים מתאים لما מחפשת?'), 'האם אחד מהכיוונים מתאים למא מחפשת?');
+  assert.equal(cleanReplyText('ספר על חיים в עיר'), 'ספר על חיים ו עיר');
+});
+
 test('names in their own alphabet stay; scripts no catalog uses go', () => {
   assert.equal(cleanReplyText('Мир Дедушки и Внучек'), 'Мир Дедушки и Внучек');
   assert.equal(cleanReplyText('ספר בערבית أثر الفراشة'), 'ספר בערבית أثر الفراشة');
@@ -22,4 +27,7 @@ test('a word split across stream chunks is repaired whole', () => {
   const cleaner = createReplyCleaner();
   const out = ['ספרים מש', 'вחים ול', 'קроא ', 'עכשיו'].map(c => cleaner.push(c)).join('') + cleaner.flush();
   assert.equal(out, 'ספרים משוחים ולקרוא עכשיו');
+  const name = createReplyCleaner();
+  const kept = ['הספר Мир ', 'Дедушки', ' זמין, ו', 'גם لما ', 'שביקשת'].map(c => name.push(c)).join('') + name.flush();
+  assert.equal(kept, 'הספר Мир Дедушки זמין, וגם למא שביקשת');
 });

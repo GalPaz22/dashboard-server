@@ -48,9 +48,8 @@ const THINKING_LEVEL = { minimal: "MINIMAL", low: "LOW" }[EFFORT] || "MEDIUM";
 export function conciergeModelConfig(store) {
   if (isBeautics(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "MINIMAL" };
   // Garmin: MINIMAL left "lily" with no answer at all in the 2026-11-01 benchmark; LOW didn't.
-  if (store?.dbName === "garmin") return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
-  // Steimatzky: Flash-Lite mixed other alphabets into Hebrew and lost track of what the shopper had said (05.11).
-  if (isSteimatzky(store)) return { model: "gemini-3.5-flash", thinkingLevel: "LOW" };
+  // Steimatzky tried gemini-3.5-flash on 05.11: better answers, but ~13 s a turn; back on Flash-Lite for speed.
+  if (store?.dbName === "garmin" || isSteimatzky(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
   return { model: MODEL, thinkingLevel: THINKING_LEVEL };
 }
 const MAX_TOKENS = Number(process.env.CONCIERGE_MAX_TOKENS) || 8000;
@@ -1461,6 +1460,14 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     usage.cache_read_input_tokens += cached;
 
     if (["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"].includes(finishReason)) {
+      // The filter can stop mid-sentence ("romance for a girl of 12", Steimatzky 05.11): drop the half sentence, and
+      // when cards are already on screen, close on them instead of an error.
+      if (roundText) onEvent({ type: "text_reset" });
+      if (presentedProducts) {
+        onEvent({ type: "text", text: "אלה הספרים שמצאתי שמתאימים לבקשה." });
+        onEvent({ type: "done", usage, model });
+        return { stopped: "refusal", usage };
+      }
       onEvent({ type: "error", message: "לא הצלחתי לענות על הבקשה הזו. אפשר לנסח אותה אחרת?" });
       return { stopped: "refusal", usage };
     }
@@ -2146,5 +2153,5 @@ export function mountConcierge(app, deps) {
     }
   });
 
-  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal; Garmin gemini-3.5-flash-lite, effort low; Steimatzky gemini-3.5-flash, effort low`);
+  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal; Garmin and Steimatzky gemini-3.5-flash-lite, effort low`);
 }
