@@ -66,10 +66,10 @@ test('an in-stock edition found in the catalog stops the sold-out moment', async
   assert.equal(await decideMoment({query: 'אבן החכמים', repeats: 0, shown: [], ctx: ctxWith(rows)}), null);
 });
 
-test('Steimatzky runs on Flash-Lite low and gets the bookstore instructions', () => {
+test('Steimatzky runs on Flash low and gets the bookstore instructions', () => {
   const store = {dbName: 'steimatzky'};
   assert.ok(isSteimatzky(store));
-  assert.deepEqual(conciergeModelConfig(store), {model: 'gemini-3.5-flash-lite', thinkingLevel: 'LOW'});
+  assert.deepEqual(conciergeModelConfig(store), {model: 'gemini-3.5-flash', thinkingLevel: 'LOW'});
   assert.match(buildSystemPrompt(store), /יועץ הספרים של סטימצקי/);
   assert.doesNotMatch(buildSystemPrompt({dbName: 'garmin'}), /סטימצקי/);
 });
@@ -78,4 +78,11 @@ test('the bookstore prompt keeps the answer in Hebrew prose', () => {
   const prompt = buildSystemPrompt({dbName: 'steimatzky'});
   assert.match(prompt, /אותיות עבריות בלבד/);
   assert.match(prompt, /בלי רשימות/);
+});
+
+test('the prompt mirrors the shopper\'s gender and never assumes male', () => {
+  const prompt = buildSystemPrompt({dbName: 'steimatzky'});
+  assert.ok(!prompt.includes('בלשון זכר יחיד'));
+  assert.match(prompt, /בלשון נקבה/);
+  assert.match(prompt, /שאמר שקרא/);
 });

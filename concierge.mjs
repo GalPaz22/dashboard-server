@@ -33,6 +33,7 @@ import { ExpiringMap } from './memory-lifecycle.mjs';
 
 import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
+import {createReplyCleaner} from './concierge-script.mjs';
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
 import {CLASSIFY_PROMPT, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
 
@@ -47,7 +48,9 @@ const THINKING_LEVEL = { minimal: "MINIMAL", low: "LOW" }[EFFORT] || "MEDIUM";
 export function conciergeModelConfig(store) {
   if (isBeautics(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "MINIMAL" };
   // Garmin: MINIMAL left "lily" with no answer at all in the 2026-11-01 benchmark; LOW didn't.
-  if (store?.dbName === "garmin" || isSteimatzky(store)) return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
+  if (store?.dbName === "garmin") return { model: "gemini-3.5-flash-lite", thinkingLevel: "LOW" };
+  // Steimatzky: Flash-Lite mixed other alphabets into Hebrew and lost track of what the shopper had said (05.11).
+  if (isSteimatzky(store)) return { model: "gemini-3.5-flash", thinkingLevel: "LOW" };
   return { model: MODEL, thinkingLevel: THINKING_LEVEL };
 }
 const MAX_TOKENS = Number(process.env.CONCIERGE_MAX_TOKENS) || 8000;
@@ -1401,6 +1404,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     });
 
     let roundText = "";
+    const cleaner = createReplyCleaner();
     const modelParts = [];
     const toolBlocks = [];
     const seenCalls = new Set();
@@ -1412,8 +1416,9 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
       finishReason = chunk.candidates?.[0]?.finishReason || finishReason;
       for (const part of chunk.candidates?.[0]?.content?.parts || []) {
         if (part.text && !part.thought) {
-          roundText += part.text;
-          onEvent({ type: "text", text: part.text });
+          const text = cleaner.push(part.text);
+          roundText += text;
+          if (text) onEvent({ type: "text", text });
         } else if (part.text && part.thought) {
           onEvent({ type: "thinking", text: part.text });
         }
@@ -1433,6 +1438,11 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
         }
       }
       if (runaway) break;
+    }
+    const tail = cleaner.flush();
+    if (tail) {
+      roundText += tail;
+      onEvent({ type: "text", text: tail });
     }
     if (runaway) {
       console.warn(`[CONCIERGE] runaway present_products response stopped for ${ctx.store.dbName}`);
@@ -2136,5 +2146,5 @@ export function mountConcierge(app, deps) {
     }
   });
 
-  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal; Garmin gemini-3.5-flash-lite, effort low`);
+  console.log(`[CONCIERGE] mounted — model ${MODEL}, effort ${EFFORT}; Beautics gemini-3.5-flash-lite, effort minimal; Garmin gemini-3.5-flash-lite, effort low; Steimatzky gemini-3.5-flash, effort low`);
 }
