@@ -86,3 +86,17 @@ test('the prompt mirrors the shopper\'s gender and never assumes male', () => {
   assert.match(prompt, /בלשון נקבה/);
   assert.match(prompt, /שאמר שקרא/);
 });
+
+test('alternatives stay shut for junk searches and for books the store has in stock', async () => {
+  const shown = [{...instock('קטאן'), id: 'g1'}];
+  const alt = (query, rows = [], on = shown) => decideMoment({query, repeats: 0, shown: on, alternatives: true, ctx: ctxWith(rows)});
+  // Real searches that opened it on 05.11.
+  assert.equal(await alt('142321241'), null, 'an order or product number');
+  assert.equal(await alt('איזה קופונים'), null, 'a service question');
+  assert.equal(await alt('threshing day חיפוש סגור GIFT CARD רבי מכר חם מבית הדפוס להתאהב מהעמוד הראשון מומלצים'), null, 'page text in the query');
+  assert.equal(await alt('boy21 מומלצים מיוחד לחברי מועדון ספרים בהנחה מיוחדת'), null, 'menu labels in the query');
+  assert.equal(await alt('solo leveling', [], [{...instock('SOLO LEVELING VOL 1'), id: 'g9'}]), null, 'in stock on screen');
+  assert.equal((await alt('Five survive')).reason, 'alternatives', 'a book the store does not sell');
+  assert.equal((await alt('מועדון הקאפקייק')).reason, 'alternatives', 'a title with a service-like word');
+  assert.equal((await alt('בלבול השפות')).reason, 'alternatives', 'in the catalog but not on screen: the concierge finds it');
+});

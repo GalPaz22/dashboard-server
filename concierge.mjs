@@ -35,7 +35,7 @@ import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import {createReplyCleaner} from './concierge-script.mjs';
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
-import {CLASSIFY_PROMPT, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
+import {alternativesWorthOpening, CLASSIFY_PROMPT, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
    Config
@@ -1241,7 +1241,7 @@ export async function decideMoment({ query, visitor, repeats, shown, alternative
   const candidates = soldOutPossible(query, shown) ? await textCandidates(ctx, query, { inStock: false }) : [];
   const soldOut = soldOutNamed(query, candidates.filter(productInStock).map((p) => ({ title: p.name, author: p.author, inStock: true })).concat(shown), candidates.filter((p) => !productInStock(p)));
   if (soldOut.length) return { reason: "out_of_stock", product_ids: soldOut.slice(0, 6).map((p) => String(p.id ?? p._id)) };
-  if (alternatives) return { reason: "alternatives", product_ids: ids };
+  if (alternatives && alternativesWorthOpening(query, shown)) return { reason: "alternatives", product_ids: ids };
   if (repeats >= 3) return { reason: "repeated", product_ids: ids };
   if (worthClassifying(query, shown) && await asksForAdvice(query, visitor, ctx.deps)) return { reason: "consultative", product_ids: ids };
   return null;

@@ -62,6 +62,20 @@ export function soldOutNamed(query, shown, candidates) {
   return (candidates || []).filter(named);
 }
 
+// "alternatives" (the engine fell back to closest results) opens the panel only for a search that names something the
+// store doesn't sell. Live 05.11 it also opened on an order number, "איזה קופונים", page text glued to the query
+// ("threshing day חיפוש סגור GIFT CARD רבי מכר…"). A book that is in the catalog but not on screen still opens it:
+// there the concierge is the rescue ("בלבול השפות": four clicks on its card, 04.11).
+const SERVICE_WORDS = /קופו[ןנ]|קוד הנחה|משלוח|החזר|החלפ[הת]|סניף|שעות פתיחה|שובר|ביטול/u;
+const MENU_TEXT = /gift ?card|רבי מכר|חיפוש סגור|לחברי מועדון|מבית הדפוס|כל המוצרים|בהנחה מיוחדת/iu;
+
+export function alternativesWorthOpening(query, shown) {
+  const text = String(query || '').trim(), asked = words(text);
+  if (!asked.length || /^[\d\s-]+$/.test(text)) return false;
+  if (SERVICE_WORDS.test(text) || MENU_TEXT.test(text)) return false;
+  return !shown.some(b => b.inStock && holdsAll(b, asked));
+}
+
 const ADVICE_WORDS = /מתנ|המלצ|ממליצ|מומלצ|מתאימ|מתאים|לגיל|(?:^|\s)(?:בן|בת) \d|משהו|מחפש|רוצה|איזה|כדאי|דומה ל|\?/u;
 
 // A cheap filter before the model: a question, advice words, or three words or more that no book on screen is titled.
