@@ -34,6 +34,10 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
   const selectLimit=Math.min(maxCandidates,selectCandidates);
   const categories=[...new Set(visible.flatMap(p=>p.categories))].sort();
   const byId=new Map(visible.map(p=>[p.id,p]));
+  // A query that is a product's whole title (a pick from autocomplete, a name pasted from the site) names that product:
+  // it answers from the catalog at once. Sent to the model, 250 of 399 Garmin model searches (2-5.11) were such titles,
+  // 3.6 s each, and a long title could fail evidence checks and end in alternatives after 10 s.
+  const byTitle=new Map();for(const p of visible){const t=normalize(p.title);if(t)byTitle.set(t,[...(byTitle.get(t)||[]),p]);}
   const repairSpelling=createSpellingResolver(products,client);
   const route=createLightRouter(products,client,generate,{timeoutMs:routerTimeoutMs});
   function noVerifiedMatches(query, plan, reason, metadata={}) {
@@ -185,6 +189,9 @@ ${wantAlternatives?'ONLY when no product qualifies for matches: leave matches em
     const key=query.trim();if(cache.has(key))return page(cache.get(key),0,limit,true);
     if(pending.has(key))return page(await pending.get(key),0,limit,true);
     const literal=retrieve?await retrieve(query):search(products,client,{query,limit:50});
+    const titled=byTitle.get(normalize(query));
+    if(titled){const have=new Set(titled.map(p=>p.id));
+      return page(await store(key,{...literal,status:'matched',message:null,matches:[...titled,...literal.matches.filter(p=>!have.has(p.id))],metadata:{mode:'text',phase:'title-match',indexKind:literal.indexKind||(retrieve?'local-inverted':'local-scan'),exactMatch:true,fullMatch:true,llmUsed:false,llmCalls:0}}),0,limit);}
     const complex=normalize(query).split(/\s+/).length>=4||/(?:^|\s)(?:בלי|ללא|לא|שמתאים|שמתאימה)(?:\s|$)/u.test(normalize(query));
     const spelled=literal.plan?.spelling?.to||normalize(query);
     const scopedWithConstraints=!!literal.plan?.scopedProductIds&&!literal.plan.scopedAliases?.some(r=>normalize(r.term)===spelled);
