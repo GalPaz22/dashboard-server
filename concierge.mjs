@@ -36,7 +36,7 @@ import crypto from "crypto";
 import {createReplyCleaner} from './concierge-script.mjs';
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
 import {isGarmin, looksLikeGarminSku} from './tenants/garmin/concierge.mjs';
-import {alternativesWorthOpening, CLASSIFY_PROMPT, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
+import {alternativesWorthOpening, bookAbout, CLASSIFY_PROMPT, sameAuthor, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
    Config
@@ -1549,13 +1549,21 @@ async function prefetchOpeningSearch(trigger, ctx) {
     if (isSteimatzky(ctx.store) && trigger.reason === "out_of_stock" && trigger.product_ids?.length) {
       const collection = await getCollection(ctx);
       const id = trigger.product_ids[0];
-      const book = await collection.findOne({ $or: [{ id }, { id: Number(id) }] }, { projection: { name: 1, author: 1 } });
+      const book = await collection.findOne({ $or: [{ id }, { id: Number(id) }] }, { projection: { name: 1, author: 1, description: 1 } });
       if (book) {
-        const [similar, sameAuthor] = await Promise.all([
+        const [similar, byAuthor] = await Promise.all([
           findAlternatives({ product_id: id, limit: 8 }, ctx),
-          book.author ? searchCatalog({ query: book.author, limit: 8 }, ctx) : null,
+          book.author ? searchCatalog({ query: book.author, limit: 24 }, ctx) : null,
         ]);
-        return { sold_out: { name: book.name, author: book.author || null }, same_author: sameAuthor?.products || [], similar: similar.products };
+        // Most sold-out rows have no embedding (907 of 10,392), so findAlternatives fell back to the title's words:
+        // "פרנהייט 451" brought "מנהרת הזמן 41". Search by what the book is about instead.
+        let alike = similar.products;
+        if (similar.method !== "similar_products") {
+          alike = (await vectorCandidates(ctx, bookAbout(book), { inStock: true }))
+            .filter((p) => String(p.id) !== String(id) && productInStock(p)).slice(0, 8).map((p) => forModel(shapeProduct(p)));
+        }
+        const same = (byAuthor?.products || []).filter((p) => sameAuthor(book.author, p.author)).slice(0, 8);
+        return { sold_out: { name: book.name, author: book.author || null }, same_author: same, similar: alike };
       }
     }
     return await searchCatalog({ query: trigger.query, limit: PREFETCH_LIMIT }, ctx);

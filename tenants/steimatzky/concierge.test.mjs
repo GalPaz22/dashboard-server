@@ -100,3 +100,13 @@ test('alternatives stay shut for junk searches and for books the store has in st
   assert.equal((await alt('מועדון הקאפקייק')).reason, 'alternatives', 'a title with a service-like word');
   assert.equal((await alt('בלבול השפות')).reason, 'alternatives', 'in the catalog but not on screen: the concierge finds it');
 });
+
+test('the same author means every word of the name, not one shared word', async () => {
+  const {sameAuthor, bookAbout} = await import('./concierge.mjs');
+  assert.equal(sameAuthor('דודי ליפשיץ', 'דודי ליפשיץ'), true);
+  assert.equal(sameAuthor('דודי ליפשיץ', 'אורי ליפשיץ'), false);
+  assert.equal(sameAuthor('ריי ברדבורי', 'שרה קייט'), false);
+  assert.equal(sameAuthor('MCQUISTON, CASEY', 'MCQUISTON, CASEY'), true);
+  assert.equal(sameAuthor('', 'כל אחד'), false);
+  assert.equal(bookAbout({name: 'גדול ונורא', author: 'דודי ליפשיץ', description: 'גדול ונורא מאת דודי ליפשיץ זמין לרכישה אונליין באתר סטימצקי! גדול ונורא בגרסת ספר מודפס או דיגיטלי לבחירתכם - התכוננו לחווית קריאה בלתי נשכחת.'}).includes('זמין לרכישה'), false);
+});

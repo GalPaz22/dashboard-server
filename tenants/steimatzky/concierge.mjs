@@ -76,6 +76,17 @@ export function alternativesWorthOpening(query, shown) {
   return !shown.some(b => b.inStock && holdsAll(b, asked));
 }
 
+// The author search behind a sold-out book is loose text: "ריי ברדבורי" brought שרה קייט's "דל ריי", "דודי ליפשיץ" brought
+// אורי ליפשיץ and דודי גרין (05.11). A row counts as the same author only when its author holds every word of the name.
+export function sameAuthor(author, other) {
+  const want = words(author), have = new Set(words(other));
+  return want.length > 0 && want.every(w => have.has(w));
+}
+
+// Store boilerplate that some descriptions are made of: it says nothing about the book.
+export const bookAbout = book => [book.name, book.author, String(book.description || '').replace(/זמין לרכישה אונליין[^.!]*[.!]?|בגרסת ספר מודפס[^.!]*[.!]?|התכוננו לחווית קריאה[^.!]*[.!]?/g, '')]
+  .filter(Boolean).join('. ').slice(0, 800);
+
 const ADVICE_WORDS = /מתנ|המלצ|ממליצ|מומלצ|מתאימ|מתאים|לגיל|(?:^|\s)(?:בן|בת) \d|משהו|מחפש|רוצה|איזה|כדאי|דומה ל|\?/u;
 
 // A cheap filter before the model: a question, advice words, or three words or more that no book on screen is titled.
