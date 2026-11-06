@@ -34,6 +34,31 @@ export function adaptRow(row,retired=()=>false){
 // The Woo sync keeps the store's SKU under raw.sku and each variation's under variants[].sku; the identifier index reads
 // p.sku and p.variants, so a SKU search ("CP-10") finds the product even though it is not in the title.
 const skuVariants=vs=>Array.isArray(vs)?vs.filter(v=>v?.sku).map(v=>({id:String(v.id??''),sku:String(v.sku)})):[];
+// Shoppers type a code without its separators or case ("cp10", "cp 10", "Cp_10" for CP-10). Codes are the SKUs and the
+// model codes in titles ("PREMIUM CP-8", "NE-10-8"). A code-like query (a digit, no Hebrew, 3+ characters) whose letters
+// and digits equal a code is searched as that code; while typing, codes that begin with it come first in the
+// suggestions (from 4 characters, or with a letter: "cp1" → CP-1, CP-10, CP-11…).
+const skuKey=v=>String(v??'').toLowerCase().replace(/[^\p{L}\p{N}]/gu,'');
+const codeLike=k=>k.length>=3&&/\d/.test(k)&&!/[\u0590-\u05FF]/.test(k);
+const TITLE_CODE=/(?<![\p{L}\p{N}])[a-z]{1,6}-?\d+(?:[-/]\d+)*(?![\p{L}\p{N}])/giu;
+const skusOf=p=>[p.sku,...(p.variants||[]).map(v=>v.sku),...(String(p.title||'').match(TITLE_CODE)||[])].filter(Boolean);
+const skuTables=new WeakMap();
+function skuTable(rt){let t=skuTables.get(rt);
+ if(!t){const byKey=new Map();for(const p of rt.products||[])for(const sku of new Set(skusOf(p))){const k=skuKey(sku);if(k)(byKey.get(k)||byKey.set(k,new Set()).get(k)).add(String(sku));}
+  t={byKey,keys:[...byKey.keys()].sort()};skuTables.set(rt,t);}
+ return t;}
+async function searchSku(rt,query){const k=skuKey(query);if(!codeLike(k))return null;const skus=skuTable(rt).byKey.get(k);if(!skus)return null;
+ const rs=await Promise.all([...skus].map(sku=>rt.search({query:sku,limit:50}))),seen=new Set(),matches=rs.flatMap(r=>r.matches).filter(p=>skusOf(p).some(x=>skuKey(x)===k)&&!seen.has(p.id)&&seen.add(p.id));
+ return matches.length?{...rs.find(r=>r.matches.length),matches,total:matches.length,nextCursor:null}:null;}
+async function suggestSku(rt,query,limit){const k=skuKey(query);if(!codeLike(k))return [];const {byKey,keys}=skuTable(rt);
+ // Words typed with a space ("base 5") lift only an exact code. A separator typed ends a segment: "ne-10" lists
+ // NE-10-3, NE-10-8… before NE-100-5.
+ const typed=String(query).trim(),dash=v=>String(v).toLowerCase().replace(/[^\p{L}\p{N}]+/gu,'-'),segment=x=>[...byKey.get(x)].some(c=>dash(c).startsWith(dash(typed)+'-'))?0:1;
+ const hits=byKey.has(k)?[k]:[];if(!/\s/.test(typed)&&(/\p{L}/u.test(k)||k.length>=4))hits.push(...keys.filter(x=>x!==k&&x.startsWith(k)).sort((a,b)=>(/[^\p{L}\p{N}]/u.test(typed)?segment(a)-segment(b):0)||a.length-b.length||a.localeCompare(b,undefined,{numeric:true})));
+ const seen=new Set(),out=[];
+ for(const key of hits){if(out.length>=limit)break;
+  for(const sku of byKey.get(key)){const r=await rt.suggest(sku,{limit:5});for(const p of r.matches)if(!seen.has(p.id)&&skusOf(p).some(x=>skuKey(x)===key)){seen.add(p.id);out.push(p);}}}
+ return out.slice(0,limit);}
 // Enriched snapshot cards with live commercial fields; new products are processed with the same profile. seen collects
 // the ids of the live rows the cards cover.
 export function mergeLive(cards,rows,profile,tenantId,seen=new Set()){
@@ -114,7 +139,9 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
  const search=async function({collection,sessions,moduleStore,request}){
   const limit=request.limit??(await published(moduleStore)).profile?.pipeline?.pageSize??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
-  const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
+  const rt=await current(collection,moduleStore);// A typed code ("cp10") answers with its products alone; with a space ("base 50") they lead the usual results.
+  const code=await searchSku(rt,request.query);let r=code&&!/\s/.test(request.query.trim())?code:await rt.search({query:request.query,limit:50});
+  const matches=code&&r!==code?[...code.matches,...r.matches.filter(p=>!code.matches.some(c=>c.id===p.id))]:[...r.matches];
   while(r.nextCursor&&matches.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
   const attached=request.merchandise?await request.merchandise(matches.map(rt.attach)):matches.map(rt.attach),result={...r,matches:attached,total:attached.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
   return sessions?createSessions(sessions).save(result,limit):{...result,matches:attached.slice(0,limit)};
@@ -122,7 +149,9 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
  // Suggestions while the shopper types: the same edition and live rows as search, answered from the index only.
  search.suggest=async({collection,moduleStore,query,limit})=>{
   const rt=await current(collection,moduleStore);if(typeof rt.suggest!=='function')throw Error('Engine has no suggestions; export the module again');
-  const r=await rt.suggest(query,{limit});return {...r,matches:r.matches.map(rt.attach),revision:rt.revision};
+  const lead=await suggestSku(rt,query,limit),r=await rt.suggest(query,{limit}),ids=new Set(lead.map(p=>p.id));
+  const matches=[...lead,...r.matches.filter(p=>!ids.has(p.id))].slice(0,limit);
+  return {...r,matches:matches.map(rt.attach),total:Math.max(r.total,matches.length),revision:rt.revision};
  };
  return search;
 }
