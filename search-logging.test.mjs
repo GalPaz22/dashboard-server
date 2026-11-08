@@ -19,7 +19,7 @@ test('v2 engine searches are logged once to the store queries collection; pages,
  const settle=()=>new Promise(r=>setTimeout(r,20));
  try{
   assert.equal((await post({query:'טופ',modern:true,session_id:'s1'})).products.length,2);await settle();
-  assert.deepEqual(logged[0],{collection:'queries@woo-beautics-shop-co-il',query:'טופ',products:['טופ 1','טופ 2'],options:{session_id:'s1',sessionId:undefined,zeroResults:false,searchEngine:'beautics-v2',searchMeta:{elapsedMs:logged[0].options.searchMeta.elapsedMs}}});
+  assert.deepEqual(logged[0],{collection:'queries@woo-beautics-shop-co-il',query:'טופ',products:['טופ 1','טופ 2'],options:{session_id:'s1',sessionId:undefined,zeroResults:false,searchEngine:'beautics-v2',searchMeta:{elapsedMs:logged[0].options.searchMeta.elapsedMs,search_started_at:logged[0].options.searchMeta.search_started_at}}});
   assert.ok(Number.isFinite(logged[0].options.searchMeta.elapsedMs),'the wall time of every search is recorded');
   await post({query:'בילדר גל'});await settle();assert.equal(logged[1].options.zeroResults,true,'a zero-result search is flagged');
   await post({cursor:'abc'});await settle();assert.equal(logged.length,2,'cursor pages are not new searches');
@@ -40,7 +40,21 @@ test('dashboard previews do not enter shopper analytics', async () => {
 
 test('/fast-search keeps the search id and A/B groups on every query it logs',()=>{
  const source=readFileSync(new URL('./server.js',import.meta.url),'utf8'),start=source.indexOf('app.post("/fast-search"'),route=source.slice(start,source.indexOf('app.post("/simple-search"',start));
- assert.match(route,/const logTags = \{ session_id, search_id: req\.body\?\.search_id, visit_id: req\.body\?\.visit_id, ab_tests: req\.body\?\.ab_tests \}/);
+ assert.match(route,/const logTags = \{ session_id, search_id: req\.body\?\.search_id, visit_id: req\.body\?\.visit_id, ab_tests: req\.body\?\.ab_tests, searchMeta: \{ search_started_at: new Date\(searchStartTime\) \} \}/);
  const calls=route.match(/logQuery\([^\n]*/g);assert.ok(calls.length>=8);
  assert.deepEqual(calls.filter(line=>!line.includes('logTags')),[]);
+});
+
+
+test('request start survives a delayed response and a delayed database log; client timing cannot override it',async()=>{
+ let clock=Date.parse('2026-11-08T10:00:00Z'),options,release;
+ const database=new Promise(resolve=>{release=resolve;});
+ const logger=createV2SearchLogger({now:()=>clock,getQueries:()=>database,logQuery:async(_c,_q,_f,_p,_x,value)=>{options=value;}});
+ const req={body:{query:'book',search_started_at:'1999-01-01',search_id:'search-1',visit_id:'visit-1'},store:{dbName:'steimatzky'}};
+ const res={json:body=>body,getHeader:()=> 'steimatzky',statusCode:200};
+ logger(req,res,()=>{});clock+=10000;res.json({products:[],metadata:{search_started_at:'1999-01-01'}});
+ clock+=20000;release({});await new Promise(resolve=>setImmediate(resolve));
+ assert.equal(options.searchMeta.search_started_at.toISOString(),'2026-11-08T10:00:00.000Z');
+ assert.equal(options.searchMeta.elapsedMs,10000);
+ assert.equal(options.search_id,'search-1');assert.equal(options.visit_id,'visit-1');
 });

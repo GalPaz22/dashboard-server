@@ -41,7 +41,7 @@ export function createV2SearchLogger({logQuery,getQueries,onLogged=null,now=Date
     if(engine&&res.statusCode<400&&req.store?.dbName){
      const products=Array.isArray(body)?body:Array.isArray(body?.products)?body.products:Array.isArray(body?.matches)?body.matches:[];
      const total=Number.isFinite(body?.pagination?.totalAvailable)?body.pagination.totalAvailable:Number.isFinite(body?.total)?body.total:products.length;
-     const dbName=req.store.dbName,learned=req.semantixLearned,meta=searchMeta(body,now()-started,learned);
+     const dbName=req.store.dbName,learned=req.semantixLearned,meta={...searchMeta(body,now()-started,learned),search_started_at:new Date(started)};
      Promise.resolve(getQueries(dbName))
       .then(collection=>logQuery(collection,query,{},products.map(p=>({name:p.name??p.title})),false,{session_id:req.body.session_id,sessionId:req.body.sessionId,...(req.body.search_id&&{search_id:req.body.search_id}),...(req.body.visit_id&&{visit_id:req.body.visit_id}),...(req.body.ab_tests&&{ab_tests:req.body.ab_tests}),zeroResults:total===0,searchEngine:String(engine),searchMeta:meta}))
       .then(()=>onLogged?.(dbName,{query,metadata:body?.metadata,zeroResults:total===0,learned}))

@@ -12038,7 +12038,7 @@ app.post("/fast-search", async (req, res) => {
   try {
     let { query, session_id } = req.body;
     session_id = normalizeSessionId(session_id, req.body?.sessionId);
-    const logTags = { session_id, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests }; // same chain as /search: a native-group search counts for its visitor's group
+    const logTags = { session_id, search_id: req.body?.search_id, visit_id: req.body?.visit_id, ab_tests: req.body?.ab_tests, searchMeta: { search_started_at: new Date(searchStartTime) } }; // same chain as /search: a native-group search counts for its visitor's group
     const FAST_LIMIT = 10;
 
     if (!query || query.trim() === "") {
