@@ -40,7 +40,8 @@ export function transliterates(latin,hebrew){
  const go=(i,j)=>{if(i===l.length&&j===h.length)return true;const key=i*64+j;if(memo.has(key))return memo.get(key);let ok=false;
   if(i<l.length&&j<h.length&&LETTERS[l[i]]?.includes(h[j]))ok=go(i+1,j+1);
   if(!ok&&i<l.length&&OPTIONAL.has(l[i]))ok=go(i+1,j);
-  if(!ok&&j<h.length&&MATRES.has(h[j]))ok=go(i,j+1);
+  // A Hebrew word never starts with an unwritten vowel before a consonant: "julie" is not ויל (Will).
+  if(!ok&&j<h.length&&MATRES.has(h[j])&&!(j===0&&i===0&&!OPTIONAL.has(l[0])))ok=go(i,j+1);
   memo.set(key,ok);return ok;};
  return go(0,0);
 }
@@ -68,13 +69,17 @@ export function nameMatch(queryWords,nameWords){
  }
  return null;
 }
+// A title before the name is not part of it: the catalog's "ד”ר ג’ולי סמית’" is "Dr Julie Smith" and "Julie Smith".
+const HONORIFICS=new Set(['דר','dr','דוקטור','doctor','פרופ','פרופסור','prof','professor']);
+const personWords=text=>normalize(text).replace(/\./g,' ').split(' ').filter(w=>w&&!HONORIFICS.has(w));
+export const personName=text=>personWords(text).join(' ');
 export function createAuthorResolver(products,client){
  let names=null;const memo=new Map();
  const build=()=>{names=new Map();for(const p of products){if(p.tenantId!==client.tenantId||!sellable(p,client))continue;
-  for(const a of authorsOf(p)){const words=normalize(a).split(' ').filter(Boolean);if(words.length<2||words.length>3||words.some(w=>/\d/.test(w)))continue;
+  for(const a of authorsOf(p)){const words=personWords(a);if(words.length<2||words.length>3||words.some(w=>/\d/.test(w)))continue;
    const key=words.join(' ');(names.get(key)||names.set(key,{name:a.trim(),words,ids:[]}).get(key)).ids.push(p.id);}}};
  return query=>{
-  const words=normalize(query).split(' ').filter(Boolean);
+  const words=personWords(query);
   if(words.length<2||words.length>3||!words.every(w=>isLatin(w)||isHebrew(w))||words.some(w=>w.length<2))return null;
   if(!names)build();
   const key=words.join(' ');if(memo.has(key))return memo.get(key);

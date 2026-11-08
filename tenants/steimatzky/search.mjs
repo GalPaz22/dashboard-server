@@ -15,9 +15,28 @@ const number=v=>v===null||v===undefined||v===''?null:Number.isFinite(Number(v))?
 // a card template prints (specialLabel: printed / digital / club). Only these ride along; the engine's own fields win on a clash.
 const SOURCE_FIELDS=['ItemID','Makat','Subtitle','onSale','offerId','salePrice','specialLabel'];
 const sources=new WeakMap();
+// A book sold printed and digital is two products, and the card prints both formats from the feed's specialLabel, which
+// does not know when one of them is sold out: "פיתוי משעשע" offered its printed edition at ₪50 on the card of the digital
+// one, though the printed product (011051542) is out of stock. Each format is checked against its own product row (the
+// digital one is named by specialLabel.digital.sku; the printed one is the row that names this one as its digital
+// edition); a format whose product is out of stock is not offered. A format with no row of its own stays as the feed says.
+const skuOf=r=>String(r.sku||r.id||r._id||'').split(':').pop();
+function formatsFor(rows){
+ const stock=new Map(),printedOf=new Map();
+ for(const r of rows){const sku=skuOf(r);stock.set(sku,(r.stockStatus||r.stock_status)==='instock');const d=r.specialLabel?.digital?.sku;if(d&&String(d)!==sku)printedOf.set(String(d),sku);}
+ return (sku,label)=>{
+  if(label?.type!=='book_formats')return label;const digital=label.digital?.sku?String(label.digital.sku):null,own=digital===sku;
+  const printedSku=own?printedOf.get(sku):sku,printed=printedSku&&stock.has(printedSku)?stock.get(printedSku):null,digitalOk=digital&&stock.has(digital)?stock.get(digital):null;
+  if(!(label.printed?.enabled&&printed===false)&&!(label.digital?.enabled&&digitalOk===false))return label;
+  const next={...label};
+  if(label.printed?.enabled&&printed===false){next.printed={...label.printed,enabled:false,soldOut:true};if(label.badge?.value&&label.badge.value===label.printed.badge)next.badge={...label.badge,enabled:false};}
+  if(label.digital?.enabled&&digitalOk===false)next.digital={...label.digital,enabled:false,soldOut:true};
+  return next;
+ };
+}
 export function withSource(rows){
  let byId=sources.get(rows);
- if(!byId){byId=new Map();for(const r of rows){const s={};for(const k of SOURCE_FIELDS)if(r[k]!==undefined&&r[k]!==null)s[k]=r[k];if(Object.keys(s).length)byId.set(String(r.id??r._id),s);}sources.set(rows,byId);}
+ if(!byId){byId=new Map();const formats=formatsFor(rows);for(const r of rows){const s={};for(const k of SOURCE_FIELDS)if(r[k]!==undefined&&r[k]!==null)s[k]=r[k];if(s.specialLabel)s.specialLabel=formats(skuOf(r),s.specialLabel);if(Object.keys(s).length)byId.set(String(r.id??r._id),s);}sources.set(rows,byId);}
  return p=>{const s=byId.get(String(p.id))||byId.get(String(p.id).split(':').pop());return s?{...s,...p}:p;};
 }
 // A merchant Mongo row in the engine's raw shape (as the studio imports existing clients).

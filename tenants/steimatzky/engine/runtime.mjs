@@ -30,7 +30,7 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
  // Tenant functions: rewriteQuery/rerank run per search; transformProduct reshapes the catalog once (in its isolated
  // worker) and the index is rebuilt on the result. If the transform fails, the untransformed catalog keeps serving.
  let hooks=null,hookError=null;if(hasHooks(profile))try{hooks=createHookRunner(profile.hooks,profile.hookData,{tenant:project.id});}catch(e){hookError=e.message;}
- const service=list=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:10,retrieve:list===products?retrieve:overrideRetrieve||createIndexRetriever(list,profile,buildSearchIndex(list,profile.version)),rankCandidates,hooks});
+ const service=list=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:300,ttlMs:1800000,retrieve:list===products?retrieve:overrideRetrieve||createIndexRetriever(list,profile,buildSearchIndex(list,profile.version)),rankCandidates,hooks});
  let search=service(products);
  if(hooks?.has('transformProduct')){const base=search;let ready=null;
   const prepare=()=>ready??=hooks.transformProducts(products).then(list=>service(list)).catch(e=>{hookError='transformProduct: '+e.message;return base;});
