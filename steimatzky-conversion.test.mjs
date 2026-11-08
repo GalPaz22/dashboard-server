@@ -57,6 +57,17 @@ test('author names: a title before the name is no word of it, and a leading vowe
  assert.equal(transliterates('julie','ויל'),false);assert.equal(transliterates('will','ויל'),true);assert.equal(transliterates('yanagihara','ינגיהארה'),true);
 });
 
+test('"english" with no English edition in the store: the Hebrew edition still comes before unrelated alternatives',async()=>{
+ const generate=scripted({interpret:[plan({intent:'ספר',categories:['כלכלה'],terms:['Psychology of Money','הפסיכולוגיה של הכסף','Morgan Housel'],requirements:['ספר באנגלית','psychology of money']})],
+  select:[{matches:[],alternatives:[{id:'why'},{id:'fore'}]}]});
+ const r=await setup(money(),generate)({query:'psychology of money in english',limit:12});
+ assert.equal(ids(r)[0],'he');
+ // The model writes the local title without its article and rejects every candidate: the author's book is still the work.
+ const g2=scripted({interpret:[plan({intent:'ספר',terms:['Psychology of Money','פסיכולוגיה של הכסף','Morgan Housel'],requirements:['psychology of money']})],select:[{matches:[],alternatives:[]},{matches:[],departments:['כלכלה']}]});
+ const r2=await setup(money(),g2)({query:'the psychology of money book',limit:12});
+ assert.equal(ids(r2)[0],'he');assert.equal(r2.matches[0].matchQuality,'edition');
+});
+
 const toys=()=>[book('p1','פליימוביל גולש סקי',{categories:['צעצועים'],popularity:7}),book('p2','פליימוביל חוות תרנגולות קטנה',{popularity:3}),book('p3','פליימוביל תצפית דינוזאור',{popularity:5}),
  book('puzzle','פאזל רצפה ענק תיבת נח 48 חל’',{categories:['צעצועים']}),book('novel','החיפוש אחר תיבת נח',{categories:['מתח']}),book('fort','מונופול פורטנייט',{categories:['משחקים']})];
 

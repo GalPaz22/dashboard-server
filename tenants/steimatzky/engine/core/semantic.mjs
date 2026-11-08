@@ -61,6 +61,10 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
   // query is an explicit choice of the original edition: the local one then follows it, never replaces it.
   const latinOnly=q=>{const n=normalize(q);return /[a-z]/.test(n)&&!/[א-ת]/.test(n);};
   const originalWanted=q=>/(?:^|\s)(?:english|באנגלית|אנגלית|original|מקור)(?:\s|$)/u.test(normalize(q));
+  // Asked for the original: the verified English-language matches go before the Hebrew edition, nothing else does (with no
+  // English edition in the store, the book itself still comes before unrelated alternatives).
+  const withEditions=(q,lead,rest)=>{if(!originalWanted(q))return [...lead,...rest];const en=p=>p.matchQuality!=='alternative'&&/[a-z]/i.test(p.title||'')&&!/[\u0590-\u05FF]/.test(p.title||'');
+    return [...rest.filter(en),...lead,...rest.filter(p=>!en(p))];};
   function editionsOf(query,plan){
     if(!latinOnly(query))return null;
     const named=plan.terms.filter(t=>normalize(t).split(' ').length>=2),ids=new Set();
@@ -69,7 +73,8 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
     // A term that starts three titles or more is a series' name ("יומנו של חנון" for "wimpy kid fight or flight"), not the
     // title of the one work typed: none of its volumes is that work's edition.
     const starts=t=>new Set(visible.filter(p=>{const x=textOf(p).title;return x===t||x.startsWith(t+' ');}).map(p=>textOf(p).title)).size;
-    const titles=plan.terms.map(normalize).filter(t=>/[א-ת]/.test(t)&&t.length>=4&&starts(t)<3);
+    // The interpretation often writes the local title without its definite article ("פסיכולוגיה של הכסף").
+    const titles=plan.terms.map(normalize).filter(t=>/[א-ת]/.test(t)&&t.length>=4).flatMap(t=>/^[א-ת]/.test(t)&&!t.startsWith('ה')?[t,'ה'+t]:[t]).filter(t=>starts(t)<3);
     const own=p=>{const x=textOf(p).title;return titles.some(t=>exactTitle(p,t)||t.includes(' ')&&x.startsWith(t+' '));};
     const titled=visible.filter(own),sure=titled.filter(p=>authorNamed&&byAuthor(p));
     // The named author's books are read first when they are few; one of them is taken for the work only when the store has
@@ -157,7 +162,7 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
     // before the Hebrew edition of the very book typed), unless the shopper asked for the original edition.
     const editionIds=new Set(result.metadata?.editionIds||[]);
     if(editionIds.size){const lead=result.matches.filter(p=>editionIds.has(p.id)).map(p=>({...p,matchQuality:'edition',editionOf:key})),rest=result.matches.filter(p=>!editionIds.has(p.id));
-      result={...result,matches:originalWanted(key)?[...rest,...lead]:[...lead,...rest]};}
+      result={...result,matches:withEditions(key,lead,rest)};}
     // "last" is a guarantee, so it goes after the function too: out-of-stock products follow every in-stock one, except an
     // exact title match (stockLast). The sort is stable — the rules' and the function's order holds within each part.
     if(stockPolicy(client)==='last'&&result.matches.some(p=>p.stockStatus!=='instock'))result={...result,matches:stockLast(result.matches,key)};
@@ -267,7 +272,7 @@ ${wantAlternatives?'ONLY when no product qualifies for matches: leave matches em
       if(editions){const chosen=new Set(matches.map(p=>p.id)),ok=[...editions.sure,...[...editions.titled,...(editions.single?editions.read:[])].filter(p=>chosen.has(p.id))];
         if(ok.length){const keys=new Set(ok.map(editionKey)),lead=visible.filter(p=>keys.has(editionKey(p))).map(p=>({...(matches.find(m=>m.id===p.id)||p),matchQuality:'edition',editionOf:query}));
           const have=new Set(lead.map(p=>p.id)),rest=matches.filter(p=>!have.has(p.id));editionIds=lead.map(p=>p.id);
-          matches.splice(0,matches.length,...(originalWanted(query)?[...rest,...lead]:[...lead,...rest]));
+          matches.splice(0,matches.length,...withEditions(query,lead,rest));
           if(!originalWanted(query))remember(query,{keys:[...keys],rest:rest.slice(0,24).map(p=>p.id)});}}
       // A request that names a product line is answered from that line only; with nothing of it verified, the line's
       // own products and a few of the same departments are the closest ones, without a further model call.
