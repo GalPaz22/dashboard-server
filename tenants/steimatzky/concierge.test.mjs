@@ -110,3 +110,24 @@ test('the same author means every word of the name, not one shared word', async 
   assert.equal(sameAuthor('', 'כל אחד'), false);
   assert.equal(bookAbout({name: 'גדול ונורא', author: 'דודי ליפשיץ', description: 'גדול ונורא מאת דודי ליפשיץ זמין לרכישה אונליין באתר סטימצקי! גדול ונורא בגרסת ספר מודפס או דיגיטלי לבחירתכם - התכוננו לחווית קריאה בלתי נשכחת.'}).includes('זמין לרכישה'), false);
 });
+
+test('a prompt Gemini refuses is retried without product blurbs; names, authors and prices stay', async () => {
+  const {dropDescriptions} = await import('../../concierge.mjs');
+  const shown = {products: [{product_id: '1', name: 'שבויה בידיך', author: 'א', price: 42, description: 'סצנות "קשות"\nונועזות'}, {description: 'ראשון', product_id: '2', name: 'ב'}]};
+  const messages = [
+    {role: 'user', parts: [{text: `פתיחה\n<search_result>\n${JSON.stringify(shown)}\n</search_result>`}]},
+    {role: 'model', parts: [{functionCall: {name: 'search_catalog', args: {query: 'x'}}}]},
+    {role: 'user', parts: [{functionResponse: {name: 'search_catalog', response: {total_matched: 1, products: [{product_id: '3', name: 'ג', description: 'תיאור', price: 10}]}}}]},
+  ];
+  assert.equal(dropDescriptions(messages), true);
+  const text = messages[0].parts[0].text;
+  assert.doesNotMatch(text, /description/);
+  assert.deepEqual(JSON.parse(text.split('\n')[2]), {products: [{product_id: '1', name: 'שבויה בידיך', author: 'א', price: 42}, {product_id: '2', name: 'ב'}]});
+  assert.deepEqual(messages[2].parts[0].functionResponse.response, {total_matched: 1, products: [{product_id: '3', name: 'ג', price: 10}]});
+  assert.equal(dropDescriptions(messages), false, 'nothing left to drop: the caller stops retrying');
+});
+
+test('the Steimatzky prompt carries the rules learned from the 05–09.11 conversations', () => {
+  const prompt = buildSystemPrompt({dbName: 'steimatzky'});
+  for (const rule of ['digital_price', 'האמן לו', 'in_stock: false', 'לא בוחרים ספר שנקרא']) assert.match(prompt, new RegExp(rule));
+});

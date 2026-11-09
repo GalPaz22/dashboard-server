@@ -30,3 +30,9 @@ test('Garmin instructions carry the square watch, same-kind alternatives and ser
   for(const must of ['Venu X1','שעון במקום שעון','BuyMe','Titanium'])assert.ok(text.includes(must),must);
   assert.equal(garminConciergeInstructions({dbName:'steimatzky'}),'');
 });
+
+test('the Garmin prompt says what to search before claiming the store lacks something', async () => {
+  const {buildSystemPrompt} = await import('../../concierge.mjs');
+  const prompt = buildSystemPrompt({dbName: 'garmin'});
+  for (const rule of ['Cadence Sensor', 'לא מצאתי אותו כרגע באתר', 'QuickFit 26', 'גלישת רוח']) assert.match(prompt, new RegExp(rule));
+});

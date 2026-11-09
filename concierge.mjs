@@ -262,7 +262,16 @@ const PRODUCT_PROJECTION = {
   stock_status: 1, specialSales: 1, ItemID: 1,
   categories: 1, tags: 1, status: 1, hidden: 1, catalog_visibility: 1,
   regularPrice: 1, regular_price: 1, author: 1, notInStore: 1,
+  "siteCard.digital": 1,
 };
+
+// Steimatzky sells an e-book beside most printed books (19,001 of 31,035 in stock); the store's card holds it. Without
+// it the concierge told a shopper who asked for Ken Follett digitally that the site sells printed books only (08.11),
+// while his e-books were ₪28.
+function digitalPriceOf(product) {
+  const digital = product.siteCard?.digital;
+  return digital?.enabled === true && Number(digital.value) > 0 ? Number(digital.value) : null;
+}
 
 /** The pre-sale price, only when the product is actually selling below it. */
 function regularPriceOf(product) {
@@ -277,6 +286,7 @@ function shapeProduct(product) {
     author: product.author || null,
     price: typeof product.price === "number" ? product.price : null,
     regular_price: regularPriceOf(product),
+    digital_price: digitalPriceOf(product),
     in_stock: productInStock(product),
     categories: [...new Set([...asArray(product.category), ...asArray(product.categories)])],
     tags: [...new Set([...asArray(product.softCategory), ...asArray(product.tags)])],
@@ -298,7 +308,9 @@ function shapeProduct(product) {
 function forModel(shaped) {
   const out = {};
   for (const [key, value] of Object.entries(shaped)) {
-    if (key === "url" || key === "image" || value == null || value === false) continue;
+    // in_stock:false stays: an in_stock:false search returns sold-out products, and without the flag the model took them
+    // for buyable ones and asked present_products for one again and again (Garmin "67i" → inReach Mini, 09.11).
+    if (key === "url" || key === "image" || value == null || (value === false && key !== "in_stock")) continue;
     if (Array.isArray(value) && !value.length) continue;
     out[key] = value;
   }
@@ -690,10 +702,12 @@ async function presentProducts(args, ctx) {
     { projection: PRODUCT_PROJECTION }
   ).toArray();
   const byId = new Map();
+  const soldOut = [];
   for (const doc of docs) {
     if (!offeredToShoppers(doc)) continue;
     const shaped = shapeProduct(doc);
     if (shaped.in_stock) byId.set(shaped.product_id, shaped);
+    else soldOut.push(shaped.name);
   }
   const highlights = args.highlights && typeof args.highlights === "object" ? args.highlights : {};
   const names = new Set();
@@ -710,7 +724,9 @@ async function presentProducts(args, ctx) {
   if (!products.length && ctx.shown?.size) {
     return {
       selected: 0, products: [],
-      error: "אף אחד מהמזהים האלה לא הוחזר מכלי בשיחה הזו, או שאינו זמין. בחר רק מזהים מהרשימה הזו.",
+      error: soldOut.length
+        ? `אזל מהמלאי ואי אפשר להציג אותו ככרטיס: ${soldOut.slice(0, 3).join(", ")}. אמור בטקסט שהוא אזל, ובחר חלופה מאותו סוג מהרשימה הזו.`
+        : "אף אחד מהמזהים האלה לא הוחזר מכלי בשיחה הזו, או שאינו זמין. בחר רק מזהים מהרשימה הזו.",
       choose_from: [...ctx.shown.values()].slice(0, 15),
     };
   }
@@ -1353,6 +1369,41 @@ function serializeToolResult(value) {
 }
 
 /**
+ * Gemini can refuse the whole prompt (promptFeedback.blockReason PROHIBITED_CONTENT, no candidates at all). On
+ * Steimatzky the trigger is the blurb of an adult or dark-romance book that a search put in the history: 13 turns
+ * from 06.11 to 09.11 sent the same blocked prompt eight times and ended on "לא הצלחתי לסיים את החיפוש", and every
+ * follow-up in that chat failed the same way. Dropping the product descriptions from the history clears it; names,
+ * authors and prices stay, so the model can still choose. Returns whether anything was removed.
+ */
+export function dropDescriptions(messages) {
+  let changed = false;
+  const strip = (value) => {
+    if (Array.isArray(value)) return value.map(strip);
+    if (!value || typeof value !== "object") return value;
+    const out = {};
+    for (const [key, inner] of Object.entries(value)) {
+      if (key === "description") { changed = true; continue; }
+      out[key] = strip(inner);
+    }
+    return out;
+  };
+  const field = /"description":"(?:[^"\\]|\\.)*"/;
+  for (const message of messages || []) {
+    for (const part of message.parts || []) {
+      if (part.functionResponse?.response) part.functionResponse.response = strip(part.functionResponse.response);
+      if (typeof part.text === "string" && field.test(part.text)) {
+        part.text = part.text
+          .replace(new RegExp(field.source + ",", "g"), "")
+          .replace(new RegExp("," + field.source, "g"), "")
+          .replace(new RegExp(field.source, "g"), "");
+        changed = true;
+      }
+    }
+  }
+  return changed;
+}
+
+/**
  * What to do with a function call read from the model's stream: "run" it, "skip"
  * a repeat, or "stop" reading a response that keeps asking for selections.
  * The repeat key ignores the call id, since a runaway response gives every copy
@@ -1375,7 +1426,8 @@ export function toolCallAction(seenCalls, call) {
 // a turn that runs out of rounds closes on them instead of an error.
 function rememberShown(ctx, result) {
   ctx.shown ||= new Map();
-  for (const p of [...asArray(result?.same_model_in_stock), ...asArray(result?.alternatives), ...asArray(result?.products), ...(result?.product ? [result.product] : [])]) {
+  // Steimatzky's sold-out opening carries same_author and similar instead of products.
+  for (const p of [...asArray(result?.same_model_in_stock), ...asArray(result?.alternatives), ...asArray(result?.same_author), ...asArray(result?.similar), ...asArray(result?.products), ...(result?.product ? [result.product] : [])]) {
     if (p?.product_id && p.in_stock !== false && !ctx.shown.has(String(p.product_id))) ctx.shown.set(String(p.product_id), { product_id: String(p.product_id), name: p.name, price: p.price });
   }
 }
@@ -1460,8 +1512,10 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     let finishReason = null;
     let usageMetadata = null;
     let runaway = false;
+    let blockedPrompt = null;
     for await (const chunk of stream) {
       usageMetadata = chunk.usageMetadata || usageMetadata;
+      blockedPrompt = chunk.promptFeedback?.blockReason || blockedPrompt;
       finishReason = chunk.candidates?.[0]?.finishReason || finishReason;
       for (const part of chunk.candidates?.[0]?.content?.parts || []) {
         if (part.text && !part.thought) {
@@ -1498,10 +1552,6 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
       abortController.abort();
     }
 
-    if (roundText) modelParts.push({ text: roundText });
-    for (const block of toolBlocks) modelParts.push(block.part);
-    messages.push({ role: "model", parts: modelParts });
-
     usage.rounds += 1;
     const cached = usageMetadata?.cachedContentTokenCount || 0;
     usage.input_tokens += Math.max(0, (usageMetadata?.promptTokenCount || 0) - cached);
@@ -1509,7 +1559,20 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     usage.output_tokens += (usageMetadata?.candidatesTokenCount || 0) + (usageMetadata?.thoughtsTokenCount || 0);
     usage.cache_read_input_tokens += cached;
 
-    if (["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"].includes(finishReason)) {
+    // A refused prompt has no answer to keep: nothing goes into the history. Retry without the product blurbs.
+    if (blockedPrompt && !roundText && !toolBlocks.length) {
+      if (dropDescriptions(messages)) {
+        console.warn(`[CONCIERGE] prompt blocked (${blockedPrompt}) for ${ctx.store.dbName}; retrying without product descriptions`);
+        continue;
+      }
+      finishReason = blockedPrompt;
+    }
+
+    if (roundText) modelParts.push({ text: roundText });
+    for (const block of toolBlocks) modelParts.push(block.part);
+    if (modelParts.length) messages.push({ role: "model", parts: modelParts });
+
+    if (["SAFETY", "BLOCKLIST", "PROHIBITED_CONTENT"].includes(finishReason) || (blockedPrompt && finishReason === blockedPrompt)) {
       // The filter can stop mid-sentence ("romance for a girl of 12", Steimatzky 05.11): drop the half sentence, and
       // when cards are already on screen, close on them instead of an error.
       if (roundText) onEvent({ type: "text_reset" });
@@ -1583,11 +1646,14 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
   if (!presentedProducts && ctx.shown?.size) {
     // Out of rounds without a valid selection: show the best of what the searches found rather than an error.
     const ids = [...ctx.shown.keys()].slice(0, 4);
-    await runTool({ id: "auto_present", name: "present_products", input: { product_ids: ids } }, ctx, onEvent);
-    onEvent({ type: "text_reset" });
-    onEvent({ type: "text", text: "אלה המוצרים שמצאתי שמתאימים לבקשה." });
-    onEvent({ type: "done", usage, model });
-    return { stopped: "max_rounds_fallback", usage };
+    const auto = await runTool({ id: "auto_present", name: "present_products", input: { product_ids: ids } }, ctx, onEvent);
+    // "These are what I found" over an empty panel (Steimatzky replay 09.11) is worse than saying it didn't work.
+    if (extractProducts(auto.value).length) {
+      onEvent({ type: "text_reset" });
+      onEvent({ type: "text", text: "אלה המוצרים שמצאתי שמתאימים לבקשה." });
+      onEvent({ type: "done", usage, model });
+      return { stopped: "max_rounds_fallback", usage };
+    }
   }
   onEvent({ type: "error", message: "לא הצלחתי לסיים את החיפוש. אפשר לשאול משהו ממוקד יותר?" });
   return { stopped: "max_rounds", usage };
