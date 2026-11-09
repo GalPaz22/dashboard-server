@@ -1,6 +1,6 @@
 # Semantix tenant module — www.foxhome.co.il (foxhome)
 
-Revision 20, 1495 product cards, built 2026-10-06T14:48:35.867Z.
+Revision 21, 1591 product cards, built 2026-11-09T10:23:51.633Z.
 
 ## Install into dashboard-server (once for all Semantix tenants)
 

@@ -9,11 +9,11 @@ import {normalize} from './core.mjs';
 // match   — "direct" (default): only products whose title itself names every query word are moved (so "רוטב עגבניות"
 //           does not lift fresh tomatoes above the sauce); "any": every product of the target group is moved.
 export const MAX_RANKING_RULES=40;
-export const RANK_FIELDS=/^(categories|tags|productType|title|brand|specifications\.[^.]{1,60})$/;
+export const RANK_FIELDS=/^(categories|collections|tags|productType|title|brand|specifications\.[^.]{1,60})$/;
 
 // Light Hebrew morphology: עגבנייה/עגבניה/עגבניות/עגבניית and תפוח/תפוחים share a stem of length-2 (min 3).
 const stem=w=>w.length<=3?w:w.slice(0,Math.max(3,w.length-2));
-const words=s=>normalize(s).replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(Boolean);
+const words=s=>normalize(s).replace(/\bsx(?:guard|avoid)0[a-z0-9]+\b/g,' ').replace(/[^\p{L}\p{N}\s]/gu,' ').split(/\s+/).filter(Boolean);
 export function wordMatches(word,list){const s=stem(word);return list.some(w=>w===word||w.length>=3&&(w.startsWith(s)||word.startsWith(stem(w))));}
 const covers=(query,title)=>{const t=words(title);return query.length>0&&query.every(w=>wordMatches(w,t));};
 
@@ -22,7 +22,7 @@ export function fieldValues(p,field){
  return (Array.isArray(v)?v:v==null?[]:[v]).map(x=>normalize(String(x))).filter(Boolean);
 }
 // Labels (categories, tags, product type) match exactly — ״ירקות״ is not ״ירקות מוקפאים״; free-text fields match by containment.
-const LABELS=new Set(['categories','tags','productType']);
+const LABELS=new Set(['categories','collections','tags','productType']);
 export const inTarget=(p,rule)=>{const have=fieldValues(p,rule.field),exact=LABELS.has(rule.field);return rule.values.some(v=>{const n=normalize(v);return have.some(h=>h===n||!exact&&h.includes(n));});};
 export const ruleApplies=(rule,query)=>!rule.terms?.length||rule.terms.some(t=>{const tw=words(t);return tw.length&&tw.every(w=>wordMatches(w,query));});
 

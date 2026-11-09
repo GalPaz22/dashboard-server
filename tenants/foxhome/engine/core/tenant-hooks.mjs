@@ -14,7 +14,7 @@ import {normalize} from './core.mjs';
 export const HOOKS={
  rewriteQuery:'function rewriteQuery(query, ctx) → string (the query to search). Runs before retrieval on every search.',
  transformProduct:'function transformProduct(product, ctx) → product. Runs once per product when the catalog loads; adds searchable knowledge: tags, categories, specifications, description, popularity, brand. What shoppers see and buy — title, image, id, url, price, stockStatus, hidden — always stays as in the source; put extra search words in tags or specifications.',
- rerank:'function rerank(matches, query, ctx) → array of ids in the order to show; ids left out are removed. matches: [{id,title,categories,tags,specifications,brand,price,popularity,description(300 chars)}] in current order.',
+ rerank:'function rerank(matches, query, ctx) → array of ids in the order to show; ids left out are removed. matches: [{id,title,categories,collections,tags,specifications,brand,price,popularity,description(300 chars)}] in current order.',
 };
 const FORBIDDEN=/\b(import|require|process|globalThis|global|module|exports|eval|Function|constructor|__proto__|prototype|Reflect|Proxy|WebAssembly|setTimeout|setInterval|setImmediate|queueMicrotask|Atomics|SharedArrayBuffer|fetch|XMLHttpRequest|this|async|await|with|arguments|caller|callee|Symbol|getPrototypeOf|defineProperty|__defineGetter__|__lookupGetter__)\b/;
 export const MAX_HOOK_SOURCE=20000,MAX_HOOK_DATA=200000;
@@ -67,28 +67,47 @@ export function createHookRunner(hooks,data={},{tenant='',timeoutMs=100,batchTim
  }
  function call(name,args,timeout){
   if(!worker)spawn();const id=++seq,w=worker;
+  const input=JSON.stringify(args);
+  // Broad collection reranks include megabytes of source attributes. JSON parsing runs inside the
+  // same VM deadline as the merchant function; allow 100ms per full MiB, capped at 900ms extra.
+  const budget=timeout+(name==='rerank'?Math.min(900,Math.floor(input.length/1048576)*100):0);
   return new Promise((resolve,reject)=>{
    // The VM limit stops a runaway loop inside the worker; this outer limit also covers a stuck or memory-starved worker.
-   const timer=setTimeout(()=>{pending.delete(id);reject(Error(`הפונקציה ${name} חרגה מזמן הריצה`));w.terminate();if(worker===w)worker=null;},timeout+1000);
+   const timer=setTimeout(()=>{pending.delete(id);reject(Error(`הפונקציה ${name} חרגה מזמן הריצה`));w.terminate();if(worker===w)worker=null;},budget+1000);
    pending.set(id,{resolve:out=>{try{resolve(JSON.parse(out));}catch{reject(Error('הפונקציה החזירה ערך לא תקין'));}},reject,timer});
-   w.postMessage({id,name,input:JSON.stringify(args),timeout});
+   w.postMessage({id,name,input,timeout:budget});
   });
  }
  const runner={
   names,key,
   has:name=>names.includes(name),
   async rewriteQuery(query){const q=await call('rewriteQuery',[query],timeoutMs);if(typeof q!=='string'||q.length>300)throw Error('rewriteQuery חייב להחזיר מחרוזת עד 300 תווים');return q.trim()||query;},
-  // One call for the whole catalog; protected fields always come from the source product.
+  // Transform the catalog in order; protected fields always come from the source product.
   async transformProducts(products){
-   const out=await call('transformProduct',[products],batchTimeoutMs);if(!Array.isArray(out)||out.length!==products.length)throw Error('transformProduct חייב להחזיר מוצר לכל מוצר');
+   // A full enriched catalog can be larger than the worker heap (Shipi: >80 MB). Bound each JSON message while
+   // retaining the catalog-wide deadline and returning nothing until every batch has passed validation.
+   const out=[],deadline=Date.now()+batchTimeoutMs;
+   let batch=[],bytes=0;
+   const flush=async()=>{
+    if(!batch.length)return;
+    const remaining=deadline-Date.now();if(remaining<=0)throw Error('הפונקציה transformProduct חרגה מזמן הריצה');
+    const result=await call('transformProduct',[batch],remaining);
+    if(!Array.isArray(result)||result.length!==batch.length)throw Error('transformProduct חייב להחזיר מוצר לכל מוצר');
+    out.push(...result);batch=[];bytes=0;
+   };
+   for(const p of products){const size=JSON.stringify(p).length;
+    if(batch.length&&(batch.length>=50||bytes+size>256000))await flush();
+    batch.push(p);bytes+=size;
+   }
+   await flush();
    return out.map((p,i)=>{const src=products[i];if(!p||typeof p!=='object'||Array.isArray(p))throw Error('transformProduct החזיר ערך שאינו מוצר: '+src.id);
     const merged={...src,...p};for(const k of PROTECTED)if(Object.hasOwn(src,k))merged[k]=src[k];
-    for(const k of ['categories','tags'])merged[k]=Array.isArray(merged[k])?merged[k].filter(x=>typeof x==='string').slice(0,100):src[k]||[];
+    for(const k of ['categories','collections','tags'])merged[k]=Array.isArray(merged[k])?merged[k].filter(x=>typeof x==='string').slice(0,100):src[k]||[];
     if(!merged.specifications||typeof merged.specifications!=='object'||Array.isArray(merged.specifications))merged.specifications=src.specifications||{};
     merged.title=String(merged.title??src.title??'').slice(0,500);return merged;});
   },
   async rerank(matches,query){
-   const brief=matches.map(p=>({id:p.id,title:p.title,categories:p.categories,tags:p.tags,specifications:p.specifications,brand:p.brand,price:p.price,popularity:p.popularity||0,description:String(p.description||'').slice(0,300)}));
+   const brief=matches.map(p=>({id:p.id,title:p.title,categories:p.categories,collections:p.collections,tags:p.tags,specifications:p.specifications,brand:p.brand,price:p.price,popularity:p.popularity||0,description:String(p.description||'').slice(0,300)}));
    const ids=await call('rerank',[brief,query],timeoutMs);if(!Array.isArray(ids))throw Error('rerank חייב להחזיר מערך מזהים');
    const byId=new Map(matches.map(p=>[p.id,p])),seen=new Set(),out=[];for(const id of ids){const p=byId.get(String(id));if(p&&!seen.has(p.id)){seen.add(p.id);out.push(p);}}
    return out;

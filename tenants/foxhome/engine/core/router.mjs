@@ -1,4 +1,4 @@
-import {normalize,planQuery,search} from './core.mjs';
+import {normalize,planQuery,search,matchesTaxonomy} from './core.mjs';
 
 const schema={type:'object',properties:{route:{type:'string',enum:['lexical','semantic','consultative','clarify']},rewrites:{type:'array',items:{type:'string'},maxItems:3},message:{type:'string'}},required:['route','rewrites','message'],additionalProperties:false};
 
@@ -45,7 +45,7 @@ DATA ${JSON.stringify({query,catalogVocabulary:vocabulary})}`}),new Promise((_,r
         if(numbers.length!==rewrittenNumbers.length||!numbers.every((n,i)=>n===rewrittenNumbers[i]))continue;
         let page=search(products,client,{query:rewrite,limit:50});
         const all=[...page.matches];while(page.nextCursor){page=search(products,client,{cursor:page.nextCursor,limit:50});all.push(...page.matches);}
-        for(const p of all){if((!original.productType||p.productType===original.productType)&&original.colors.every(c=>p.colors.includes(c))&&original.finishes.every(f=>p.finishes.includes(f))&&original.tags.every(t=>(p.tags||[]).includes(t))&&(original.maxPrice===null||(p.price!==null&&p.price<=original.maxPrice)))found.set(p.id,p);}
+        for(const p of all){if(matchesTaxonomy(p,original)&&(!original.productType||p.productType===original.productType)&&original.colors.every(c=>p.colors.includes(c))&&original.finishes.every(f=>p.finishes.includes(f))&&original.tags.every(t=>(p.tags||[]).includes(t))&&(original.maxPrice===null||(p.price!==null&&p.price<=original.maxPrice)))found.set(p.id,p);}
         if(all.length)accepted.push(rewrite);
       }
       if(!found.size)return {metadata:{...metadata,routerFallback:'rewrites-without-matches'}};

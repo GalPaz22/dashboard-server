@@ -9,10 +9,10 @@
   "dbName": "foxhome",
   "collection": "products",
   "tokenPrefix": "foxhome-v3:",
-  "revision": 20,
-  "profileHash": "dc55498901fd86f56ef973021b7b59ad777cdf8275beb9ff6933ea0a15850e9e",
-  "products": 1495,
-  "builtAt": "2026-10-06T14:48:35.867Z",
+  "revision": 21,
+  "profileHash": "1d5f83686d36650a17bcf353822ef959853f38458b35b00cad8f2dfa4b571fd4",
+  "products": 1591,
+  "builtAt": "2026-11-09T10:23:51.633Z",
   "switch": {
     "field": "users.users.semantix",
     "value": {

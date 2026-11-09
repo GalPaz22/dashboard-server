@@ -1,4 +1,4 @@
-import {normalize,planQuery,search,applySpelling,sellable} from './core.mjs';
+import {normalize,planQuery,search,applySpelling,sellable,matchesTaxonomy} from './core.mjs';
 
 const tokens=text=>normalize(text).match(/[\p{L}\p{N}]+/gu)||[];
 export function distance(a,b){
@@ -45,7 +45,7 @@ export function createSpellingResolver(products,client){
     if(candidates.some(c=>c.edits===best.edits&&distance(c.compact,best.compact)>1))return null;
     const variants=candidates.filter(c=>distance(c.compact,best.compact)<=1);
     const ids=new Set(variants.flatMap(c=>[...c.ids]));
-    const matches=visible.filter(p=>ids.has(p.id)&&(!plan.productType||p.productType===plan.productType)&&
+    const matches=visible.filter(p=>matchesTaxonomy(p,plan)&&ids.has(p.id)&&(!plan.productType||p.productType===plan.productType)&&
       plan.colors.every(c=>p.colors.includes(c))&&plan.finishes.every(f=>p.finishes.includes(f))&&plan.tags.every(t=>(p.tags||[]).includes(t))&&
       (plan.maxPrice===null||(p.price!==null&&p.price<=plan.maxPrice)));
     matches.sort((a,b)=>a.id.localeCompare(b.id));
