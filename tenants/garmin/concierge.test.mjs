@@ -23,3 +23,10 @@ test('the concierge only offers products a shopper can open and buy',async()=>{
   for(const p of [{...base,status:'private'},{...base,status:'DRAFT'},{...base,catalog_visibility:'hidden'},{...base,price:0},{...base,price:'0'},{...base,hidden:true},null])
     assert.equal(offeredToShoppers(p),false,JSON.stringify(p));
 });
+
+test('Garmin instructions carry the square watch, same-kind alternatives and service questions; other stores get none',async()=>{
+  const {garminConciergeInstructions}=await import('./concierge.mjs');
+  const text=garminConciergeInstructions({dbName:'garmin'});
+  for(const must of ['Venu X1','שעון במקום שעון','BuyMe','Titanium'])assert.ok(text.includes(must),must);
+  assert.equal(garminConciergeInstructions({dbName:'steimatzky'}),'');
+});
