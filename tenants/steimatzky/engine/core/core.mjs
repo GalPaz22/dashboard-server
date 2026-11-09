@@ -21,13 +21,32 @@ export function authorMatch(p,query){
 // The product's own name is the query: its title, the name part of "name / author", or the store's current name for it
 // when the published card still carries an older one (sourceTitle).
 export const exactTitle=(p,query)=>{const q=normalize(query);return !!q&&[p.title||p.name,p.sourceTitle].some(t=>t&&(normalize(t)===q||normalize(String(t).split(' / ')[0])===q));};
+// The same title written another way: a qualifier in brackets after it ("TWILIGHT (20TH ANNIV ED)"), or Hebrew vowel
+// letters inside words ("הספרייה הראשונה שלי" = "הספריה הראשונה שלי").
+const plene=w=>/^[א-ת]{3,}$/.test(w)?w[0]+w.slice(1,-1).replace(/[וי]/g,'')+w.at(-1):w;
+const pleneOf=t=>normalize(t).split(' ').map(plene).join(' ');
+// English titles are stored without a leading article: "the shining" is SHINING, "the names" is NAMES.
+const bare=q=>/^(?:the|a|an) [a-z0-9]/.test(q)?q.replace(/^(?:the|a|an) /,''):null;
+export const nearTitle=(p,query)=>{if(exactTitle(p,query))return true;const q=normalize(query);if(!q)return false;const k=pleneOf(q),b=bare(q);
+ return [p.title||p.name,p.sourceTitle].some(t=>{if(!t)return false;const name=String(t).split(' / ')[0],base=normalize(name.replace(/\s*\([^()]*\)\s*$/,''));return base===q||!!b&&(base===b||normalize(name)===b)||pleneOf(name)===k;});};
+// A title that starts with the whole query, then more words: the same work in another binding ("הזחל הרעב-דפים עבים"),
+// or a volume of the series the query names ("שאול החתול והשכן החדש"). One short word names too much to count.
+// Two words or more held whole by the title, in any place, name it too: "throne of glass" for "CROWN OF MIDNIGHT #2
+// (THRONE OF GLASS)", "מסע זוגי" for "יומן מסע זוגי". Held only as typed: in another vowel spelling the words are often other words ("שבירים"/"שוברים", "אחיות"/"אחות").
+// Function words ("the", "of", "של") do not count toward the two.
+const FUNCTION_WORDS=new Set(['the','a','an','of','and','to','in','on','for','with','של','את','על','עם','או']);
+export const titledBy=(p,query)=>{const q=normalize(query);if(!q)return 0;const w=q.split(' ').filter(x=>!FUNCTION_WORDS.has(x));if(q.split(' ').length<2&&q.length<5)return 0;
+ return [p.title||p.name,p.sourceTitle].some(t=>{if(!t)return false;const n=normalize(String(t).split(' / ')[0]);if(n.startsWith(q+' '))return true;
+  if(w.length<2)return false;const lit=new Set(n.split(' '));return w.every(x=>lit.has(x));})?2:0;};
 export function stockLast(matches,query){
  const q=normalize(query),inStock=p=>p.stockStatus==='instock';
- // A book by the author the shopper named leads like an exact title, sold-out ones after the in-stock ones.
- const exact=p=>!!q&&(exactTitle(p,q)||authorMatch(p,q));
- if(!matches.some(p=>!inStock(p)))return matches;
- const lead=matches.filter(exact),rest=matches.filter(p=>!exact(p));
- return [...lead.filter(inStock),...lead.filter(p=>!inStock(p)),...rest.filter(inStock),...rest.filter(p=>!inStock(p))];
+ // A book by the author the shopper named leads like an exact title. Then the titles that start with the query or hold
+ // its words. In stock first in each: a sold-out exact title follows its in-stock edition in another binding, and a
+ // series' sold-out volumes still come before in-stock books that only share a word. Products the engine marked as
+ // alternatives stay behind what it matched. Order inside each part is kept (relevance, series order).
+ const alt=p=>p.matchQuality==='alternative',exact=p=>!!q&&!alt(p)&&(nearTitle(p,q)||authorMatch(p,q)),titled=p=>!alt(p)&&!exact(p)&&titledBy(p,q)>0;
+ const t=[[],[],[],[],[],[]],s=p=>inStock(p)?0:1;for(const p of matches)t[exact(p)?2*s(p):titled(p)?1+2*s(p):4+s(p)].push(p);
+ return t.flat();
 }
 // Rows the store has retired (a dead product page, not "temporarily missing"), so they are imported as hidden:
 // - a row whose product page answered 404/410 when last checked (pageCheck, written by scripts/page-check.mjs);

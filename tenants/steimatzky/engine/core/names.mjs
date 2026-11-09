@@ -21,6 +21,8 @@ const FINAL={ך:'כ',ם:'מ',ן:'נ',ף:'פ',ץ:'צ'},open=w=>w.replace(/[ךםן
 const isHebrew=w=>/^[א-ת]+$/.test(w),isLatin=w=>/^[a-z]+$/.test(w);
 const SOUND=['כקח','טת','סשצ','בו','אע','אה'];
 function nearSpelling(a,b){
+ // Inner vowel letters are optional in Hebrew: "דוד" is "דויד" (דויד גרוסמן's Hebrew books), short names included.
+ if(a!==b&&a.length>=3&&b.length>=3&&/^[א-ת]+$/.test(a)&&/^[א-ת]+$/.test(b)&&a[0]===b[0]&&a.at(-1)===b.at(-1)&&a.slice(1,-1).replace(/[וי]/g,'')===b.slice(1,-1).replace(/[וי]/g,''))return true;
  if(a.length!==b.length||a.length<4)return a.length>=5&&b.length>=5&&lev1(a,b);
  const diff=[];for(let i=0;i<a.length;i++)if(a[i]!==b[i])diff.push(i);
  if(diff.length===2&&diff[1]===diff[0]+1&&a[diff[0]]===b[diff[1]]&&a[diff[1]]===b[diff[0]])return true;
