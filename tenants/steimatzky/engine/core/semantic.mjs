@@ -318,7 +318,7 @@ ${wantAlternatives?'ONLY when no product qualifies for matches: leave matches em
   const namedIn=(list,text)=>{const words=normalize(text).split(' ').filter(Boolean);if(!words.length)return [];
     // A title word may carry the conjunction ו: "גאווה דעה קדומה" is "גאווה ודעה קדומה".
     const own=p=>{const t=new Set(normalize([p.title,p.sourceTitle].filter(Boolean).join(' ')).split(' '));return words.every(w=>t.has(w)||/^[א-ת]{3,}$/.test(w)&&t.has('ו'+w));};
-    const hits=list.filter(p=>nearTitle(p,text)||own(p)||authorMatch(p,text));return [...hits.filter(p=>exactTitle(p,text)),...hits.filter(p=>!exactTitle(p,text)&&nearTitle(p,text)),...hits.filter(p=>!nearTitle(p,text))];};
+    const near=p=>nearTitle(p,text,{article:false}),hits=list.filter(p=>near(p)||own(p)||authorMatch(p,text));return [...hits.filter(p=>exactTitle(p,text)),...hits.filter(p=>!exactTitle(p,text)&&near(p)),...hits.filter(p=>!near(p))];};
   const unfinished=query=>{const w=normalize(query).split(' ').filter(Boolean);if(w.length<2||w.length>6)return [];const last=w.at(-1),done=w.slice(0,-1);
     if(done.join('').length<3||last.length<2&&!done.some(d=>d.length>=4&&!common(d)))return [];
     // A last word typed in the singular ("האבודה") completes to its plural (האבודות), not to any longer word.

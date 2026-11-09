@@ -27,7 +27,9 @@ const plene=w=>/^[א-ת]{3,}$/.test(w)?w[0]+w.slice(1,-1).replace(/[וי]/g,'')+
 const pleneOf=t=>normalize(t).split(' ').map(plene).join(' ');
 // English titles are stored without a leading article: "the shining" is SHINING, "the names" is NAMES.
 const bare=q=>/^(?:the|a|an) [a-z0-9]/.test(q)?q.replace(/^(?:the|a|an) /,''):null;
-export const nearTitle=(p,query)=>{if(exactTitle(p,query))return true;const q=normalize(query);if(!q)return false;const k=pleneOf(q),b=bare(q);
+// The article rule only orders results: it must not stop an English title from being looked up as its Hebrew edition
+// ("the midnight library" → ספריית חצות in stock, before the sold-out MIDNIGHT LIBRARY).
+export const nearTitle=(p,query,{article=true}={})=>{if(exactTitle(p,query))return true;const q=normalize(query);if(!q)return false;const k=pleneOf(q),b=article?bare(q):null;
  return [p.title||p.name,p.sourceTitle].some(t=>{if(!t)return false;const name=String(t).split(' / ')[0],base=normalize(name.replace(/\s*\([^()]*\)\s*$/,''));return base===q||!!b&&(base===b||normalize(name)===b)||pleneOf(name)===k;});};
 // A title that starts with the whole query, then more words: the same work in another binding ("הזחל הרעב-דפים עבים"),
 // or a volume of the series the query names ("שאול החתול והשכן החדש"). One short word names too much to count.
