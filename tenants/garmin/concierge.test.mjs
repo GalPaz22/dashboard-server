@@ -13,3 +13,13 @@ test('a Garmin part number never opens the concierge, even with nothing found; o
   assert.equal((await decideTrigger({payload:[],query:'010-04337-41H',store:{dbName:'other'},ctx:{}}))?.reason,'no_results');
   assert.equal((await decideTrigger({payload:[],query:'Forerunner 970',store:{dbName:'garmin'},ctx:{}}))?.reason,'no_results');
 });
+
+test('the concierge only offers products a shopper can open and buy',async()=>{
+  const {offeredToShoppers}=await import('../../concierge.mjs');
+  const base={id:'1',name:'Instinct 3',price:1699,status:'publish',catalog_visibility:'visible',stockStatus:'instock'};
+  assert.equal(offeredToShoppers(base),true);
+  assert.equal(offeredToShoppers({id:'2',name:'no Woo fields',price:99}),true);
+  assert.equal(offeredToShoppers({id:'3',name:'no price field'}),true);
+  for(const p of [{...base,status:'private'},{...base,status:'DRAFT'},{...base,catalog_visibility:'hidden'},{...base,price:0},{...base,price:'0'},{...base,hidden:true},null])
+    assert.equal(offeredToShoppers(p),false,JSON.stringify(p));
+});

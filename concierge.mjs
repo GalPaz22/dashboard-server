@@ -229,6 +229,20 @@ const GARBAGE_REPLIES = {
 
 // Mirrors isProductInStock() in server.js: stockStatus is canonical, stock_status
 // is a stale leftover on some stores, and a missing field means "assume sellable".
+// What a shopper can open and buy. A store that takes a product off sale marks it private, draft or archived
+// (WooCommerce, Shopify) or hides it from the catalog, and free gifts or placeholders carry a price of 0: on
+// Garmin these were recommended and led to 404 pages (Nov 2026). A store whose sync writes none of these fields
+// is unaffected.
+const OFF_SALE_STATUSES = new Set(["private", "draft", "pending", "trash", "future", "archived"]);
+export function offeredToShoppers(product) {
+  if (!product || product.hidden === true) return false;
+  if (product.status && OFF_SALE_STATUSES.has(String(product.status).toLowerCase())) return false;
+  if (product.catalog_visibility === "hidden") return false;
+  const price = product.price;
+  if (price !== undefined && price !== null && price !== "" && Number(price) <= 0) return false;
+  return true;
+}
+
 function productInStock(product = {}) {
   if (product.stockStatus) return product.stockStatus === "instock";
   if (product.stock_status) return product.stock_status === "instock";
@@ -245,7 +259,7 @@ const PRODUCT_PROJECTION = {
   id: 1, name: 1, description: 1, price: 1, image: 1, url: 1,
   type: 1, category: 1, softCategory: 1, colors: 1, stockStatus: 1,
   stock_status: 1, specialSales: 1, ItemID: 1,
-  categories: 1, tags: 1, status: 1, hidden: 1,
+  categories: 1, tags: 1, status: 1, hidden: 1, catalog_visibility: 1,
   regularPrice: 1, regular_price: 1, author: 1, notInStore: 1,
 };
 
@@ -483,7 +497,7 @@ export async function searchCatalog(args, ctx) {
       .sort(sort).limit(RETRIEVAL_POOL).toArray();
   }
 
-  let results = pool.filter((p) => p && passesPostFilters(p, args));
+  let results = pool.filter((p) => offeredToShoppers(p) && passesPostFilters(p, args));
   if (isBeautics(ctx.store)) results = results.filter(p=>p.hidden!==true && ['ACTIVE','publish'].includes(p.status));
   if (isSteimatzky(ctx.store)) results = results.filter(p => p.hidden !== true && p.notInStore !== true && Number(p.price) > 0);
   if (inStock) results = results.filter(productInStock);
@@ -542,7 +556,7 @@ async function getProduct(args, ctx) {
 
   const product = await collection.findOne({ $or: or, hidden: { $ne: true },
     ...(isBeautics(ctx.store) ? {status:{$in:['ACTIVE','publish']}} : {}) }, { projection: PRODUCT_PROJECTION });
-  if (!product) return { found: false, message: "לא נמצא מוצר תואם בקטלוג." };
+  if (!offeredToShoppers(product)) return { found: false, message: "לא נמצא מוצר תואם בקטלוג." };
 
   return {
     found: true,
@@ -559,8 +573,8 @@ export async function catalogFacets(args, ctx) {
   if (cached && Date.now() - cached.at < FACET_CACHE_TTL_MS) return cached.value;
 
   const collection = await getCollection(ctx);
-  const match = { hidden: { $ne: true } };
-  if (isBeautics(ctx.store)) match.status = {$in:['ACTIVE','publish']};
+  const match = { hidden: { $ne: true }, catalog_visibility: { $ne: "hidden" }, price: { $ne: 0 } };
+  match.status = isBeautics(ctx.store) ? {$in:['ACTIVE','publish']} : { $nin: [...OFF_SALE_STATUSES] };
   const categoryField = isBeautics(ctx.store) ? '$categories' : '$category';
   const tagField = isBeautics(ctx.store) ? '$tags' : '$softCategory';
   if (inStock) match.stockStatus = "instock";
@@ -632,7 +646,7 @@ async function findAlternatives(args, ctx) {
     try {
       const docs = await collection.aggregate(pipeline).toArray();
       const products = docs
-        .filter((d) => String(d.id) !== String(source.id))
+        .filter((d) => offeredToShoppers(d) && String(d.id) !== String(source.id))
         .slice(0, limit)
         .map((p) => forModel(shapeProduct(p)));
       return { based_on: source.name || null, method: "similar_products", products };
@@ -671,6 +685,7 @@ async function presentProducts(args, ctx) {
   ).toArray();
   const byId = new Map();
   for (const doc of docs) {
+    if (!offeredToShoppers(doc)) continue;
     const shaped = shapeProduct(doc);
     if (shaped.in_stock) byId.set(shaped.product_id, shaped);
   }
