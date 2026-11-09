@@ -20,7 +20,8 @@ test('an English title answers with its Hebrew edition first, by the author the 
  const generate=scripted({interpret:[plan({intent:'ספר',categories:['כלכלה'],terms:['psychology of money','הפסיכולוגיה של הכסף','Morgan Housel'],requirements:['psychology of money']})],
   select:[{matches:[{id:'why',evidence:[{requirement:0,field:'title',quote:'WHY'}]}],alternatives:[]}]});
  const r=await setup(money(),generate)({query:'psychology of money',limit:12});
- assert.deepEqual(ids(r),['he','why']);assert.equal(r.matches[0].matchQuality,'edition');assert.deepEqual(r.metadata.editionIds,['he']);
+ // 09.11: "WHY" carries no word of the title or of its author, so the name check drops it: it is another book.
+ assert.deepEqual(ids(r),['he']);assert.equal(r.matches[0].matchQuality,'edition');assert.deepEqual(r.metadata.editionIds,['he']);
  assert.match(generate.calls[1].prompt,/"id":"he"/,'the edition is among what the selector reads');
 });
 

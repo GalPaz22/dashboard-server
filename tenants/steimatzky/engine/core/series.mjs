@@ -19,6 +19,9 @@ export function seriesOf(title){
 // A bare number is a volume only in a book with an author; "כיסוי לקינדל מסך 6" is a size. "#3" and "חלק ב" say so themselves.
 const volumeMark=(s,p)=>s.marked||!!(p.specifications?.author||p.author);
 const latin=s=>/[a-z]/i.test(s);
+// A Hebrew word in either spelling of its inner vowel letters is the same word: "הכל" names the series "על הכול".
+const plene=w=>/^[א-ת]{3,}$/.test(w)?w[0]+w.slice(1,-1).replace(/[וי]/g,'')+w.at(-1):w;
+const same=(a,b)=>a===b||plene(a)===plene(b);
 // The volume a query names: a number of its own, or the word after "חלק" / "כרך".
 function namedVolume(words){
  for(const [i,w] of words.entries()){if(/^(?:חלק|כרך)$/.test(w)&&words[i+1]&&volumeOf(words[i+1]))return {volume:volumeOf(words[i+1]),rest:words.filter((_,j)=>j!==i&&j!==i+1)};}
@@ -28,12 +31,17 @@ export function orderSeries(matches,query,{scoped=false}={}){
  const typed=normalize(query).split(' ').filter(Boolean),{volume,rest}=namedVolume(typed),words=rest.filter(w=>w.length>1);
  if(!matches?.length||!words.length&&!scoped)return matches;
  // scoped: a linked term ("acotar") lists the series itself, so its words need not be in the titles.
- const named=s=>scoped||words.every(w=>` ${s.name} `.includes(` ${w} `)||s.name.split(' ').some(x=>x.length>w.length&&x.endsWith(w)));
+ const named=s=>scoped||words.every(w=>s.name.split(' ').some(x=>same(w,x)||x.length>w.length&&x.endsWith(w)));
  const members=[];matches.forEach((p,slot)=>{const s=seriesOf(p.title||p.name||'');if(s?.volume&&volumeMark(s,p)&&named(s))members.push({p,slot,s});});
  if(new Set(members.map(m=>m.s.volume)).size<2)return matches;
  const size=new Map();for(const m of members)size.set(m.s.name,(size.get(m.s.name)||0)+1);
  const group=m=>!scoped&&size.get(m.s.name)>1?size.get(m.s.name):0,script=latin(query);
  const sorted=[...members].sort((a,b)=>Number(a.s.collector)-Number(b.s.collector)||Number(volume!==null&&b.s.volume===volume)-Number(volume!==null&&a.s.volume===volume)||group(b)-group(a)||a.s.volume-b.s.volume||Number(latin(b.s.name)===script)-Number(latin(a.s.name)===script)||a.slot-b.slot);
  const out=[...matches],slots=members.map(m=>m.slot);const first=sorted.find(m=>m.s.volume===1&&!m.s.collector)?.p;
- sorted.forEach((m,i)=>{out[slots[i]]=m.p===first?{...m.p,seriesFirst:true}:m.p;});return out;
+ sorted.forEach((m,i)=>{out[slots[i]]=m.p===first?{...m.p,seriesFirst:true}:m.p;});
+ // The query is the series' whole name ("על הכול", "סדרת על הכל"): its volumes lead, before a book of another series
+ // whose subtitle carries the same words ("הטבעיים 3 להמר על הכול").
+ const whole=s=>{const n=s.name.split(' ');return !scoped&&n.length===words.length&&n.every((x,i)=>same(words[i],x));};
+ if(sorted.filter(m=>whole(m.s)).length>=2){const lead=new Set(sorted.filter(m=>whole(m.s)).map(m=>m.p.id));return [...out.filter(p=>lead.has(p.id)),...out.filter(p=>!lead.has(p.id))];}
+ return out;
 }
