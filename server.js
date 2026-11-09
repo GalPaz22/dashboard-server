@@ -3,6 +3,7 @@ import { createMemoryMonitor } from './memory-monitor.mjs';
 import { createTrafficMonitor, observeRedisTraffic, observeGeminiTraffic } from './network-traffic.mjs';
 import { savePaginationState, readPaginationState, appendPaginationIds } from './pagination-store.mjs';
 import { compactSearchPayload, paginationTokenCategories } from './search-cache-payload.mjs';
+import { stampedLabel } from './special-label-stamp.mjs';
 import {hasTrackingEventId, insertTrackingEvent} from './tracking-events.mjs';
 import express from "express";
 import bodyParser from "body-parser";
@@ -3266,7 +3267,7 @@ async function getSpecialLabels(dbName, collectionName) {
 function stampSpecialLabelArray(arr, labels) {
   if (!Array.isArray(arr)) return;
   for (const p of arr) {
-    if (p && typeof p === 'object') p.specialLabel = labels.get(p.id) ?? false;
+    if (p && typeof p === 'object') p.specialLabel = stampedLabel(p.specialLabel, labels.get(p.id) ?? false);
   }
 }
 
