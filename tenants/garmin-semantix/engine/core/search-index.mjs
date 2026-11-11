@@ -17,7 +17,7 @@ export function boundedDistance(a,b,max){
   for(let i=1;i<=a.length;i++){const next=[i];let best=i;for(let j=1;j<=b.length;j++){next[j]=Math.min(next[j-1]+1,row[j]+1,row[j-1]+(a[i-1]===b[j-1]?0:1));if(next[j]<best)best=next[j];}if(best>max)return max+1;row=next;}
   return row[b.length];
 }
-const hebrew=/^[\u05d0-\u05ea]+$/u,prefixes=/^[והבלמשכ]/u;
+const hebrew=/^[\u05d0-\u05ea]+$/u,prefixes=/^[והבלמשכ]/u,ATTACHED=['ה','ו','ב','ל','וה','וב','ול'];
 const vocabularies=new WeakMap();
 // Hebrew number inflection: the singular and plural of a word are the same product word (בננות↔בננה,
 // עגבניות↔עגבניה/עגבנייה, תפוחים↔תפוח, מלפפונים↔מלפפון). Only forms that exist in the index are used.
@@ -44,7 +44,14 @@ export function resolveTerm(index,term,{relax=false}={}){
   const own=new Map((Object.hasOwn(index.terms,term)?index.terms[term]:[]).map(id=>[id,0]));
   // The other number of the same word counts as the word itself (ranked just after the exact form).
   const forms=inflections(term).filter(t=>Object.hasOwn(index.terms,t));for(const t of forms)for(const id of index.terms[t])if(!own.has(id))own.set(id,0.5);
-  if(own.size&&!relax)return {kind:forms.length&&!Object.hasOwn(index.terms,term)?'inflection':'exact',...(forms.length&&{inflections:forms}),postings:own};
+  // The same word behind a Hebrew prefix is the word itself when the catalog mostly writes it that way: categories say
+  // "שעונים לנשים", shoppers type "נשים" (which only one product spelled bare). Used only when the prefixed forms cover
+  // more products than the bare word does, so common words ("אדם" / "האדם" in blurbs) keep their precise results.
+  // Only ה/ו/ב/ל (and ו before them): מ/ש/כ are too often the word's own first letter (מספר, שמן).
+  const prefixed=[],extra=new Set();if(hebrew.test(term)&&term.length>=3)for(const base of [term,...forms])for(const p of ATTACHED){const t=p+base;if(Object.hasOwn(index.terms,t)){prefixed.push(t);for(const id of index.terms[t])if(!own.has(id))extra.add(id);}}
+  // A word with no bare form at all keeps the spelling and typo fallbacks below.
+  if(own.size&&extra.size>own.size)for(const id of extra)own.set(id,0.5);else prefixed.length=0;
+  if(own.size&&!relax)return {kind:Object.hasOwn(index.terms,term)?'exact':forms.length?'inflection':'prefixed',...(forms.length&&{inflections:forms}),...(prefixed.length&&{prefixed}),postings:own};
   // A leading ו/ה/ב/ל/מ/ש/כ may be a prefix or part of the word (שליו), so both readings are kept.
   let stem=null;if(hebrew.test(term))for(let s=term,i=0;i<3&&prefixes.test(s)&&s.length>3;i++){s=s.slice(1);if(Object.hasOwn(index.terms,s)){stem=s;break;}}
   const found=[];
