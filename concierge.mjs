@@ -31,6 +31,7 @@ import { ExpiringMap } from './memory-lifecycle.mjs';
    answer about a Hebrew catalog reads worse than a Hebrew one.
 \* =========================================================================== */
 
+import {STEIMATZKY_RESPONSE_POLICY, steimatzkyTurnPolicy, steimatzkyTextOnly, steimatzkyCardAllowed} from './tenants/steimatzky/concierge-response-policy.mjs';
 import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import {createReplyCleaner} from './concierge-script.mjs';
@@ -684,10 +685,13 @@ async function findAlternatives(args, ctx) {
 }
 
 /** Resolve only the products the model explicitly chose for presentation. */
-async function presentProducts(args, ctx) {
+export async function presentProducts(args, ctx) {
   // Cap matches the tool schema (maxItems 25). A lower cap here silently
   // truncated the model's selection no matter what the prompt asked for.
-  const requested = asArray(args.product_ids).map(String).slice(0, 25);
+  const requested = [...new Set(asArray(args.product_ids).map(String).slice(0, 25))];
+  if (isSteimatzky(ctx.store) && requested.some(id => !ctx.shown?.has(id))) {
+    return {products: [], error: "יש לבחור רק מוצרים שנקראו בכלים בהודעה הזאת. מותר גם לסיים בשאלה מבררת או בתשובת שירות בלי כרטיס."};
+  }
   if (!requested.length) return { products: [], error: "יש לבחור לפחות product_id אחד מתוצאות הכלים." };
 
   const collection = await getCollection(ctx);
@@ -704,10 +708,13 @@ async function presentProducts(args, ctx) {
   const byId = new Map();
   const soldOut = [];
   for (const doc of docs) {
-    if (!offeredToShoppers(doc)) continue;
+    if (!offeredToShoppers(doc) || (isSteimatzky(ctx.store) && doc.notInStore === true)) continue;
     const shaped = shapeProduct(doc);
-    if (shaped.in_stock) byId.set(shaped.product_id, shaped);
+    if (shaped.in_stock && (!isSteimatzky(ctx.store) || steimatzkyCardAllowed(shaped, ctx.responsePolicy))) byId.set(shaped.product_id, shaped);
     else soldOut.push(shaped.name);
+  }
+  if (isSteimatzky(ctx.store) && requested.some(id => !byId.has(id))) {
+    return {selected: 0, products: [], error: "הבחירה כוללת מוצר שאינו זמין או שאינו עומד באילוצי הבקשה. אין להציע חלופות שנדחו. בחר התאמות מאומתות בלבד, או סיים בלי כרטיס בשאלה מבררת או בתשובת שירות."};
   }
   const highlights = args.highlights && typeof args.highlights === "object" ? args.highlights : {};
   const names = new Set();
@@ -724,7 +731,9 @@ async function presentProducts(args, ctx) {
   if (!products.length && ctx.shown?.size) {
     return {
       selected: 0, products: [],
-      error: soldOut.length
+      error: isSteimatzky(ctx.store)
+        ? "המוצרים שנבחרו לא אומתו בהודעה הזאת או אינם עומדים באילוצי הבקשה. אין להציג אותם. אם אין התאמה, שאל שאלה מבררת או ענה על השירות בלי כרטיס; אל תציע חלופות שנדחו."
+        : soldOut.length
         ? `אזל מהמלאי ואי אפשר להציג אותו ככרטיס: ${soldOut.slice(0, 3).join(", ")}. אמור בטקסט שהוא אזל, ובחר חלופה מאותו סוג מהרשימה הזו.`
         : "אף אחד מהמזהים האלה לא הוחזר מכלי בשיחה הזו, או שאינו זמין. בחר רק מזהים מהרשימה הזו.",
       choose_from: [...ctx.shown.values()].slice(0, 15),
@@ -849,7 +858,7 @@ function extractProducts(result) {
 
 export function buildSystemPrompt(store) {
   const instructions = typeof store.conciergeInstructions === 'string' ? store.conciergeInstructions.trim() : '';
-  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store) + steimatzkyConciergeInstructions(store) + garminConciergeInstructions(store) + (instructions ? `\n\n## הוראות נוספות של החנות\n${instructions}` : '');
+  return buildBaseSystemPrompt(store) + beauticsConciergeInstructions(store) + steimatzkyConciergeInstructions(store) + (isSteimatzky(store) ? STEIMATZKY_RESPONSE_POLICY : "") + garminConciergeInstructions(store) + (instructions ? `\n\n## הוראות נוספות של החנות\n${instructions}` : '');
 }
 
 function buildBaseSystemPrompt(store) {
@@ -1444,7 +1453,9 @@ async function runTool(block, ctx, onEvent) {
   }
 
   try {
-    const result = await handler(block.input || {}, ctx);
+    const result = isSteimatzky(ctx.store) && block.name === "find_alternatives" && ctx.responsePolicy?.alternativesAllowed === false
+      ? {products: [], error: "הלקוח ביקש בלי חלופות. חפש רק את המוצר המבוקש, או ענה על השירות בלי כרטיס."}
+      : await handler(block.input || {}, ctx);
     rememberShown(ctx, result);
     // Search/detail results are private reasoning material. Rendering them is
     // what previously put unrelated semantic candidates beside a different
@@ -1471,8 +1482,19 @@ async function runTool(block, ctx, onEvent) {
  * keeps the full history — tool_use / tool_result blocks must be replayed
  * verbatim on the next turn.
  */
-async function runAgent({ messages, ctx, onEvent, signal }) {
-  const client = getGemini();
+export async function runAgent({ messages, ctx, onEvent, signal, modelClient }) {
+  if (isSteimatzky(ctx.store)) {
+    ctx.responsePolicy ||= steimatzkyTurnPolicy(ctx.store, {history: messages, message: ctx.message, trigger: ctx.trigger});
+    const reply = steimatzkyTextOnly(ctx.responsePolicy);
+    if (reply) {
+      const usage = {rounds: 0, input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0};
+      messages.push({role: "model", parts: [{text: reply}]});
+      onEvent({type: "text", text: reply});
+      onEvent({type: "done", usage, model: conciergeModelConfig(ctx.store).model});
+      return {stopped: "requested_title_only", usage};
+    }
+  }
+  const client = modelClient || getGemini();
   const { model, thinkingLevel } = conciergeModelConfig(ctx.store);
   const functionDeclarations = toolDefinitions.map(({ name, description, input_schema }) => ({
     name, description, parametersJsonSchema: input_schema,
@@ -1482,7 +1504,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
   let presentedProducts = false;
   // Garmin: a service question (a BuyMe voucher, a manual, when stock returns) is answered in words. Only a turn whose
   // model looked at no products may end without cards; an opening carries its prefetched search, so it never does.
-  const textOnlyAllowed = isGarmin(ctx.store);
+  const textOnlyAllowed = isGarmin(ctx.store) || isSteimatzky(ctx.store);
   let lookedAtProducts = !!ctx.shown?.size;
 
   for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
@@ -1500,7 +1522,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
         tools: [{ functionDeclarations }],
         toolConfig: { functionCallingConfig: presentedProducts
           ? { mode: "NONE" }
-          : round >= FORCE_PRESENT_AFTER_ROUNDS
+          : round >= FORCE_PRESENT_AFTER_ROUNDS && !isSteimatzky(ctx.store)
             ? { mode: "ANY", allowedFunctionNames: ["present_products"] }
             : { mode: "AUTO" } },
         thinkingConfig: { thinkingLevel },
@@ -1590,7 +1612,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
 
     if (toolBlocks.some((block) => ["search_catalog", "get_product", "find_alternatives"].includes(block.name))) lookedAtProducts = true;
     if (!toolBlocks.length) {
-      if (!presentedProducts && (lookedAtProducts || !textOnlyAllowed || !roundText.trim())) {
+      if (!presentedProducts && ((lookedAtProducts && !isSteimatzky(ctx.store)) || !textOnlyAllowed || !roundText.trim())) {
         // Do not expose a text-only recommendation. Give the model another
         // round to explicitly select cards from products already in history.
         // This round's text is being thrown away — tell the client to drop
@@ -1619,6 +1641,9 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
         }
       } catch { /* malformed/failed selection gets corrected in the next round */ }
     }
+    if (isSteimatzky(ctx.store) && roundText.trim() && !justPresented && toolBlocks.some(block => block.name === "present_products")) {
+      onEvent({type: "text_reset"});
+    }
     messages.push({
       role: "user",
       parts: results.map((result) => ({
@@ -1646,7 +1671,7 @@ async function runAgent({ messages, ctx, onEvent, signal }) {
     }
   }
 
-  if (!presentedProducts && ctx.shown?.size) {
+  if (!presentedProducts && ctx.shown?.size && !isSteimatzky(ctx.store)) {
     // Out of rounds without a valid selection: show the best of what the searches found rather than an error.
     const ids = [...ctx.shown.keys()].slice(0, 4);
     const auto = await runTool({ id: "auto_present", name: "present_products", input: { product_ids: ids } }, ctx, onEvent);
@@ -2133,7 +2158,7 @@ export function mountConcierge(app, deps) {
     conversation.messages.push({ role: "user", parts: [{ text: wrapped }] });
     conversation.turns += 1;
 
-    const ctx = { store, deps, trigger: conversation.trigger };
+    const ctx = { store, deps, trigger: conversation.trigger, message };
     if (prefetched) rememberShown(ctx, prefetched);
     const signal = { aborted: false, onAbort: null };
     const recorder = createTurnRecorder({ message: typed, opening, trigger: conversation.trigger });
