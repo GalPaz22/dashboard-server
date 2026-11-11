@@ -8,7 +8,7 @@
 // an error keeps the reply.
 import {cleanReplyText} from './concierge-script.mjs';
 
-const FOREIGN = /[Ͱ-ϿЀ-ӿ؀-ۿݐ-ݿऀ-෿฀-໿぀-ヿ㐀-鿿가-힯]/;
+const FOREIGN = /[\u1200-\u137FͰ-ϿЀ-ӿ؀-ۿݐ-ݿऀ-෿฀-໿぀-ヿ㐀-鿿가-힯]/;
 const MAX_FIXES = 8;
 
 export const PROOFREAD_PROMPT = `אתה מגיה עברית. תקבל תשובה של עוזר מכירות בחנות. מצא בה רק את הפגמים האלה:
