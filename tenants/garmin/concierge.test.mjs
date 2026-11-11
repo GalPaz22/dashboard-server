@@ -36,3 +36,16 @@ test('the Garmin prompt says what to search before claiming the store lacks some
   const prompt = buildSystemPrompt({dbName: 'garmin'});
   for (const rule of ['Cadence Sensor', 'לא מצאתי אותו כרגע באתר', 'QuickFit 26', 'גלישת רוח']) assert.match(prompt, new RegExp(rule));
 });
+
+test('a service search is told apart from a product search', async () => {
+  const {looksLikeGarminServiceQuery, garminServiceOpening} = await import('./concierge.mjs');
+  for (const q of ['טרייד אין', 'Trade in', 'trade-in', 'החלפת סוללה', 'עדכון שעון', 'Nuro brave', 'אחריות', 'שובר BuyMe']) assert.equal(looksLikeGarminServiceQuery(q), true, q);
+  for (const q of ['שעון בהנחה', 'fenix 8', 'רצועת דופק', 'מטען לשעון', 'שעון לריצה', '']) assert.equal(looksLikeGarminServiceQuery(q), false, q);
+  assert.match(garminServiceOpening('טרייד אין'), /אל תאמר שהשירות אינו קיים/);
+});
+
+test('fenix and vivoactive are literal hits on fēnix and vívoactive: the chat stays closed', async () => {
+  const hit = (name) => [{id: '1', name, stockStatus: 'instock'}];
+  assert.equal(await decideTrigger({payload: hit('שעון ספורט fēnix® 8 – 47mm AMOLED'), query: 'Fenix 8 47mm', store: {dbName: 'garmin'}, ctx: {}}), null);
+  assert.equal(await decideTrigger({payload: hit('שעון ספורט - vívoactive® 6 שחור'), query: 'Garmin Vivoactive 6', store: {dbName: 'garmin'}, ctx: {}}), null);
+});
