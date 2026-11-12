@@ -49,3 +49,33 @@ test('fenix and vivoactive are literal hits on fēnix and vívoactive: the chat 
   assert.equal(await decideTrigger({payload: hit('שעון ספורט fēnix® 8 – 47mm AMOLED'), query: 'Fenix 8 47mm', store: {dbName: 'garmin'}, ctx: {}}), null);
   assert.equal(await decideTrigger({payload: hit('שעון ספורט - vívoactive® 6 שחור'), query: 'Garmin Vivoactive 6', store: {dbName: 'garmin'}, ctx: {}}), null);
 });
+
+test('manuals and service tracking are service searches', async () => {
+  const {looksLikeGarminServiceQuery} = await import('./concierge.mjs');
+  for (const q of ['חוברת הדרכה בעברית לשעון גרמן פרו פניקס 9', 'הוראות הפעלה לשעוני GARMIN', 'מדריך למשתמש', 'מעקב שירות']) assert.equal(looksLikeGarminServiceQuery(q), true, q);
+  for (const q of ['מעקב שינה', 'שעון עם מדריך אימונים', 'T2885']) assert.equal(looksLikeGarminServiceQuery(q), false, q);
+});
+
+test('a part number without hyphens is matched against the sku; model names are not', async () => {
+  const {partNumberPattern} = await import('../../concierge.mjs');
+  assert.equal(partNumberPattern('T2885').test('T2885'), true);
+  assert.equal(partNumberPattern('t2885').test('010-13308-00H'), false);
+  assert.equal(partNumberPattern('180001H').test('010-01800-01H'), true);
+  assert.equal(partNumberPattern('0100264514H').test('010-02645-14H'), true);
+  assert.equal(partNumberPattern('02645-14H').test('010-02645-14H'), true); // the ending alone
+  for (const q of ['fenix6', '40mm', '245', 'Forerunner 970', 'HRM-600', 'שעון 12345', '']) assert.equal(partNumberPattern(q), null, q);
+});
+
+test('a model that goes silent is cut: cards already shown close the turn, otherwise one retry', async () => {
+  process.env.CONCIERGE_MODEL_STALL_MS = '40';
+  const {runAgent} = await import('../../concierge.mjs?stall');
+  const silent = (config) => (async function* () { await new Promise((_, reject) => config.abortSignal.addEventListener('abort', () => reject(new Error('This operation was aborted')))); })();
+  const answer = () => (async function* () { yield {candidates: [{finishReason: 'STOP', content: {parts: [{text: 'אין לי את המידע הזה.'}]}}]}; })();
+  let calls = 0;
+  const client = {models: {generateContentStream: async ({config}) => (++calls === 1 ? silent(config) : answer())}};
+  const events = [];
+  const result = await runAgent({messages: [{role: 'user', parts: [{text: 'אחריות'}]}], ctx: {store: {dbName: 'garmin'}, deps: {}}, onEvent: e => events.push(e), modelClient: client});
+  assert.equal(calls, 2);
+  assert.equal(result.stopped, 'STOP');
+  assert.equal(events.filter(e => e.type === 'text').map(e => e.text).join(''), 'אין לי את המידע הזה.');
+});
