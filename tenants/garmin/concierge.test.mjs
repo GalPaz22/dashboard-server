@@ -49,3 +49,9 @@ test('fenix and vivoactive are literal hits on fēnix and vívoactive: the chat 
   assert.equal(await decideTrigger({payload: hit('שעון ספורט fēnix® 8 – 47mm AMOLED'), query: 'Fenix 8 47mm', store: {dbName: 'garmin'}, ctx: {}}), null);
   assert.equal(await decideTrigger({payload: hit('שעון ספורט - vívoactive® 6 שחור'), query: 'Garmin Vivoactive 6', store: {dbName: 'garmin'}, ctx: {}}), null);
 });
+
+test('Garmin instructions cover the cheapest-product question, part numbers and what the concierge cannot do',async()=>{
+  const {garminConciergeInstructions}=await import('./concierge.mjs');
+  const text=garminConciergeInstructions({dbName:'garmin'});
+  for(const must of ['price_asc','מק"ט','Elevate Gen 5','אינך יכול לבדוק מתי מוצר יחזור'])assert.ok(text.includes(must),must);
+});

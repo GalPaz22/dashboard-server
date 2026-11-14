@@ -454,6 +454,22 @@ function passesPostFilters(product, args) {
   return true;
 }
 
+// A query shaped like a part number: letters and digits, maybe hyphens, at least five digits, no spaces.
+const looksLikePartNumber = (query) => /^[A-Za-z0-9-]{6,24}$/.test(query) && (query.match(/\d/g) || []).length >= 5;
+
+// The products whose sku is the query, ignoring hyphens, spaces and case: shoppers type "0100293550H" for 010-02935-50H.
+async function partNumberMatches(ctx, query) {
+  const chars = query.replace(/-/g, "").split("").map((ch) => ch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  const pattern = new RegExp(`^[-\\s]*${chars.join("[-\\s]*")}[-\\s]*$`, "i");
+  try {
+    const collection = await getCollection(ctx);
+    return await collection.find({ sku: pattern, hidden: { $ne: true } }, { projection: PRODUCT_PROJECTION }).limit(5).toArray();
+  } catch (err) {
+    console.warn("[CONCIERGE] part number lookup failed:", err.message);
+    return [];
+  }
+}
+
 export async function searchCatalog(args, ctx) {
   const inStock = args.in_stock !== false;
   const limit = Math.min(Math.max(Number(args.limit) || 12, 1), 25);
@@ -461,6 +477,15 @@ export async function searchCatalog(args, ctx) {
 
   let pool = [];
   let lexicalMatches = 0;
+  // Garmin only: Steimatzky reads ISBNs its own way, and a regex over its 41k rows took seconds.
+  const bySku = query && isGarmin(ctx.store) && looksLikePartNumber(query) ? (await partNumberMatches(ctx, query)).filter(offeredToShoppers) : [];
+  if (bySku.length) {
+    return {
+      query, in_stock_only: inStock, total_matched: bySku.length, returned: bySku.length, lexical_matches: bySku.length,
+      note: "The query is this product's part number (sku); it is the product the shopper asked for.",
+      products: bySku.map((p) => forModel(shapeProduct(p))),
+    };
+  }
 
   if (query) {
     const [text, vector] = await Promise.all([
@@ -523,6 +548,29 @@ export async function searchCatalog(args, ctx) {
   if (args.sort === "price_desc") results.sort((a, b) => (b.price ?? -Infinity) - (a.price ?? -Infinity));
 
   const products = results.slice(0, limit).map((p) => forModel(shapeProduct(p)));
+  // Garmin: a search naming a sold-out model ("Enduro 4") found in-stock rows only through their descriptions ("enduro
+  // riding" bike computers), and the model then called Enduro available. Name the sold-out model and bring its own kind.
+  let soldOutNamed = null;
+  // plain: called from findAlternatives, which this check itself calls; never nest it.
+  if (isGarmin(ctx.store) && inStock && query && !args.plain && !results.some((p) => nameHoldsQuery(p.name, query))) {
+    // Single-character words ("4" in "Enduro 4") decide between models of one line, so they order the matches.
+    const tokens = String(query).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+    const fit = (p) => tokens.filter((t) => String(p.name).toLowerCase().split(/[^\p{L}\p{N}]+/u).includes(t)).length;
+    const named = (await searchCatalog({ ...args, in_stock: false, limit: 6, plain: true }, ctx)).products
+      .filter((p) => p.in_stock === false && nameHoldsQuery(p.name, query)).sort((a, b) => fit(b) - fit(a));
+    if (named.length) {
+      const alike = await findAlternatives({ product_id: named[0].product_id, limit: 8 }, ctx);
+      soldOutNamed = { sold_out: named.slice(0, 3).map(({ product_id, name, price }) => ({ product_id, name, price })), alternatives: alike.products };
+    }
+  }
+  if (soldOutNamed) {
+    return {
+      query, in_stock_only: true, sold_out_named: soldOutNamed.sold_out,
+      note: "The model the shopper named is sold out (sold_out_named) and nothing in stock carries its name: say it is sold out and offer these alternatives of the same kind. Do not say it is available.",
+      total_matched: soldOutNamed.alternatives.length, returned: soldOutNamed.alternatives.length, lexical_matches: lexicalMatches,
+      products: soldOutNamed.alternatives,
+    };
+  }
   return {
     query: query || null,
     in_stock_only: inStock,
@@ -678,7 +726,7 @@ async function findAlternatives(args, ctx) {
   // the free text the model gave us, or the source product's own name.
   const fallbackQuery = args.description || args.name || source?.name || "";
   const search = await searchCatalog(
-    { query: fallbackQuery, in_stock: true, limit, price_max: args.price_max, categories: args.categories },
+    { query: fallbackQuery, in_stock: true, limit, price_max: args.price_max, categories: args.categories, plain: true },
     ctx
   );
   return { based_on: source?.name || fallbackQuery || null, method: "text_similarity", products: search.products };
@@ -1952,6 +2000,16 @@ const PROOFREAD_TIMEOUT_MS = 2500;
 // The finished reply, read again for words that are not Hebrew (concierge-proofread.mjs). Product names the tools
 // returned and the shopper's own words are never "corrected": a title or a typo the shopper made is not ours to fix.
 // Flash-Lite now and then writes its plan into the answer ("הלקוח ביקש השוואה... אבקש ממנו"): those sentences go.
+const FOREIGN_SCRIPT = /[\u0370-\u03FF\u0400-\u04FF\u0600-\u06FF\u0750-\u077F]/gu;
+export function dropForeignLines(text, protectedText = "") {
+  const parts = String(text).split(/(?<=[.!?:)\n])\s+/);
+  const kept = parts.filter((part) => {
+    const letters = (part.match(/\p{L}/gu) || []).length, foreign = (part.match(FOREIGN_SCRIPT) || []).length;
+    return !(letters && foreign / letters > 0.5 && !protectedText.includes(part.trim().replace(/:$/, "")));
+  });
+  return kept.length && kept.length < parts.length ? kept.join(" ") : text;
+}
+
 export function dropPlanning(text) {
   const sentences = String(text).split(/(?<=[.!?:])\s+/);
   const kept = sentences.filter((sentence) => !/(^|[^\p{L}])(ה?לקוח|ה?לקוחה)(?![\p{L}])|אבקש ממנו|אבקש ממנה|אפעיל|`|search_catalog|present_products|get_product|find_alternatives|catalog_facets/u.test(sentence));
@@ -1959,7 +2017,8 @@ export function dropPlanning(text) {
 }
 
 async function proofread(reply, ctx, message) {
-  const withoutPlanning = dropPlanning(reply);
+  const names = [...(ctx.shown?.values() || [])].map((p) => p.name).join("\n");
+  const withoutPlanning = dropForeignLines(dropPlanning(reply), names);
   if (withoutPlanning !== reply) {
     const checked = await proofreadText(withoutPlanning, ctx, message);
     return { ...checked, text: checked.text, changed: true };

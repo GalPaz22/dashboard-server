@@ -41,3 +41,9 @@ test('planning about "the customer" and tool talk never reach the shopper', () =
   assert.equal(dropPlanning('הלקוח ביקש השוואה. אפעיל את `search_catalog` כדי למצוא. איזה שעונים תרצה להשוות?'), 'איזה שעונים תרצה להשוות?');
   assert.equal(dropPlanning('הנה שלושה שעונים מצוינים.'), 'הנה שלושה שעונים מצוינים.');
 });
+
+test('a line in another alphabet that the proofreader cannot translate goes; a product name in one stays', async () => {
+  const {dropForeignLines} = await import('./concierge.mjs');
+  assert.equal(dropForeignLines('הנה הדגמים המתאימים. Позиции для отображения:'), 'הנה הדגמים המתאימים.');
+  assert.equal(dropForeignLines('הספר Мир Дедушки במלאי.', 'Мир Дедушки'), 'הספר Мир Дедушки במלאי.');
+});
