@@ -53,7 +53,7 @@ test('fenix and vivoactive are literal hits on fēnix and vívoactive: the chat 
 test('Garmin instructions cover the cheapest-product question, part numbers and what the concierge cannot do',async()=>{
   const {garminConciergeInstructions}=await import('./concierge.mjs');
   const text=garminConciergeInstructions({dbName:'garmin'});
-  for(const must of ['price_asc','מק"ט','Elevate Gen 5','אינך יכול לבדוק מתי מוצר יחזור'])assert.ok(text.includes(must),must);
+  for(const must of ['price_asc','מק"ט','Elevate Gen 5','אינך יכול לבדוק מתי מוצר יחזור','אל תכתוב "לצד סדרת','"פיניקס" = fēnix'.replace('"פיניקס"','"פניקס" ו"פיניקס"')])assert.ok(text.includes(must),must);
 });
 
 test('compare_products lines up the store specs, keeps sold-out models and skips products off sale', async () => {
