@@ -36,7 +36,7 @@ import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import {createReplyCleaner} from './concierge-script.mjs';
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
-import {garminConciergeInstructions, garminServiceOpening, isGarmin, looksLikeGarminServiceQuery, looksLikeGarminSku} from './tenants/garmin/concierge.mjs';
+import {garminConciergeInstructions, garminServiceOpening, isGarmin, looksLikeGarminServiceQuery, looksLikeGarminSimpleQuery, looksLikeGarminSku} from './tenants/garmin/concierge.mjs';
 import {PROOFREAD_PROMPT, proofreadReply} from './concierge-proofread.mjs';
 import {compareSpecs, specLines} from './concierge-compare.mjs';
 import {identityForSession, linkSessionIdentity} from './session-identity.mjs';
@@ -1334,6 +1334,8 @@ export async function decideTrigger({ payload, query, store, ctx }) {
 
   const products = productsFromPayload(payload);
   if (products === null) return null;
+  // A plain series / model search with something in stock to show never gets a chat, whatever the spelling.
+  if (isGarmin(store) && looksLikeGarminSimpleQuery(query) && products.some((p) => p && productInStock(p))) return null;
   const tenantDecision = beauticsTriggerDecision(payload, store, query);
   if (tenantDecision === 'resolved') return null;
 

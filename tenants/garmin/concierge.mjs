@@ -12,6 +12,23 @@ export function looksLikeGarminSku(query) {
 // טרייד אין" twice, "החלפת סוללה" with "אין אצלנו שירות החלפת סוללות", each followed by unrelated watches.
 // "הנחה" is left out on purpose: "שעון בהנחה" is a product search.
 const SERVICE_QUERY = /טרייד|trade[\s-]?in|החלפת (סוללה|סוללות|בטריה|בטרייה)|עדכון (שעון|תוכנה|גרסה)|תיקון|תקלה|מעבדה|אחריות|שובר|buy\s?me|משלוח|החזרה|החזרת|שירות לקוחות|neuro\s?brave|nuro\s?brave|חבילה טיפולית|תוכנית טיפולים/i;
+// A plain family / model search ("פוראנר", "פיניקס 8", "fenix 8 47mm", "גארמין venu"): the shopper knows what they want and
+// the grid answers it, so the concierge never opens on it, even when the Hebrew spelling does not literally match the
+// English product title. Every word must be a series name (English or a common Hebrew spelling), a model number / size,
+// or a generic word; at least one series name is required. Anything with another word ("שעון לריצה בשטח") is not simple.
+const SERIES = /^(forerunner|fenix|epix|venu|vivoactive|vivosmart|vivomove|vivofit|instinct|enduro|tactix|descent|lily|marq|quatix|edge|approach|index|swim|bounce|varia|fr|פוראנר|פורראנר|פוררנר|פורנר|פורארנר|פוראנרר|פניקס|פיניקס|פנקס|פינקס|אפיקס|ווניו|וניו|ויוואקטיב|וויוואקטיב|ויוסמארט|ויוומוב|אינסטינקט|אינסטינקט|אנדורו|טקטיקס|טקטיקס|דיסנט|ליילי|לילי|מארק|קוואטיקס|אדג|אפרוץ|סוויים|ואריה)$/;
+const GENERIC = /^(garmin|גארמין|גרמין|שעון|שעוני|watch|mm|מ"מ|ממ|plus|pro|solar|sapphire|amoled|music|s|x|x1|xl|lite|דור|דגם|new|חדש|סולאר|ספיר|פרו|פלוס|מיוזיק|סולר)$/;
+export function looksLikeGarminSimpleQuery(query) {
+  const words = String(query || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[®™"'׳״`.,|/()\-–]/g, ' ').split(/\s+/).filter(Boolean);
+  if (!words.length || words.length > 5) return false;
+  let series = false;
+  for (const w of words) {
+    if (SERIES.test(w)) series = true;
+    else if (!(GENERIC.test(w) || /^\d{1,4}[a-z]{0,2}$/.test(w) || /^[a-z]\d{1,3}$/.test(w))) return false;
+  }
+  return series;
+}
 export const looksLikeGarminServiceQuery = query => SERVICE_QUERY.test(String(query || ''));
 
 export function garminServiceOpening(query) {

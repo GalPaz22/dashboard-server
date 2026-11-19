@@ -74,3 +74,11 @@ test('compare_products lines up the store specs, keeps sold-out models and skips
   assert.match((await compareProducts({product_ids: ['1']}, ctx)).error, /2 ל-4/);
   assert.match((await compareProducts({product_ids: ['1', '2']}, {...ctx, store: {dbName: 'steimatzky'}})).error, /אין בחנות/);
 });
+
+test('plain series searches in Hebrew spellings keep the chat closed when something is in stock', async () => {
+  const shown = [{id: '1', name: 'שעון ספורט Forerunner® 970', stockStatus: 'instock'}];
+  for (const query of ['פוראנר', 'פיניקס 8', 'פניקס', 'ויוואקטיב 6', 'garmin venu'])
+    assert.equal(await decideTrigger({payload: shown, query, store: {dbName: 'garmin'}, ctx: {}}), null, query);
+  // Nothing found for a series still gets the chat; other stores are unaffected.
+  assert.equal((await decideTrigger({payload: [], query: 'פוראנר', store: {dbName: 'garmin'}, ctx: {}}))?.reason, 'no_results');
+});
