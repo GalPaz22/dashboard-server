@@ -38,6 +38,13 @@ export function withSaleFromPrice(card){
  const p=Number(card.price),r=Number(card.regularPrice);
  return Number.isFinite(p)&&Number.isFinite(r)&&p>0&&r>p&&card.onSale!==true?{...card,onSale:true}:card;
 }
+// Every product on sale comes before the rest of the same search (each group keeps its own order). Runs on the whole
+// result list before it is paged, so page 2 never holds a sale that page 1 lacks.
+export const isOnSale=p=>p?.onSale===true||withSaleFromPrice(p||{}).onSale===true;
+export function saleFirst(matches){
+ const sale=[],rest=[];for(const p of matches)(isOnSale(p)?sale:rest).push(p);
+ return sale.length&&rest.length?[...sale,...rest]:matches;
+}
 export function mergeLive(cards,rows,profile,tenantId,seen=new Set()){
  const live=new Map(rows.map(r=>{const a=adaptRow(r);return [a.id,a];})),out=[];
  for(const c of cards){const key=String(c.id).split(':').pop(),row=live.get(String(c.id))||live.get(key);if(!row)continue;seen.add(row.id);
@@ -117,7 +124,7 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
   const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
   while(r.nextCursor&&matches.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
-  const attached=request.merchandise?await request.merchandise(matches.map(rt.attach)):matches.map(rt.attach),result={...r,matches:attached,total:attached.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
+  const attached=saleFirst(request.merchandise?await request.merchandise(matches.map(rt.attach)):matches.map(rt.attach)),result={...r,matches:attached,total:attached.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
   return sessions?createSessions(sessions).save(result,limit):{...result,matches:attached.slice(0,limit)};
  };
  // Suggestions while the shopper types: the same edition and live rows as search, answered from the index only.
