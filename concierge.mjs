@@ -297,7 +297,8 @@ function shapeProduct(product) {
     tags: [...new Set([...asArray(product.softCategory), ...asArray(product.tags)])],
     colors: asArray(product.colors),
     type: product.type || null,
-    on_sale: Array.isArray(product.specialSales) && product.specialSales.length > 0,
+    // Garmin carries no specialSales: a live price below the regular price is its sale.
+    on_sale: (Array.isArray(product.specialSales) && product.specialSales.length > 0) || regularPriceOf(product) !== null,
     description: trim(product.description, 500),
     url: product.url || null,
     image: product.image || null,
@@ -550,6 +551,12 @@ export async function searchCatalog(args, ctx) {
 
   if (args.sort === "price_asc") results.sort((a, b) => (a.price ?? Infinity) - (b.price ?? Infinity));
   if (args.sort === "price_desc") results.sort((a, b) => (b.price ?? -Infinity) - (a.price ?? -Infinity));
+
+  // Garmin's November sale: sale products come first among what the search found (a price sort keeps its own order).
+  if (isGarmin(ctx.store) && (!args.sort || args.sort === "relevance")) {
+    const onSale = (p) => regularPriceOf(p) !== null;
+    results = [...results.filter(onSale), ...results.filter((p) => !onSale(p))];
+  }
 
   const products = results.slice(0, limit).map((p) => forModel(shapeProduct(p)));
   // Garmin: a search naming a sold-out model ("Enduro 4") found in-stock rows only through their descriptions ("enduro

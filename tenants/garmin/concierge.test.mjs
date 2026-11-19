@@ -82,3 +82,11 @@ test('plain series searches in Hebrew spellings keep the chat closed when someth
   // Nothing found for a series still gets the chat; other stores are unaffected.
   assert.equal((await decideTrigger({payload: [], query: 'פוראנר', store: {dbName: 'garmin'}, ctx: {}}))?.reason, 'no_results');
 });
+
+test('the Garmin instructions carry the November sale rules', async () => {
+  const {garminConciergeInstructions} = await import('./concierge.mjs');
+  const text = garminConciergeInstructions({dbName: 'garmin'});
+  assert.match(text, /מבצעי נובמבר/);
+  assert.match(text, /on_sale: true/);
+  assert.equal(garminConciergeInstructions({dbName: 'other'}), '');
+});
