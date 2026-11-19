@@ -32,12 +32,18 @@ export function adaptRow(row){
 }
 // Enriched snapshot cards with live commercial fields; new products are processed with the same profile. seen collects
 // the ids of the live rows the cards cover.
+// The snapshot's onSale flag goes stale while price/regularPrice are live: a price below the regular price is a sale
+// (what the store's own cards strike through), whatever the flag says.
+export function withSaleFromPrice(card){
+ const p=Number(card.price),r=Number(card.regularPrice);
+ return Number.isFinite(p)&&Number.isFinite(r)&&p>0&&r>p&&card.onSale!==true?{...card,onSale:true}:card;
+}
 export function mergeLive(cards,rows,profile,tenantId,seen=new Set()){
  const live=new Map(rows.map(r=>{const a=adaptRow(r);return [a.id,a];})),out=[];
  for(const c of cards){const key=String(c.id).split(':').pop(),row=live.get(String(c.id))||live.get(key);if(!row)continue;seen.add(row.id);
-  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];out.push(next);}
+  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];out.push(withSaleFromPrice(next));}
  const client={...profile,tenantId,version:'semantix-mini',publishedStatuses:['ACTIVE','publish']};
- for(const [id,row] of live)if(!seen.has(id))out.push(processProduct(row,client));
+ for(const [id,row] of live)if(!seen.has(id))out.push(withSaleFromPrice(processProduct(row,client)));
  return out;
 }
 // The module's data (approved revision: profile + enriched cards) is published by the studio to the store's own
