@@ -43,9 +43,11 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve,r
  const service=(list,listRetrieve=retrieve)=>createSearchService(list,profile,generate,{...profile.pipeline,maxEntries:10,retrieve:listRetrieve,rankCandidates,hooks});
  let search=service(products);
  let suggestIndex=index,suggestRetrieve=retrieve,prepareProducts=null;
+ let servedList=products,servedIndex=index;
  if(hooks?.has('transformProduct')){let base=search;let ready=null;
   const prepare=()=>ready??=hooks.transformProducts(products).then(list=>{
    suggestIndex=buildSearchIndex(list,profile.version);
+   servedList=list;servedIndex=suggestIndex;
    suggestRetrieve=overrideRetrieve||createIndexRetriever(list,profile,suggestIndex);
    // A long-lived module keeps one catalog: holding the untransformed one too cost Shipi 216 MB of a 1 GB heap (Nov 2026).
    if(releaseBase){products=list;index=suggestIndex;retrieve=suggestRetrieve;base=null;project.productCards=null;}
@@ -53,6 +55,13 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve,r
   }).catch(e=>{hookError='transformProduct: '+e.message;return base;});
   prepareProducts=prepare;
   search=async request=>(await prepare())(request);search.ready=prepare;}
+ // Staff view: the same catalog and index, with sold-out products shown after the in-stock ones. It is built on the first
+ // staff request (a second service over the shared rows, no second catalog) and answers only requests that carry a valid
+ // staff token; every other shopper keeps the published stock policy.
+ let staffProfile=null,staffServing=null,staffSuggest=null;
+ const staffView=()=>staffProfile??={...profile,pipeline:{...profile.pipeline,outOfStock:'last'}};
+ const staffService=async()=>{if(prepareProducts)await prepareProducts();return staffServing??=createSearchService(servedList,staffView(),generate,{...profile.pipeline,outOfStock:'last',maxEntries:10,retrieve:overrideRetrieve||createIndexRetriever(servedList,staffView(),servedIndex),rankCandidates,hooks});};
+ const searchStaff=async request=>(await staffService())(request);
  // Suggestions while the shopper types. The same rules as search decide (the tenant's rewriteQuery function, spelling
  // and linked terms, tag / type / price filters, hidden products and the stock policy, the index's order) — but only
  // from the index: no model call, so it answers in the time of a keystroke. The last word may be unfinished, so the
@@ -60,27 +69,28 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve,r
  // it — the tenant's ranking rules (boost / bury) for the words it was found with — then products whose title carries
  // the typed words come before products that only mention them elsewhere, out-of-stock products go last under that
  // policy, and the tenant's rerank function (if any) has the last word.
- async function suggest(query,{limit=8}={}){
+ async function suggest(query,{limit=8,staff=false}={}){
   if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   let q=typeof query==='string'?query.trim().slice(0,300):'';if(normalize(q).length<2)return {query:q,matches:[],total:0};
   if(prepareProducts)await prepareProducts();
+  const prof=staff?staffView():profile,findRows=staff?(staffSuggest??=overrideRetrieve||createIndexRetriever(servedList,prof,suggestIndex)):suggestRetrieve;
   if(hooks?.has('rewriteQuery'))try{q=String(await hooks.rewriteQuery(q)||q);}catch{}
   // One row per title: catalogs carry the same product under more than one id.
   const seen=new Set(),titles=new Set(),matches=[],applied=new Set();
   const take=(r,words)=>{const ranked=applyRanking(r?.matches||[],profile.rankingRules,words);for(const name of ranked.applied)applied.add(name);
    for(const p of ranked.matches){const t=normalize(p.title);if(seen.has(p.id)||titles.has(t))continue;seen.add(p.id);titles.add(t);matches.push(p);}};
-  const literal=await suggestRetrieve(q);take(literal,q);
+  const literal=await findRows(q);take(literal,q);
   const words=q.split(/\s+/),last=normalize(words.at(-1)),completed=[];
   if(matches.length<limit&&last.length>=2&&!last.includes(' ')){
    const terms=Object.keys(suggestIndex.terms||{}).filter(t=>t!==last&&t.startsWith(last)).sort((a,b)=>suggestIndex.terms[b].length-suggestIndex.terms[a].length||a.localeCompare(b)).slice(0,6);
-   for(const t of terms){if(matches.length>=limit*3)break;const before=matches.length;const full=[...words.slice(0,-1),t].join(' ');take(await suggestRetrieve(full),full);if(matches.length>before)completed.push(t);}
+   for(const t of terms){if(matches.length>=limit*3)break;const before=matches.length;const full=[...words.slice(0,-1),t].join(' ');take(await findRows(full),full);if(matches.length>before)completed.push(t);}
   }
   const typed=normalize(q).split(' ').filter(Boolean),inTitle=p=>{const title=normalize(p.title).split(' ');return typed.every(w=>title.some(t=>t.startsWith(w))||wordMatches(w,title))?1:0;};
   let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
   const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,60)),q);functions.push('rerank');}catch{}
   // Same as search: out-of-stock last is applied after the tenant's function.
   if(!ranked.length&&profile.hookData?.shipiSearchRules?.alwaysResults===true){
-   const candidates=(await suggestRetrieve('')).matches||[],terms=normalize(query).split(' ').filter(t=>t.length>1);
+   const candidates=(await findRows('')).matches||[],terms=normalize(query).split(' ').filter(t=>t.length>1);
    ranked=candidates.map((p,i)=>({p,i,s:terms.reduce((s,t)=>s+(normalize(p.title).includes(t)?1:0),0)})).sort((a,b)=>b.s-a.s||a.i-b.i).slice(0,Math.max(limit*3,60)).map(x=>x.p);
    if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked,q);}catch{}
    if(!ranked.length)ranked=candidates.slice(0,limit);
@@ -90,10 +100,10 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve,r
    const required=q.match(/\bsxguard0[a-z0-9]+\b/g)||[],forbidden=(q.match(/\bsxavoid0[a-z0-9]+\b/g)||[]).map(t=>t.replace(/^sxavoid0/,'sxguard0'));
    ranked=ranked.map(p=>required.some(t=>!(p.tags||[]).includes(t))||forbidden.some(t=>(p.tags||[]).includes(t))?{...p,matchQuality:'alternative',alternativeReason:'הצעה קרובה מהקטלוג; יש לבדוק את הדגם והמאפיינים בכותרת.'}:p);
   }
-  if(stockPolicy(profile)==='last')ranked=stockLast(ranked,q);
+  if(stockPolicy(prof)==='last')ranked=stockLast(ranked,q);
   return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
  }
- return {search,suggest,autocomplete:query=>autocomplete(products,profile,query),get products(){return products;},profile,get index(){return index;},functions:hooks?.names||[],get functionError(){return hookError;}};
+ return {search,searchStaff,suggest,autocomplete:query=>autocomplete(products,profile,query),get products(){return products;},profile,get index(){return index;},functions:hooks?.names||[],get functionError(){return hookError;}};
 }
 export function indexDefinition(profile={}) {
  const fields={name:[{type:'string'},{type:'autocomplete'}],id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'},variants:{type:'document',dynamic:false,fields:{id:{type:'token'},sku:{type:'token'},mpn:{type:'token'},gtin:{type:'token'}}},description:{type:'string'},specifications:{type:'document',dynamic:true},tenantId:{type:'token'},categories:{type:'token'},tags:{type:'token'},colors:{type:'token'},finishes:{type:'token'},productType:{type:'token'},price:{type:'number'},stockStatus:{type:'token'},hidden:{type:'boolean'}};

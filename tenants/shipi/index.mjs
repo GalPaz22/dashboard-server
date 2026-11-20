@@ -1,4 +1,5 @@
 import {createTenantSearch,createRowLoader,manifest} from './search.mjs';
+import {isStaffToken,STAFF_HEADER} from './staff.mjs';
 export {manifest};
 // Same contract as tenants/garmin/routes.mjs: middleware for POST /search and GET /search/load-more.
 // The registry decides whether this tenant answers (control document, rollout, circuit breaker); with onError set, a
@@ -11,12 +12,14 @@ export function storefrontResponse(result,modern=true){
 }
 export function createTenantRoutes({getDb,search=createTenantSearch({loadRows:createRowLoader()}),enabled=req=>{const s=req.store?.semantix;return !!s&&s.module===manifest.slug&&s.enabled===true;},onError=null,onServed=()=>{}}={}){
  const mine=req=>!!manifest.dbName&&req.store?.dbName===manifest.dbName;
+ // Staff (signed-in store employees, token issued by the plugin) also see sold-out products, after the in-stock ones.
+ const staff=req=>isStaffToken(req.get?.(STAFF_HEADER));
  async function send(req,res,next,request,modern,fresh){
   const limit=request.limit===undefined||request.limit===null||request.limit===''?undefined:Number(request.limit);
   if(limit!==undefined&&(!Number.isInteger(limit)||limit<1||limit>50))return res.status(400).json({error:'Invalid limit'});
   if(request.cursor?typeof request.cursor!=='string'||!request.cursor:typeof request.query!=='string'||!request.query.trim()||request.query.length>300)return res.status(400).json({error:'Invalid request'});
-  try{const db=await getDb(manifest.dbName);const result=await search({collection:db.collection(req.store.products||manifest.collection||'products'),sessions:db.collection('semantix_'+manifest.slug.replace(/-/g,'_')+'_sessions'),moduleStore:db.collection('semantix_module'),request:{...request,limit}});
-   res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(result.metadata?.revision??manifest.revision));if(result.nextCursor)res.setHeader('X-Next-Token',manifest.tokenPrefix+result.nextCursor);onServed();return res.json(storefrontResponse(result,modern));}
+  try{const db=await getDb(manifest.dbName);const result=await search({collection:db.collection(req.store.products||manifest.collection||'products'),sessions:db.collection('semantix_'+manifest.slug.replace(/-/g,'_')+'_sessions'),moduleStore:db.collection('semantix_module'),request:{...request,limit,staff:staff(req)}});
+   res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(result.metadata?.revision??manifest.revision));if(staff(req))res.setHeader('Cache-Control','private, no-store');if(result.nextCursor)res.setHeader('X-Next-Token',manifest.tokenPrefix+result.nextCursor);onServed();return res.json(storefrontResponse(result,modern));}
   catch(error){if(error.message==='Search expired; start a new search'||error.message==='Invalid cursor')return res.status(410).json({error:'Search expired; start a new search'});
    console.error('[SEMANTIX '+manifest.slug+']',error.message);
    if(onError){onError(error);if(fresh&&!res.headersSent)return next();}
@@ -31,9 +34,9 @@ export function createTenantRoutes({getDb,search=createTenantSearch({loadRows:cr
   // A query the module has nothing for, or any failure, falls through to the existing autocomplete.
   async autocomplete(req,res,next){if(!mine(req)||!enabled(req)||typeof search.suggest!=='function')return next();
    const query=typeof req.query.query==='string'?req.query.query.trim():'';if(query.length<2||query.length>300)return next();
-   try{const db=await getDb(manifest.dbName),r=await search.suggest({collection:db.collection(req.store.products||manifest.collection||'products'),moduleStore:db.collection('semantix_module'),query,limit:Math.min(Math.max(parseInt(req.query.limit,10)||8,1),24)});
+   try{const db=await getDb(manifest.dbName),r=await search.suggest({collection:db.collection(req.store.products||manifest.collection||'products'),moduleStore:db.collection('semantix_module'),query,limit:Math.min(Math.max(parseInt(req.query.limit,10)||8,1),24),staff:staff(req)});
     if(!r.matches.length)return next();
-    res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(r.revision??manifest.revision));onServed();
+    res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(r.revision??manifest.revision));if(staff(req))res.setHeader('Cache-Control','private, no-store');onServed();
     return res.json(r.matches.map(p=>{const {description,specifications,provenance,issues,badgeCandidates,...rest}=p,name=p.title??p.name;return {...rest,suggestion:name,name,source:'products',author:specifications?.author||rest.author||''};}));}
    catch(error){console.error('[SEMANTIX '+manifest.slug+'] autocomplete',error.message);if(onError)onError(error);return next();}
   },

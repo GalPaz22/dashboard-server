@@ -117,15 +117,15 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=6048000
  const search=async function({collection,sessions,moduleStore,request}){
   const limit=request.limit??(await published(moduleStore)).profile?.pipeline?.pageSize??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
-  const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
-  while(r.nextCursor&&matches.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
+  const rt=await current(collection,moduleStore),run=request.staff===true&&typeof rt.searchStaff==='function'?rt.searchStaff:rt.search;let r=await run({query:request.query,limit:50});const matches=[...r.matches];
+  while(r.nextCursor&&matches.length<500){r=await run({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
   const attached=matches.map(rt.attach),result={...r,matches:attached,total:matches.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
   return sessions?createSessions(sessions).save(result,limit):{...result,matches:attached.slice(0,limit)};
  };
  // Suggestions while the shopper types: the same edition and live rows as search, answered from the index only.
- search.suggest=async({collection,moduleStore,query,limit})=>{
+ search.suggest=async({collection,moduleStore,query,limit,staff=false})=>{
   const rt=await current(collection,moduleStore);if(typeof rt.suggest!=='function')throw Error('Engine has no suggestions; export the module again');
-  const r=await rt.suggest(query,{limit});return {...r,matches:r.matches.map(rt.attach),revision:rt.revision};
+  const r=await rt.suggest(query,{limit,staff});return {...r,matches:r.matches.map(rt.attach),revision:rt.revision};
  };
  return search;
 }

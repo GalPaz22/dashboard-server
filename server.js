@@ -2731,7 +2731,7 @@ app.use(bodyParser.json({ limit: '1mb' }));
 // array) search responses have nowhere else to carry the signal.
 app.use(cors({
   origin: "*",
-  allowedHeaders: ["Content-Type", "X-API-Key", "X-Demo-Db"],
+  allowedHeaders: ["Content-Type", "X-API-Key", "X-Demo-Db", "X-Semantix-Staff"],
   exposedHeaders: ["X-Concierge-Trigger", "X-Concierge-Conversation", "X-Concierge-Display"],
 }));
 
