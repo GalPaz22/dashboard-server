@@ -68,3 +68,14 @@ test('rollout percent: a stable share of visitors, none without a visitor, all a
   assert.equal(conciergeRolloutOpen(store({enabled: true}), visitors[0]), true);
   assert.equal(conciergeRolloutOpen(store(null), visitors[0]), false);
 });
+
+test('spelling variants name the same bottle: קאמפרי finds קמפרי', () => {
+  const rows = [
+    { id: 1, name: 'קמפרי', price: 88, stockStatus: 'instock', url: '/shop/campari' },
+    { id: 2, name: 'קמפרי סודה חמישייה', price: 67, stockStatus: 'instock', url: '/shop/campari-soda' },
+  ];
+  assert.deepEqual(namedRows('קאמפרי', rows).map(r => r.id), [1]);
+  assert.equal(answeredOnScreen('קאמפרי', [{ id: '1', name: 'קמפרי', inStock: true }]), true);
+  assert.equal(answeredOnScreen('קמפרי', [{ id: '1', name: 'קאמפרי', inStock: true }]), true);
+  assert.deepEqual(namedRows('מקאלן', rows), []);
+});

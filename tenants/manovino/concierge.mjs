@@ -39,9 +39,15 @@ const asked = query => words(query).filter(w => !GENERIC.has(w));
 const titleWords = name => words(String(name || '').split('|')[0]).filter(w => !/^(19|20)\d\d$/.test(w) && !GENERIC.has(w));
 
 // Hebrew glues ו/ה/ב/ל/מ/ש/כ onto a word: "והשרדונה" in a title holds the "שרדונה" of a search.
+// Hebrew also spells the same name full or plain: "קאמפרי" and "קמפרי" are one bottle. Compare words with the
+// vowel letters (א ו י) dropped after the first letter and doubled letters folded.
+export const fold = w => {
+  const rest = w.slice(1).replace(/[אויע]/g, '').replace(/(.)\1+/g, '$1');
+  return w.slice(0, 1) + rest;
+};
 const holdsAll = (name, query) => {
-  const own = new Set(titleWords(name).flatMap(w => /^[והבלמשכ]/.test(w) && w.length >= 3 ? [w, w.slice(1)] : [w]));
-  return query.length > 0 && query.every(w => own.has(w) || (/^[והבלמשכ]/.test(w) && own.has(w.slice(1))));
+  const own = new Set(titleWords(name).flatMap(w => /^[והבלמשכ]/.test(w) && w.length >= 3 ? [fold(w), fold(w.slice(1))] : [fold(w)]));
+  return query.length > 0 && query.every(w => own.has(fold(w)) || (/^[והבלמשכ]/.test(w) && own.has(fold(w.slice(1)))));
 };
 
 // What the page says it showed, reduced to ids; stock and names are read from the catalog, not trusted from the page.
