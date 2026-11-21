@@ -31,11 +31,12 @@ export function createTenantRoutes({getDb,merchandise=null,search=createTenantSe
    const fresh=req.body.cursor===undefined,request=fresh?{query:req.body.query,limit:req.body.limit}:{cursor:req.body.cursor,limit:req.body.limit};return send(req,res,next,request,req.body.modern===true||req.body.modern==='true',fresh);},
   // GET /autocomplete — suggestions decided by this module's rules (spelling, linked terms, tags, hidden products,
   // stock policy, the tenant's functions), without a model call. Rows keep the shape the storefront already reads.
-  // A query the module has nothing for, or any failure, falls through to the existing autocomplete.
+  // An intentional empty wine result stays empty so legacy autocomplete cannot reintroduce excluded soaps.
+  // Other empty queries and failures fall through to the existing autocomplete.
   async autocomplete(req,res,next){if(!mine(req)||!enabled(req)||typeof search.suggest!=='function')return next();
    const query=typeof req.query.query==='string'?req.query.query.trim():'';if(query.length<2||query.length>300)return next();
    try{const db=await getDb(manifest.dbName),r=await search.suggest({collection:db.collection(req.store.products||manifest.collection||'products'),moduleStore:db.collection('semantix_module'),query,limit:Math.min(Math.max(parseInt(req.query.limit,10)||8,1),24)});
-    if(!r.matches.length)return next();
+    if(!r.matches.length&&!r.wineAutocomplete)return next();
     res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(r.revision??manifest.revision));onServed();
     return res.json(r.matches.map(p=>{const {description,specifications,provenance,issues,badgeCandidates,...rest}=p,name=p.title??p.name;return {...rest,suggestion:name,name,source:'products',author:specifications?.author||rest.author||''};}));}
    catch(error){console.error('[SEMANTIX '+manifest.slug+'] autocomplete',error.message);if(onError)onError(error);return next();}

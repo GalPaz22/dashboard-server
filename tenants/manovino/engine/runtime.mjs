@@ -45,10 +45,13 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   let q=typeof query==='string'?query.trim().slice(0,300):'';if(normalize(q).length<2)return {query:q,matches:[],total:0};
   if(hooks?.has('rewriteQuery'))try{q=String(await hooks.rewriteQuery(q)||q);}catch{}
+  // Wine wording in a soap's name does not make it a wine suggestion. Keep explicit soap searches intact.
+  const typedWords=normalize(q).split(' '),soapWord=/^(?:[והבמלשכ])?סבו(?:ן|נים|ני)$/;
+  const wineAutocomplete=typedWords.some(w=>w==='יין'||w==='יינות')&&!typedWords.some(w=>soapWord.test(w));
   // One row per title: catalogs carry the same product under more than one id.
   const seen=new Set(),titles=new Set(),matches=[],applied=new Set();
   const take=(r,words)=>{const ranked=applyRanking(r?.matches||[],profile.rankingRules,words);for(const name of ranked.applied)applied.add(name);
-   for(const p of ranked.matches){const t=normalize(p.title);if(seen.has(p.id)||titles.has(t))continue;seen.add(p.id);titles.add(t);matches.push(p);}};
+   for(const p of ranked.matches){const t=normalize(p.title);if(wineAutocomplete&&t.split(' ').some(w=>soapWord.test(w)))continue;if(seen.has(p.id)||titles.has(t))continue;seen.add(p.id);titles.add(t);matches.push(p);}};
   const literal=await retrieve(q);take(literal,q);
   const words=q.split(/\s+/),last=normalize(words.at(-1)),completed=[];
   if(matches.length<limit&&last.length>=2&&!last.includes(' ')){
@@ -59,7 +62,7 @@ export function createDraftRuntime(project,revision,{retrieve:overrideRetrieve}=
   let ranked=matches.map((p,i)=>({p,i,t:inTitle(p)})).sort((a,b)=>b.t-a.t||a.i-b.i).map(x=>x.p);
   if(stockPolicy(profile)==='last')ranked=[...ranked.filter(p=>p.stockStatus==='instock'),...ranked.filter(p=>p.stockStatus!=='instock')];
   const functions=[];if(hooks?.has('rerank')&&ranked.length)try{ranked=await hooks.rerank(ranked.slice(0,Math.max(limit*3,24)),q);functions.push('rerank');}catch{}
-  return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions};
+  return {query:q,matches:ranked.slice(0,limit),total:ranked.length,plan:literal?.plan||null,completed,ranking:[...applied],functions,wineAutocomplete};
  }
  return {search,suggest,autocomplete:query=>autocomplete(products,profile,query),products,profile,index,functions:hooks?.names||[],get functionError(){return hookError;}};
 }
