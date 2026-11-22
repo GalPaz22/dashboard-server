@@ -1,5 +1,5 @@
 import { ExpiringMap } from './memory-lifecycle.mjs';
-import { buildPools, bundleContents, bundleAnswer, pickProblem, poolsFor, validatePick, BUNDLE_PROMPT, BUNDLE_SCHEMA, COUNT_PROMPT, COUNT_SCHEMA } from './tenants/manovino/bundle.mjs';
+import { buildPools, bundleContents, bundleAnswer, arrange, cleanSlots, pickProblem, poolsFor, slotProblem, kindOf, validatePick, BUNDLE_PROMPT, BUNDLE_SCHEMA, PLAN_PROMPT, PLAN_SCHEMA } from './tenants/manovino/bundle.mjs';
 /* =========================================================================== *\
    CONCIERGE — shopper-facing chat, Hebrew only
    ---------------------------------------------------------------------------
@@ -2398,24 +2398,31 @@ export function mountConcierge(app, deps) {
       const ctx = { store: req.store, deps };
       const pools = await manoVinoPools(ctx);
       if (!pools.size) return res.json({ reply: "אין כרגע מבצעי חבילות פעילים.", products: [] });
-      let count = 2;
+      // Stage one: one slot per bottle (type is a rule, region a preference); the deals are narrowed to those that can fill them.
+      let slots = cleanSlots([]);
       try {
-        const counted = await getGemini().models.generateContent({ model: "gemini-3.5-flash-lite", contents: `Request: ${JSON.stringify(message)}${previous?.ids?.length ? `\nPrevious bundle size: ${previous.ids.length}` : ''}`,
-          config: { abortSignal: controller.signal, maxOutputTokens: 40, systemInstruction: COUNT_PROMPT, responseMimeType: "application/json", responseJsonSchema: COUNT_SCHEMA, thinkingConfig: { thinkingLevel: "MINIMAL" } } });
-        count = Math.min(Math.max(Number(JSON.parse(counted.text || "{}").count) || 2, 2), 6);
-      } catch (err) { console.warn("[CONCIERGE] bundle count failed:", err.message); }
-      const offered = poolsFor(pools, count);
+        const lookup = new Map([...pools.values()].flatMap(({ rows }) => rows.map((p) => [String(p.id), p])));
+        const before = previous?.ids?.length ? `\nPrevious bundle: ${previous.ids.map((id) => lookup.get(String(id))).filter(Boolean).map((p) => `${kindOf(p)} (${p.name})`).join('; ')}` : '';
+        const planned = await getGemini().models.generateContent({ model: "gemini-3.5-flash-lite", contents: `Request: ${JSON.stringify(message)}${before}`,
+          config: { abortSignal: controller.signal, maxOutputTokens: 300, systemInstruction: PLAN_PROMPT, responseMimeType: "application/json", responseJsonSchema: PLAN_SCHEMA, thinkingConfig: { thinkingLevel: "MINIMAL" } } });
+        slots = cleanSlots(JSON.parse(planned.text || "{}").slots);
+      } catch (err) { console.warn("[CONCIERGE] bundle plan failed:", err.message); }
+      const offered = poolsFor(pools, slots);
       let picked = null, answer = null, feedback = '';
       for (let attempt = 0; attempt < 3 && !picked; attempt++) {
         const response = await getGemini().models.generateContent({
           model: "gemini-3.5-flash-lite",
-          contents: bundleContents({ message, pools: offered, previous, feedback }),
+          contents: bundleContents({ message, pools: offered, previous, feedback, slots }),
           config: { abortSignal: controller.signal, maxOutputTokens: 1200, systemInstruction: BUNDLE_PROMPT, responseMimeType: "application/json", responseJsonSchema: BUNDLE_SCHEMA, thinkingConfig: { thinkingLevel: "LOW" } },
         });
         answer = JSON.parse(response.text || "{}");
         const key = String(answer.deal || "").replace(/\s+/g, " ").trim();
         picked = validatePick(offered, key, answer.ids);
-        if (!picked) feedback = pickProblem(offered, key, answer.ids);
+        if (picked) {
+          const ordered = arrange(picked.rows, slots);
+          if (ordered) picked = { ...picked, rows: ordered };
+          else { feedback = slotProblem(picked.rows, slots) || "סוגי הבקבוקים לא מתאימים לדרישות"; picked = null; }
+        } else feedback = pickProblem(offered, key, answer.ids);
       }
       if (!picked) return res.json({ reply: "לא הצלחתי להרכיב סט מתאים מתוך המבצעים. נסו לנסח אחרת.", products: [] });
       return res.json(bundleAnswer(picked, answer));

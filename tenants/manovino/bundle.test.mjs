@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { parseDeal, dealOf, buildPools, validatePick, priceBundle, compactRow, bundleAnswer } from './bundle.mjs';
+import { arrange, canFill, cleanSlots, matchesType, poolsFor, parseDeal, dealOf, buildPools, validatePick, priceBundle, compactRow, bundleAnswer } from './bundle.mjs';
 
 const row = (id, price, deal, extra = {}) => ({ id, name: `יין ${id} | המלצה של מנו`, price, image: 'i', url: `https://x/${id}`, stockStatus: 'instock', category: ['יין אדום'], specialSales: deal ? [{ name: deal }] : [], description: 'סוג יין: אדום\nזן ענבים: קברנה\nאזור גיאוגרפי: גליל', ...extra });
 
@@ -38,4 +38,28 @@ test('the price is the deal total, worked out here', () => {
 test('compact row keeps the facts the model needs', () => {
   assert.match(compactRow(row(7, 59, 'שניים ב- 109.9')), /^7\|יין 7\|59\|יין אדום\|אדום; קברנה; גליל/);
   assert.equal(dealOf(row(7, 59, 'שניים ב- 109.9')).n, 2);
+});
+
+const kindRow = (id, kind, deal = 'שניים ב- 149.9') => row(id, 85, deal, { category: [kind] });
+
+test('type is a rule: red slots take red bottles only', () => {
+  assert.equal(matchesType(kindRow(1, 'יין אדום'), 'אדום'), true);
+  assert.equal(matchesType(kindRow(2, 'יין לבן'), 'אדום'), false);
+  assert.equal(matchesType(kindRow(3, 'יין רוזה'), 'כל סוג'), true);
+  assert.equal(matchesType(kindRow(4, 'סאקה'), 'כל סוג'), false);
+  const red = [{ type: 'אדום', region: 'פורטוגל' }, { type: 'אדום', region: 'פורטוגל' }];
+  assert.equal(canFill([kindRow(1, 'יין אדום'), kindRow(2, 'יין לבן')], red), false);
+  assert.equal(canFill([kindRow(1, 'יין אדום'), kindRow(2, 'יין אדום')], red), true);
+});
+
+test('arrange puts the bottles in slot order, or refuses a wrong mix', () => {
+  const slots = [{ type: 'אדום' }, { type: 'רוזה' }];
+  assert.deepEqual(arrange([kindRow(2, 'יין רוזה'), kindRow(1, 'יין אדום')], slots).map(p => p.id), [1, 2]);
+  assert.equal(arrange([kindRow(1, 'יין אדום'), kindRow(3, 'יין לבן')], slots), null);
+});
+
+test('deals that cannot fill the slots are not offered when another can', () => {
+  const pools = buildPools([kindRow(1, 'יין אדום', 'שניים ב- 149.9'), kindRow(2, 'יין לבן', 'שניים ב- 149.9'), kindRow(3, 'יין אדום', 'שניים ב- 109.9'), kindRow(4, 'יין אדום', 'שניים ב- 109.9')].map(p => ({ ...p, price: p.specialSales[0].name.includes('109') ? 59 : 85 })));
+  const offered = poolsFor(pools, cleanSlots([{ type: 'אדום', region: '' }, { type: 'אדום', region: '' }]));
+  assert.deepEqual([...offered.keys()], ['שניים ב-109.9']);
 });
