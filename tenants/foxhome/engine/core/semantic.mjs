@@ -42,6 +42,17 @@ export function createSearchService(products, client, generate, {ttlMs=600000,ma
   // A word found in a large share of the catalog ("of", "the", "של", "books") ranks nothing, it only buries the useful words.
   const commonWords=new Map(),common=t=>{if(commonWords.has(t))return commonWords.get(t);let n=0,hit=false;const max=Math.max(20,visible.length*0.05);for(const p of visible){const x=textOf(p);if((x.title.includes(t)||x.rest.includes(t))&&++n>max){hit=true;break;}}commonWords.set(t,hit);return hit;};
   const route=createLightRouter(products,client,generate,{timeoutMs:routerTimeoutMs});
+  // "70% הנחה", "הנחה של 70%", "מבצע 70%", "עד 70% הנחה": products whose own prices are about that far below the regular price.
+  // Read from the live price and regular price, never from a campaign collection or tag (every product of a Black Friday
+  // collection would answer "70%"). Words besides the discount ("ציפית 70% הנחה") narrow the products first.
+  const discountOf=p=>p.price>0&&p.regularPrice>p.price?(1-p.price/p.regularPrice)*100:0;
+  function discountIntent(q){
+    const text=String(q).replace(/[״"׳']/g,'').replace(/\s+/g,' ').trim();
+    const re=/(?:^|\s)(?:עד\s+)?(\d{1,2})\s*(?:%|אחוז(?:ים)?)\s*(?:הנחה|בהנחה|מבצע|במבצע|off)?(?=\s|$)|(?:^|\s)(?:הנחה|בהנחה|מבצע|במבצע)\s*(?:של\s*)?(?:עד\s*)?(\d{1,2})\s*(?:%|אחוז(?:ים)?)?(?=\s|$)/i;
+    const m=text.match(re);if(!m)return null;
+    const percent=Number(m[1]||m[2]);if(!(percent>=5&&percent<=95))return null;
+    return {percent,rest:text.replace(m[0],' ').replace(/\s+/g,' ').trim()};
+  }
   // "כלי מטבח קרמיקה", "כלי אפייה פורצלן": a department word (a product type or collection holding a big share of the catalog)
   // with one material and nothing else. The department is not a filter then — a ceramic bowl is ceramic kitchenware whichever
   // product type the store files it under — so the model reads every product that names the material and decides which
@@ -272,6 +283,21 @@ ${wantAlternatives?(client.hookData?.catalogSearchRules?.llmOnEmpty===true?'ONLY
     if(cursor){if(query!==undefined||typeof cursor!=='string'||!cursors.has(cursor))throw Error('Invalid cursor');const c=cursors.get(cursor);return page(c.id,c.offset,limit,true);}
     if(typeof query!=='string'||query.length>300)throw Error('Invalid query');
     const asked=query;let rewriteError=null;
+    const sale=discountIntent(asked);
+    if(sale){
+      let pool=visible;
+      if(sale.rest){
+        const found=[];let r=retrieve?await retrieve(sale.rest):search(products,client,{query:sale.rest,limit:50});found.push(...r.matches);let token=r.nextCursor;
+        while(token){const next=search(products,client,{cursor:token,limit:50});found.push(...next.matches);token=next.nextCursor;}
+        const ids=new Set(found.map(p=>p.id));pool=visible.filter(p=>ids.has(p.id));
+      }
+      const matches=pool.map(p=>({p,d:discountOf(p)})).filter(x=>x.d>=sale.percent-1.5)
+        .sort((a,b)=>Math.abs(a.d-sale.percent)-Math.abs(b.d-sale.percent)||(b.p.popularity||0)-(a.p.popularity||0)||a.p.id.localeCompare(b.p.id)).map(x=>x.p);
+      if(matches.length){
+        const key=asked.trim();
+        return page(await store(key,{status:'matched',matches,message:null,total:matches.length,metadata:{mode:'text',phase:'discount',discountPercent:sale.percent,llmUsed:false,llmCalls:0}}),0,limit);
+      }
+    }
     if(hooks?.has('rewriteQuery'))try{query=await hooks.rewriteQuery(query);}catch(e){rewriteError=e.message;}
     const key=query.trim();if(cache.has(key))return page(cache.get(key),0,limit,true);
     if(pending.has(key))return page(await pending.get(key),0,limit,true);
