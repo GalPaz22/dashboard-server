@@ -2376,7 +2376,7 @@ export function mountConcierge(app, deps) {
   async function manoVinoPools(ctx) {
     if (bundlePools.pools && Date.now() - bundlePools.at < 5 * 60 * 1000) return bundlePools.pools;
     const collection = await getCollection(ctx);
-    const rows = await collection.find({ "specialSales.name": /^(שניים|שתיים|שלושה|שלוש|ארבעה|ארבע|חמישה|שישה|\d+) ב-? ?\d/ },
+    const rows = await collection.find({ "specialSales.name": /\d/, stockStatus: "instock" },
       { projection: { id: 1, name: 1, price: 1, image: 1, url: 1, category: 1, description: 1, specialSales: 1, stockStatus: 1, stock_status: 1, hidden: 1, notInStore: 1 } }).toArray();
     bundlePools = { at: Date.now(), pools: buildPools(rows) };
     return bundlePools.pools;

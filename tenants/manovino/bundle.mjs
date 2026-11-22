@@ -4,15 +4,16 @@
 // ids it returns are checked here against that deal's bottles, and the price is worked out here, never by the model.
 const COUNTS = { 'שניים': 2, 'שתיים': 2, 'שלושה': 3, 'שלוש': 3, 'ארבעה': 4, 'ארבע': 4, 'חמישה': 5, 'חמש': 5, 'שישה': 6, 'שש': 6 };
 
-const WORDS = { 2: 'שניים', 3: 'שלושה', 4: 'ארבעה', 5: 'חמישה', 6: 'שישה' };
+const WORDS = { 2: 'שניים', 3: 'שלושה', 4: 'ארבעה', 5: 'חמישה', 6: 'שישה', 7: 'שבעה', 8: 'שמונה' };
 
 // "שניים ב- 109.9" → { key: "שניים ב-109.9", n: 2, total: 109.9 }; unnamed or malformed promotions are not bundle deals.
 export function parseDeal(raw) {
-  const name = String(raw?.name ?? raw ?? '').replace(/\s+/g, ' ').trim();
-  const m = name.match(/^(\S+) ב-? ?(\d+(?:\.\d+)?)$/);
+  // The store names deals "הדילים מהשולחן | 2 ב149.9", "נובמבר סייל | 4-269" or "שניים ב- 109.9": the label before "|" is dropped.
+  const name = String(raw?.name ?? raw ?? '').split('|').pop().replace(/\s+/g, ' ').trim();
+  const m = name.match(/^(\S+?) ?(?:ב ?-?|-) ?(\d+(?:\.\d+)?)$/);
   if (!m) return null;
   const n = COUNTS[m[1]] || (/^\d+$/.test(m[1]) ? Number(m[1]) : 0), total = Number(m[2]);
-  return n > 1 && total > 0 ? { key: `${WORDS[n] || m[1]} ב-${m[2]}`, n, total } : null;
+  return n > 1 && n <= 12 && total > 0 ? { key: `${WORDS[n] || n} ב-${m[2]}`, n, total } : null;
 }
 
 export const dealOf = product => {

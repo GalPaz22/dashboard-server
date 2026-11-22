@@ -63,3 +63,12 @@ test('deals that cannot fill the slots are not offered when another can', () => 
   const offered = poolsFor(pools, cleanSlots([{ type: 'אדום', region: '' }, { type: 'אדום', region: '' }]));
   assert.deepEqual([...offered.keys()], ['שניים ב-109.9']);
 });
+
+test('parseDeal reads every name the store uses', () => {
+  assert.deepEqual(parseDeal({ name: 'הדילים מהשולחן | 2 ב149.9' }), { key: 'שניים ב-149.9', n: 2, total: 149.9 });
+  assert.deepEqual(parseDeal({ name: 'הדילים מהשולחן | 3 ב- 129.9' }), { key: 'שלושה ב-129.9', n: 3, total: 129.9 });
+  assert.deepEqual(parseDeal({ name: 'הדילים מהשולחן | 2 ב109.9 ' }), { key: 'שניים ב-109.9', n: 2, total: 109.9 });
+  assert.deepEqual(parseDeal({ name: '\tנובמבר סייל | 4-269' }), { key: 'ארבעה ב-269', n: 4, total: 269 });
+  assert.deepEqual(parseDeal({ name: '\tנובמבר סייל | 6- 239' }), { key: 'שישה ב-239', n: 6, total: 239 });
+  assert.equal(parseDeal({ name: "בירות ימי ראשון | טוניק ג'ינג'ר ביר ג'ינג'ר אייל  4 ב 36 " }), null);
+});
