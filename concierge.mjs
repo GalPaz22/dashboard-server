@@ -1,4 +1,5 @@
 import { ExpiringMap } from './memory-lifecycle.mjs';
+import { buildPools, bundleContents, bundleAnswer, pickProblem, poolsFor, validatePick, BUNDLE_PROMPT, BUNDLE_SCHEMA, COUNT_PROMPT, COUNT_SCHEMA } from './tenants/manovino/bundle.mjs';
 /* =========================================================================== *\
    CONCIERGE — shopper-facing chat, Hebrew only
    ---------------------------------------------------------------------------
@@ -2362,6 +2363,67 @@ export function mountConcierge(app, deps) {
     } catch (err) {
       console.warn("[CONCIERGE] decide failed:", err.message);
       return res.json({ open: false });
+    }
+  });
+
+  /**
+   * POST /concierge/bundle   (Mano Vino)
+   *   { message, session_id, previous?: { deal, ids } }
+   * Builds a pair or a trio from inside one of the store's bundle deals; see tenants/manovino/bundle.mjs.
+   * Answers { reply, deal, full, total, save, products: [{ product_id, name, price, image, url, why }] }.
+   */
+  let bundlePools = { at: 0, pools: null };
+  async function manoVinoPools(ctx) {
+    if (bundlePools.pools && Date.now() - bundlePools.at < 5 * 60 * 1000) return bundlePools.pools;
+    const collection = await getCollection(ctx);
+    const rows = await collection.find({ "specialSales.name": /^(שניים|שתיים|שלושה|שלוש|ארבעה|ארבע|חמישה|שישה|\d+) ב-? ?\d/ },
+      { projection: { id: 1, name: 1, price: 1, image: 1, url: 1, category: 1, description: 1, specialSales: 1, stockStatus: 1, stock_status: 1, hidden: 1, notInStore: 1 } }).toArray();
+    bundlePools = { at: Date.now(), pools: buildPools(rows) };
+    return bundlePools.pools;
+  }
+
+  app.post("/concierge/bundle", async (req, res) => {
+    if (!requireConcierge(req, res)) return;
+    if (!isManoVino(req.store)) return res.status(404).json({ error: "not_available" });
+    const message = sanitizeShopperText(req.body?.message, 300);
+    if (message.length < 3 || looksLikeGarbage(message)) return res.json({ reply: "ספרו לי מה אתם מחפשים, למשל: שני אדומים לחורף ורוזה אחד מפרובנס.", products: [], rejected: true });
+    const shopper = sanitizeId(req.body?.session_id) || req.ip || "anonymous";
+    const quota = await consumeQuota(deps, `concierge:bundle:${req.store.dbName}:${shopper}`, 20, SHOPPER_WINDOW_SECONDS);
+    if (!quota.allowed) return res.status(429).json({ error: "rate_limited" });
+    const previous = req.body?.previous && typeof req.body.previous === "object"
+      ? { deal: sanitizeShopperText(req.body.previous.deal, 40), ids: (Array.isArray(req.body.previous.ids) ? req.body.previous.ids : []).slice(0, 6).map((id) => sanitizeId(String(id))).filter(Boolean) } : null;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 25000);
+    try {
+      const ctx = { store: req.store, deps };
+      const pools = await manoVinoPools(ctx);
+      if (!pools.size) return res.json({ reply: "אין כרגע מבצעי חבילות פעילים.", products: [] });
+      let count = 2;
+      try {
+        const counted = await getGemini().models.generateContent({ model: "gemini-3.5-flash-lite", contents: `Request: ${JSON.stringify(message)}${previous?.ids?.length ? `\nPrevious bundle size: ${previous.ids.length}` : ''}`,
+          config: { abortSignal: controller.signal, maxOutputTokens: 40, systemInstruction: COUNT_PROMPT, responseMimeType: "application/json", responseJsonSchema: COUNT_SCHEMA, thinkingConfig: { thinkingLevel: "MINIMAL" } } });
+        count = Math.min(Math.max(Number(JSON.parse(counted.text || "{}").count) || 2, 2), 6);
+      } catch (err) { console.warn("[CONCIERGE] bundle count failed:", err.message); }
+      const offered = poolsFor(pools, count);
+      let picked = null, answer = null, feedback = '';
+      for (let attempt = 0; attempt < 3 && !picked; attempt++) {
+        const response = await getGemini().models.generateContent({
+          model: "gemini-3.5-flash-lite",
+          contents: bundleContents({ message, pools: offered, previous, feedback }),
+          config: { abortSignal: controller.signal, maxOutputTokens: 1200, systemInstruction: BUNDLE_PROMPT, responseMimeType: "application/json", responseJsonSchema: BUNDLE_SCHEMA, thinkingConfig: { thinkingLevel: "LOW" } },
+        });
+        answer = JSON.parse(response.text || "{}");
+        const key = String(answer.deal || "").replace(/\s+/g, " ").trim();
+        picked = validatePick(offered, key, answer.ids);
+        if (!picked) feedback = pickProblem(offered, key, answer.ids);
+      }
+      if (!picked) return res.json({ reply: "לא הצלחתי להרכיב סט מתאים מתוך המבצעים. נסו לנסח אחרת.", products: [] });
+      return res.json(bundleAnswer(picked, answer));
+    } catch (err) {
+      console.warn("[CONCIERGE] bundle failed:", err.message);
+      return res.status(502).json({ error: "bundle_failed" });
+    } finally {
+      clearTimeout(timer);
     }
   });
 
