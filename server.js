@@ -3070,6 +3070,7 @@ async function getStoreConfigByApiKey(apiKey) {
       // /concierge/*. The optional settings below are read from the top level
       // first, falling back to credentials.
       conciergeEnabled: userDoc.concierge === true,
+      bundleVisitors: Array.isArray(userDoc.bundleVisitors) ? userDoc.bundleVisitors.slice(0, 50) : [], // Mano Vino sale popup composer, apart from the concierge rollout
       conciergeRollout: userDoc.conciergeRollout || null, // chat beside the results with no search trigger: tenants/steimatzky/concierge.mjs
       conciergeAutoOpen: (userDoc.conciergeAutoOpen ?? userDoc.credentials?.conciergeAutoOpen) !== false, // false → widget shows an invitation pill instead of fading open
       conciergeContext: userDoc.conciergeContext || userDoc.credentials?.conciergeContext || "",          // merchant's own description of the shop, for the system prompt

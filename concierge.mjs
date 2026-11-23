@@ -2383,8 +2383,11 @@ export function mountConcierge(app, deps) {
   }
 
   app.post("/concierge/bundle", async (req, res) => {
-    if (!requireConcierge(req, res)) return;
+    if (!req.store) return res.status(401).json({ error: "Invalid or missing API key" });
     if (!isManoVino(req.store)) return res.status(404).json({ error: "not_available" });
+    // The sale popup's composer has its own list (users.bundleVisitors), apart from the concierge beside the search results.
+    const bundleVisitor = sanitizeId(req.body?.session_id);
+    if (!(bundleVisitor && Array.isArray(req.store.bundleVisitors) && req.store.bundleVisitors.includes(bundleVisitor)) && !requireConcierge(req, res)) return;
     const message = sanitizeShopperText(req.body?.message, 300);
     if (message.length < 3 || looksLikeGarbage(message)) return res.json({ reply: "ספרו לי מה אתם מחפשים, למשל: שני אדומים לחורף ורוזה אחד מפרובנס.", products: [], rejected: true });
     const shopper = sanitizeId(req.body?.session_id) || req.ip || "anonymous";
