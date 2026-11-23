@@ -16,10 +16,14 @@ export function parseDeal(raw) {
   return n > 1 && n <= 12 && total > 0 ? { key: `${WORDS[n] || n} ב-${m[2]}`, n, total } : null;
 }
 
-export const dealOf = product => {
-  for (const sale of Array.isArray(product?.specialSales) ? product.specialSales : []) { const deal = parseDeal(sale); if (deal) return deal; }
-  return null;
+// Every bundle deal a bottle carries (the store's API lists a bottle's promotions in a different order on every call, and a
+// bottle can sit in two: "2 ב149.9" and "4-269").
+export const dealsOf = product => {
+  const seen = new Map();
+  for (const sale of Array.isArray(product?.specialSales) ? product.specialSales : []) { const deal = parseDeal(sale); if (deal && !seen.has(deal.key)) seen.set(deal.key, deal); }
+  return [...seen.values()];
 };
+export const dealOf = product => dealsOf(product)[0] || null;
 
 // Retired rows stay in the catalog under /shop/inactive/.
 export const bundleable = p => p?.hidden !== true && p?.notInStore !== true && Number(p?.price) > 0 && Boolean(p?.image && p?.url && p?.name)
@@ -29,10 +33,12 @@ export const bundleable = p => p?.hidden !== true && p?.notInStore !== true && N
 export function buildPools(products) {
   const pools = new Map();
   for (const p of products || []) {
-    const deal = dealOf(p);
-    if (!deal || !bundleable(p) || deal.n * Number(p.price) <= deal.total) continue;
-    if (!pools.has(deal.key)) pools.set(deal.key, { deal, rows: [] });
-    pools.get(deal.key).rows.push(p);
+    if (!bundleable(p)) continue;
+    for (const deal of dealsOf(p)) {
+      if (deal.n * Number(p.price) <= deal.total) continue;
+      if (!pools.has(deal.key)) pools.set(deal.key, { deal, rows: [] });
+      pools.get(deal.key).rows.push(p);
+    }
   }
   return pools;
 }

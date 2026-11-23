@@ -85,3 +85,11 @@ test('level moves the set to another price tier of the same size', () => {
   assert.deepEqual(keys(tierPools(pools, 'budget')), ['שניים ב-109.9']);
   assert.equal(tierPools(pools, 'same').pools.size, 3);
 });
+
+test('a bottle in two deals is offered in both, whatever order the store lists them', () => {
+  const both = (a, b) => ({ ...row(9, 85, null), specialSales: [{ name: a }, { name: b }] });
+  for (const bottle of [both('הדילים מהשולחן | 2 ב149.9', 'נובמבר סייל | 4-269'), both('נובמבר סייל | 4-269', 'הדילים מהשולחן | 2 ב149.9')]) {
+    const pools = buildPools([bottle]);
+    assert.deepEqual([...pools.keys()].sort(), ['ארבעה ב-269', 'שניים ב-149.9']);
+  }
+});
