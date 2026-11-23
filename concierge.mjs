@@ -1,5 +1,5 @@
 import { ExpiringMap } from './memory-lifecycle.mjs';
-import { buildPools, bundleContents, bundleAnswer, arrange, cleanSlots, pickProblem, poolsFor, slotProblem, kindOf, validatePick, BUNDLE_PROMPT, BUNDLE_SCHEMA, PLAN_PROMPT, PLAN_SCHEMA } from './tenants/manovino/bundle.mjs';
+import { buildPools, bundleContents, bundleAnswer, arrange, cleanSlots, pickProblem, poolsFor, slotProblem, kindOf, validatePick, BUNDLE_PROMPT, BUNDLE_SCHEMA, PLAN_PROMPT, PLAN_SCHEMA, tierPools } from './tenants/manovino/bundle.mjs';
 /* =========================================================================== *\
    CONCIERGE — shopper-facing chat, Hebrew only
    ---------------------------------------------------------------------------
@@ -2402,20 +2402,22 @@ export function mountConcierge(app, deps) {
       const pools = await manoVinoPools(ctx);
       if (!pools.size) return res.json({ reply: "אין כרגע מבצעי חבילות פעילים.", products: [] });
       // Stage one: one slot per bottle (type is a rule, region a preference); the deals are narrowed to those that can fill them.
-      let slots = cleanSlots([]);
+      let slots = cleanSlots([]), level = 'same';
       try {
         const lookup = new Map([...pools.values()].flatMap(({ rows }) => rows.map((p) => [String(p.id), p])));
         const before = previous?.ids?.length ? `\nPrevious bundle: ${previous.ids.map((id) => lookup.get(String(id))).filter(Boolean).map((p) => `${kindOf(p)} (${p.name})`).join('; ')}` : '';
         const planned = await getGemini().models.generateContent({ model: "gemini-3.5-flash-lite", contents: `Request: ${JSON.stringify(message)}${before}`,
           config: { abortSignal: controller.signal, maxOutputTokens: 300, systemInstruction: PLAN_PROMPT, responseMimeType: "application/json", responseJsonSchema: PLAN_SCHEMA, thinkingConfig: { thinkingLevel: "MINIMAL" } } });
-        slots = cleanSlots(JSON.parse(planned.text || "{}").slots);
+        const plan = JSON.parse(planned.text || "{}");
+        slots = cleanSlots(plan.slots);
+        level = typeof plan.level === "string" ? plan.level : 'same';
       } catch (err) { console.warn("[CONCIERGE] bundle plan failed:", err.message); }
-      const offered = poolsFor(pools, slots);
+      const { pools: offered, edge } = tierPools(poolsFor(pools, slots), level, previous?.deal || '');
       let picked = null, answer = null, feedback = '';
       for (let attempt = 0; attempt < 3 && !picked; attempt++) {
         const response = await getGemini().models.generateContent({
           model: "gemini-3.5-flash-lite",
-          contents: bundleContents({ message, pools: offered, previous, feedback, slots }),
+          contents: bundleContents({ message, pools: offered, previous, feedback, slots, level, edge }),
           config: { abortSignal: controller.signal, maxOutputTokens: 1200, systemInstruction: BUNDLE_PROMPT, responseMimeType: "application/json", responseJsonSchema: BUNDLE_SCHEMA, thinkingConfig: { thinkingLevel: "LOW" } },
         });
         answer = JSON.parse(response.text || "{}");

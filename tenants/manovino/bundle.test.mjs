@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { arrange, canFill, cleanSlots, matchesType, poolsFor, parseDeal, dealOf, buildPools, validatePick, priceBundle, compactRow, bundleAnswer } from './bundle.mjs';
+import { arrange, canFill, cleanSlots, matchesType, poolsFor, tierPools, parseDeal, dealOf, buildPools, validatePick, priceBundle, compactRow, bundleAnswer } from './bundle.mjs';
 
 const row = (id, price, deal, extra = {}) => ({ id, name: `יין ${id} | המלצה של מנו`, price, image: 'i', url: `https://x/${id}`, stockStatus: 'instock', category: ['יין אדום'], specialSales: deal ? [{ name: deal }] : [], description: 'סוג יין: אדום\nזן ענבים: קברנה\nאזור גיאוגרפי: גליל', ...extra });
 
@@ -71,4 +71,17 @@ test('parseDeal reads every name the store uses', () => {
   assert.deepEqual(parseDeal({ name: '\tנובמבר סייל | 4-269' }), { key: 'ארבעה ב-269', n: 4, total: 269 });
   assert.deepEqual(parseDeal({ name: '\tנובמבר סייל | 6- 239' }), { key: 'שישה ב-239', n: 6, total: 239 });
   assert.equal(parseDeal({ name: "בירות ימי ראשון | טוניק ג'ינג'ר ביר ג'ינג'ר אייל  4 ב 36 " }), null);
+});
+
+test('level moves the set to another price tier of the same size', () => {
+  const mk = (id, price, name) => ({ ...row(id, price, name), category: ['יין אדום'] });
+  const pools = buildPools([mk(1, 59, 'שניים ב- 109.9'), mk(2, 85, 'שניים ב- 149.9'), mk(3, 130, 'שניים ב- 219')]);
+  const keys = r => [...r.pools.keys()];
+  assert.deepEqual(keys(tierPools(pools, 'up', 'שניים ב-109.9')), ['שניים ב-149.9']);
+  assert.deepEqual(keys(tierPools(pools, 'up', 'שניים ב-149.9')), ['שניים ב-219']);
+  assert.deepEqual(tierPools(pools, 'up', 'שניים ב-219').edge, true);
+  assert.deepEqual(keys(tierPools(pools, 'down', 'שניים ב-149.9')), ['שניים ב-109.9']);
+  assert.deepEqual(keys(tierPools(pools, 'premium')), ['שניים ב-219']);
+  assert.deepEqual(keys(tierPools(pools, 'budget')), ['שניים ב-109.9']);
+  assert.equal(tierPools(pools, 'same').pools.size, 3);
 });
