@@ -3,6 +3,16 @@
 // with a region letter at the end; at least five digits keeps model names like "HRM-600" or "Fenix-8" out.
 export const isGarmin = store => store?.dbName === 'garmin';
 
+// A bare "רצועה לשעון" means a replacement watch band. Hebrew search finds only the
+// "רצועת דופק" and sleep-band products; the bands are catalogued in English under "רצועות".
+export const GARMIN_WATCH_BAND_QUERY = 'QuickFit Watch Bands Quick Release Bands UltraFit Straps רצועות';
+export function garminWatchBandQuery(query) {
+  const q = String(query || '').replace(/["'״׳]/g, '').replace(/\s+/g, ' ').trim();
+  return /^(?:רצועה|רצועות|רצועת)(?: (?:לשעון|לשעונים|להחלפה|חלופית|חלופיות|של שעון|של גארמין|לשעון גרמין|לשעון גארמין))?$/.test(q)
+    || /^(?:רצועה|רצועות) (?:חלופית|להחלפה) לשעון$/.test(q)
+    || /^(?:watch ?bands?|watch straps?|strap|straps|band|bands)$/i.test(q);
+}
+
 export function looksLikeGarminSku(query) {
   const q = String(query || '').trim();
   return /^[A-Z0-9]+(?:-[A-Z0-9]+)+$/i.test(q) && (q.match(/\d/g) || []).length >= 5;
@@ -82,6 +92,10 @@ export function garminConciergeInstructions(store) {
 
 ### אותו סוג מוצר
 מכשיר יד או מכשיר לווייני (inReach Mini, inReach Messenger, GPSMAP 67i, eTrex, Montana): הצע קודם מכשירים כאלה, ורק אחריהם שעון עם inReach. חיישן מהירות או קדנס: חיישנים, לא מד וואטים. מגן מסך: מגני מסך בלבד, לא רצועות במקומו.
+
+### רצועה לשעון (רצועת החלפה)
+"רצועה", "רצועה לשעון", "רצועות", "רצועה להחלפה" או "רצועה חלופית" בלי עוד פרט הן בקשה לרצועת החלפה לשעון, לא לרצועת דופק. חיפוש בעברית מחזיר בעיקר "רצועת דופק" ו"רצועת ניטור שינה" כי רצועות השעון כתובות באנגלית. לכן חפש מיד באנגלית: "QuickFit Watch Bands", "Quick Release Bands" ו-"UltraFit Nylon Straps" (וגם "Titanium Bracelet" למתכת), ורק אחר כך שאל איזה שעון יש ללקוח.
+רצועת דופק (HRM-Pro, HRM 600, HRM-Dual), רצועת ניטור שינה Index ורצועות לצמידי Cirqa/vívosmart אינן רצועת שעון: אל תציג אותן ואל תבסס עליהן את משפט הפתיחה, אלא אם הלקוח ביקש דופק, שינה או צמיד. הצג מבחר מייצג של רצועות שעון במלאי (סיליקון, ניילון, מתכת; כמה רוחבים ומחירים) והסבר שהרוחב תלוי בדגם השעון.
 
 ### רוחב רצועה לפי דגם
 Forerunner, Venu ו-vívoactive משתמשים ברצועות Quick Release Bands; QuickFit מתאימות ל-fēnix, Enduro, quatix, tactix ו-Descent ולא ל-Forerunner.
