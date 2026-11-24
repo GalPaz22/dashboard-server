@@ -37,7 +37,7 @@ import { GoogleGenAI } from "@google/genai";
 import crypto from "crypto";
 import {createReplyCleaner} from './concierge-script.mjs';
 import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from './tenants/beautics/concierge.mjs';
-import {garminConciergeInstructions, garminServiceOpening, isGarmin, looksLikeGarminServiceQuery, looksLikeGarminSimpleQuery, looksLikeGarminSku} from './tenants/garmin/concierge.mjs';
+import {garminConciergeInstructions, garminServiceOpening, isGarmin, looksLikeGarminServiceQuery, looksLikeGarminSimpleQuery, looksLikeGarminSku, garminWatchBandQuery, GARMIN_WATCH_BAND_QUERY} from './tenants/garmin/concierge.mjs';
 import {PROOFREAD_PROMPT, proofreadReply} from './concierge-proofread.mjs';
 import {compareSpecs, specLines} from './concierge-compare.mjs';
 import {identityForSession, linkSessionIdentity} from './session-identity.mjs';
@@ -479,7 +479,8 @@ async function partNumberMatches(ctx, query) {
 export async function searchCatalog(args, ctx) {
   const inStock = args.in_stock !== false;
   const limit = Math.min(Math.max(Number(args.limit) || 12, 1), 25);
-  const query = typeof args.query === "string" ? args.query.trim() : "";
+  const asked = typeof args.query === "string" ? args.query.trim() : "";
+  const query = isGarmin(ctx.store) && garminWatchBandQuery(asked) ? GARMIN_WATCH_BAND_QUERY : asked;
 
   let pool = [];
   let lexicalMatches = 0;

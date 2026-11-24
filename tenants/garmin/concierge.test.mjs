@@ -90,3 +90,11 @@ test('the Garmin instructions carry the November sale rules', async () => {
   assert.match(text, /on_sale: true/);
   assert.equal(garminConciergeInstructions({dbName: 'other'}), '');
 });
+
+test('a bare watch-band query is a replacement band, not a heart-rate strap; other queries are untouched',async()=>{
+  const {garminWatchBandQuery,garminConciergeInstructions}=await import('./concierge.mjs');
+  for(const q of ['רצועה לשעון','רצועה','רצועות','רצועה להחלפה','רצועה חלופית לשעון','רצועה לשעון גארמין','watch band'])assert.equal(garminWatchBandQuery(q),true,q);
+  for(const q of ['רצועת דופק','רצועה Quick Release 20 מ"מ','רצועה ל-Forerunner 265','רצועת ניטור שינה','שעון','רצועה לשעון fenix 8',''])assert.equal(garminWatchBandQuery(q),false,q);
+  const text=garminConciergeInstructions({dbName:'garmin'});
+  for(const must of ['רצועה לשעון (רצועת החלפה)','QuickFit Watch Bands','HRM'])assert.ok(text.includes(must),must);
+});
