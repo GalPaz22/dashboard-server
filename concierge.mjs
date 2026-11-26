@@ -43,6 +43,7 @@ import {compareSpecs, specLines} from './concierge-compare.mjs';
 import {identityForSession, linkSessionIdentity} from './session-identity.mjs';
 import {garminSpecs} from './tenants/garmin/specs.mjs';
 import {alternativesWorthOpening, bookAbout, CLASSIFY_PROMPT, sameAuthor, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
+import {buyable, GAME_DEPARTMENTS, IDENTIFY_PROMPT, IDENTIFY_SCHEMA, namedInReply, notCarriedOpening, similarGames, storeHoldsName} from './tenants/steimatzky/concierge-missing.mjs';
 import {answeredOnScreen, CLASSIFY_PROMPT as MANOVINO_CLASSIFY_PROMPT, heldRows, isManoVino, manoVinoConciergeInstructions, namedRows, shownIds, worthDeciding} from './tenants/manovino/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
@@ -1813,6 +1814,11 @@ export async function runAgent({ messages, ctx, onEvent, signal, modelClient, al
         });
         continue;
       }
+      // The missing-game opening: Flash-Lite sometimes names its picks without calling present_products (1 replay in 3).
+      if (!presentedProducts && !ctx.message && ctx.trigger?.offered_ids) {
+        const ids = namedInReply(roundText, [...(ctx.shown?.values() || [])]).slice(0, 4);
+        if (ids.length) await runTool({ id: "named_present", name: "present_products", input: { product_ids: ids } }, ctx, onEvent);
+      }
       onEvent({ type: "done", usage, model });
       return { stopped: finishReason || "STOP", usage };
     }
@@ -1986,6 +1992,70 @@ async function manoVinoNotCarried(trigger, ctx) {
   return { not_carried: { query: trigger.query, region: profile.region || null, style: profile.grapes || [] }, similar };
 }
 
+const identified = new Map();
+async function identifyProduct(query) {
+  const key = String(query).toLocaleLowerCase("he");
+  if (identified.has(key)) return identified.get(key);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4000);
+  try {
+    const response = await getGemini().models.generateContent({
+      model: "gemini-3.5-flash-lite",
+      contents: `Search: ${JSON.stringify(query)}`,
+      config: {
+        abortSignal: controller.signal, maxOutputTokens: 300, systemInstruction: IDENTIFY_PROMPT,
+        responseMimeType: "application/json", responseJsonSchema: IDENTIFY_SCHEMA, thinkingConfig: { thinkingLevel: "MINIMAL" },
+      },
+    });
+    const answer = JSON.parse(response.text || "{}");
+    if (identified.size >= 500) identified.delete(identified.keys().next().value);
+    identified.set(key, answer);
+    return answer;
+  } catch (err) {
+    console.warn("[CONCIERGE] product identification failed:", err.message);
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Steimatzky's in-stock games and toys (about 1,300 rows). Most have no embedding, so they are ranked here by words.
+// Kept for ten minutes; present_products reads stock again before a card is shown.
+const GAME_SHELF_TTL_MS = 10 * 60 * 1000;
+const gameShelves = new WeakMap();
+async function gameShelf(ctx) {
+  const kept = gameShelves.get(ctx.deps);
+  if (kept && Date.now() - kept.at < GAME_SHELF_TTL_MS) return kept.rows;
+  const collection = await getCollection(ctx);
+  const rows = await collection.find(
+    {
+      hidden: { $ne: true }, notInStore: { $ne: true }, stockStatus: "instock",
+      $or: Object.entries(GAME_DEPARTMENTS).map(([field, values]) => ({ [field]: { $in: values } })),
+    },
+    { projection: { ...PRODUCT_PROJECTION, productTypes: 1, pageCheck: 1 } },
+  ).toArray();
+  gameShelves.set(ctx.deps, { at: Date.now(), rows });
+  return rows;
+}
+
+/** A named game or toy the store holds no row of: what it seems to be and the closest ones on the shelf, else null. */
+async function steimatzkyNotCarried(trigger, ctx) {
+  const candidates = await textCandidates(ctx, trigger.query, { inStock: false });
+  if (storeHoldsName(trigger.query, candidates)) return null;
+  const product = await (ctx.deps.identifyProduct || identifyProduct)(trigger.query);
+  if (!product || (product.kind !== "game" && product.kind !== "toy")) return null;
+  const shelf = await gameShelf(ctx);
+  // A near spelling of a real product ("טאקו") comes from the text search; the subject and play style from the shelf.
+  const near = new Set(candidates.slice(0, 20).map((p) => String(p.id)));
+  const close = shelf.filter((p) => near.has(String(p.id)) && buyable(p)).slice(0, 4);
+  const seen = new Set(close.map((p) => String(p.id)));
+  const similar = [...close, ...similarGames(shelf, product).filter((p) => !seen.has(String(p.id)))].slice(0, 16)
+    .map((p) => { const shaped = shapeProduct(p); return forModel({ ...shaped, description: trim(p.description, 220) }); });
+  if (!similar.length) return null;
+  trigger.offered_ids = similar.map((p) => p.product_id);
+  return { not_carried: { query: trigger.query, kind: product.kind, about: trim(product.about, 120) || null }, similar };
+}
+
 export async function prefetchOpeningSearch(trigger, ctx) {
   if (!trigger?.query) return null;
   try {
@@ -2008,6 +2078,14 @@ export async function prefetchOpeningSearch(trigger, ctx) {
         const same = (byAuthor?.products || []).filter((p) => sameAuthor(book.author, p.author)).slice(0, 8);
         return { sold_out: { name: book.name, author: book.author || null }, same_author: same, similar: alike };
       }
+    }
+    if (isSteimatzky(ctx.store) && (trigger.reason === "alternatives" || trigger.reason === "no_results")) {
+      // The plain search runs beside it, so a missing book (the usual case) waits no longer than before.
+      const [missing, plain] = await Promise.all([
+        steimatzkyNotCarried(trigger, ctx).catch((err) => { console.warn("[CONCIERGE] missing product check failed:", err.message); return null; }),
+        searchCatalog({ query: trigger.query, limit: PREFETCH_LIMIT }, ctx),
+      ]);
+      return missing || plain;
     }
     if (isManoVino(ctx.store) && trigger.reason === "not_carried") {
       const alike = await manoVinoNotCarried(trigger, ctx);
@@ -2076,6 +2154,8 @@ function openingMessage(trigger, prefetched = null) {
   const before = (trigger?.recent || []).filter((q) => q && q !== trigger?.query);
   const earlier = before.length ? `\nבגלישה הזו הלקוח חיפש קודם: ${before.map((q) => `"${q}"`).join(", ")}. זה הקשר בלבד: כשהחיפוש הנוכחי משלים אותם (סגנון, זן או מחיר על אזור שחיפש, למשל "טבעי" אחרי "בורגון"), הצע בקבוקים שעונים על שניהם יחד, בלי לציין שהוא חיפש קודם.` : "";
   const soldOut = prefetched?.sold_out;
+  // Steimatzky's carries the kind of product (game or toy); Mano Vino's below is about bottles.
+  if (prefetched?.not_carried?.kind) return notCarriedOpening(query, prefetched);
   if (prefetched?.not_carried) return `[הודעת פתיחה אוטומטית — הלקוח עדיין לא כתב כלום]
 הלקוח חיפש באתר ${query}: ${query} לא נמצא בחנות (לא במלאי ולא כמוצר שאזל). אמור זאת במשפט אחד וחם, בלי להתנצל יותר מדי, ואז הצע 2–3 חלופות מתוך similar: בקבוקים מאותו אזור, סגנון וטווח מחיר, ולכל אחת משפט אחד למה היא קרובה למה שחיפש (למשל יקב בוטיק מאותו אזור). אל תמציא עובדות על מה שחיפש מעבר ל-not_carried, ואל תציע מוצר שלא ב-similar. אל תזכיר שזו הודעה אוטומטית.
 

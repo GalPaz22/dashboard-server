@@ -28,7 +28,9 @@ export function steimatzkyTurnPolicy(p,{message,history=[],trigger}={}){
  const guide=combined.match(/מדרי(?:ך|כי)\s+טיול(?:ים)?\s+(?:ל)?([א-ת]{3,})(?:\s|$)/u);
  const destination=guide&&!/ישראל|טיול|ילד|ספר|למטייל|מעשי|לימוד|למטפלים|ישראלי/.test(guide[1])?guide[1]:null;
  const restockQuestion=!alternativesAllowed&&/מתי|יחזור|יהיה זמין|חזרה למלאי/u.test(text(message));
- return {alternativesAllowed,query,game,destination,restockQuestion};
+ // The opening about a game the store doesn't hold offers only the games found for it, never a book from a later search.
+ const offered=!message&&trigger?.offered_ids?.length?new Set(trigger.offered_ids.map(String)):null;
+ return {alternativesAllowed,query,game:offered?false:game,destination,restockQuestion,offered};
 }
 export function steimatzkyTextOnly(policy){
  return policy?.restockQuestion?'אין לי מידע מאומת על מועד החזרה של הספר למלאי. לבדיקת זמינות ומועד חזרה אפשר לפנות לשירות הלקוחות של סטימצקי באתר. אשאר עם הספר שביקשת, בלי חלופות.':null;
@@ -43,6 +45,7 @@ export function directlyNamesProduct(query,p){
 export function steimatzkyCardAllowed(p,policy){
  if(!p||p.hidden===true||(p.in_stock !== true && p.stockStatus !== 'instock'))return false;
  if(!policy)return true;
+ if(policy.offered&&!policy.offered.has(String(p.product_id)))return false;
  if(!policy.alternativesAllowed&&!directlyNamesProduct(policy.query,p))return false;
  const hay=text([p.title||p.name,...(p.categories||[]),...(p.tags||[]),p.description||'',p.type||''].join(' '));
  if(policy.game&&!/משחק|\bgame\b/u.test(hay))return false;
