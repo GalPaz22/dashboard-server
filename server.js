@@ -43,6 +43,7 @@ const garminRoutes=createGarminRoutes({getDb:async()=> (await getMongoClient()).
 import {createSemantixTenants} from './tenants/semantix-registry.mjs';
 import {createV2SearchLogger} from './search-logging.mjs';
 import {createLearnedRewrites} from './learned-rewrites.mjs';
+import {startRestockWatch} from './restock-watch.mjs';
 const semantixTenants=createSemantixTenants({getDb:async name=>(await getMongoClient()).db(name),merchandise:merchandiseV2});
 const learnedRewrites=createLearnedRewrites({getDb:async name=>(await getMongoClient()).db(name)});
 
@@ -20472,6 +20473,14 @@ const server = app.listen(PORT, async () => {
   }, 2 * 60 * 1000);
   }
   
+  // Back-in-stock flags on shopper profiles (restock-watch.mjs). Off unless RESTOCK_WATCH_STORES lists store databases.
+  startRestockWatch({
+    stores: process.env.RESTOCK_WATCH_STORES,
+    getDb: async name => (await getMongoClient()).db(name),
+    productsCollection: async name => (await (await getMongoClient()).db('users').collection('users')
+      .findOne({ dbName: name, 'collections.products': { $type: 'string' } }, { projection: { 'collections.products': 1 } }))?.collections.products || 'products',
+  });
+
   // 🎯 MEMORY MANAGEMENT: Monitor and log memory usage every 30 minutes
   setInterval(() => {
     const memUsage = process.memoryUsage();
