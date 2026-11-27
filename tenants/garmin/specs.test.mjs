@@ -70,3 +70,37 @@ test('specLines give a product its key specs for questions about it', () => {
   assert.equal(lines[0], 'גודל השעון: 42 מ"מ');
   assert.equal(lines.length, 6);
 });
+
+const sheet = (name, more = {}) => ({ name, attributes: Object.entries({ 'דגם': 'Venu® 3', 'קוטר': '45x45x12 מ"מ', 'משקל': '46 גרם', 'מתאים להיקף יד': '135-200 מ"מ',
+  'גודל מסך תצוגה': '1.4"', 'תאימות לסוג רצועה': 'Quick Release 22mm', 'מה בערכה': 'שעון ספורט חכם Venu 3', 'דירוג עמידות למים': '5ATM', ...more })
+  .map(([n, v]) => ({ name: n, options: [v] })) });
+
+test('the Venu 4 sheets the store copied from Venu 3 are replaced by the maker\'s figures', async () => {
+  const { compareSpecs } = await import('../../concierge-compare.mjs');
+  const { correctDescription } = await import('./spec-corrections.mjs');
+  const table = compareSpecs([sheet('Venu® 4 (41mm) - Bone'), sheet('Venu® 4 | 45mm - Black')], garminSpecs);
+  const row = (key) => table.rows.find((r) => r.key === key).values;
+  assert.deepEqual(row('size'), ['41 מ"מ', '45 מ"מ']);
+  assert.deepEqual(row('display_size'), ['1.2"', '1.4"']);
+  assert.deepEqual(row('band_fit'), ['Quick Release 18mm', 'Quick Release 22mm']);
+  assert.deepEqual(row('wrist_fit'), ['110-175 מ"מ', '135-200 מ"מ']);
+  assert.deepEqual(row('battery_smart'), ['עד 10 ימים', 'עד 12 ימים']);
+  assert.deepEqual(row('model'), ['Venu 4', 'Venu 4']);
+  assert.ok(row('in_box').every((v) => v.includes('Venu 4')));
+  assert.equal(correctDescription('Venu 4 (45mm)', 'מסך בגודל 1.2 אינץ’, עד 10 ימים'), 'מסך בגודל 1.4 אינץ’, עד 12 ימים');
+  assert.equal(correctDescription('Venu 3 | 45mm', 'מסך 1.4 אינץ'), 'מסך 1.4 אינץ');
+});
+
+test('a sheet that states another size than the title keeps nothing that depends on size', async () => {
+  const { compareSpecs } = await import('../../concierge-compare.mjs');
+  const { correctSheet } = await import('./spec-corrections.mjs');
+  const wrong = sheet('שעון ספורט fēnix® 8 – 51mm Sapphire', { 'קוטר': '47x47x15.2 מ"מ' });
+  const table = compareSpecs([wrong, sheet('Venu® 3 | 45mm')], garminSpecs);
+  const first = (key) => table.rows.find((r) => r.key === key)?.values[0];
+  assert.equal(first('size'), '51 מ"מ');
+  for (const key of ['dimensions', 'weight', 'wrist_fit', 'display_size', 'band_fit']) assert.equal(first(key), null, key);
+  assert.equal(first('water'), '5ATM');
+  assert.match(correctSheet(wrong).specNote, /47/);
+  const right = sheet('Venu® 3 | 45mm', { 'קוטר': '45.4x45.4x11 מ"מ' });
+  assert.equal(correctSheet(right), right);
+});

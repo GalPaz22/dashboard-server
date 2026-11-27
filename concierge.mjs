@@ -40,6 +40,8 @@ import {beauticsConciergeInstructions, beauticsTriggerDecision, isBeautics} from
 import {garminConciergeInstructions, garminServiceOpening, isGarmin, looksLikeGarminServiceQuery, looksLikeGarminSimpleQuery, looksLikeGarminSku, garminWatchBandQuery, GARMIN_WATCH_BAND_QUERY} from './tenants/garmin/concierge.mjs';
 import {PROOFREAD_PROMPT, proofreadReply} from './concierge-proofread.mjs';
 import {compareSpecs, specLines} from './concierge-compare.mjs';
+import {correctDescription} from './tenants/garmin/spec-corrections.mjs';
+import {parseBandQuery, bandsFor, bandSpec, isWatchBand} from './tenants/garmin/search-guard.mjs';
 import {identityForSession, linkSessionIdentity} from './session-identity.mjs';
 import {garminSpecs} from './tenants/garmin/specs.mjs';
 import {alternativesWorthOpening, bookAbout, CLASSIFY_PROMPT, sameAuthor, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
@@ -304,7 +306,7 @@ function shapeProduct(product) {
     type: product.type || null,
     // Garmin carries no specialSales: a live price below the regular price is its sale.
     on_sale: (Array.isArray(product.specialSales) && product.specialSales.length > 0) || regularPriceOf(product) !== null,
-    description: trim(product.description, 500),
+    description: trim(correctDescription(product.name, product.description), 500),
     url: product.url || null,
     image: product.image || null,
   };
@@ -484,6 +486,39 @@ async function partNumberMatches(ctx, query) {
   }
 }
 
+// A band for a named watch comes from the compatibility table (tenants/garmin/search-guard.mjs), not from similarity:
+// with no 22mm band in stock the model offered a 20mm one for the 45mm Venu 4 and said that was its width (26.11).
+async function garminCompatibleBands(asked, args, ctx) {
+  // The model searches bands by product line ("QuickFit Watch Bands …"), without the watch: the watch the shopper
+  // named, in this message or in the search that opened the chat, decides which of them are offered.
+  const search = parseBandQuery(asked);
+  if (!search) return null;
+  // A sentence carries other words ("איזו רצועה מתאימה ל-Venu 4 שלי?"); the watch it names is what counts here.
+  const wanted = [search, parseBandQuery(ctx.message), parseBandQuery(ctx.trigger?.query)].find((w) => w?.family);
+  if (!wanted) return null;
+  const fits = bandsFor(wanted);
+  if (!fits) return null;
+  const collection = await getCollection(ctx);
+  const rows = await collection.find({ name: /רצועה|רצועת|quickfit|quick release|ultrafit|lily/i, hidden: { $ne: true } }, { projection: PRODUCT_PROJECTION }).limit(400).toArray();
+  const compatible = rows.filter((p) => offeredToShoppers(p) && passesPostFilters(p, { ...args, categories: [], tags: [] })
+    && isWatchBand({ title: p.name, categories: [...asArray(p.category), ...asArray(p.categories)].map((c) => String(c?.name ?? c)) })
+    && fits.some(([system, width]) => { const s = bandSpec(p.name); return s.system === system && s.width === width && (!wanted.width || width === wanted.width); }));
+  const inStock = compatible.filter(productInStock), soldOut = compatible.filter((p) => !productInStock(p));
+  const shown = (args.in_stock === false ? [...inStock, ...soldOut] : inStock).slice(0, Math.min(Math.max(Number(args.limit) || 12, 1), 25));
+  const widths = (list) => [...new Set(list.map((p) => bandSpec(p.name).width))];
+  const system = { quickrelease: "Quick Release", quickfit: "QuickFit", lily: "Lily" };
+  const sizes = wanted.family === "venu" && wanted.model === "4" && !wanted.size ? " Venu 4 41mm takes 18mm only; Venu 4 45mm takes 22mm only." : "";
+  // Nothing that fits is on the shelf: the turn may end in words, without a card of another width.
+  if (!inStock.length) ctx.noFittingStock = true;
+  return {
+    query: asked, in_stock_only: args.in_stock !== false, total_matched: shown.length, returned: shown.length, lexical_matches: shown.length,
+    note: `Bands that fit this watch: ${fits.map(([s, w]) => `${system[s]} ${w}mm`).join(", ")}.${sizes} Never offer another width or say another width fits. ` +
+      `In stock now: ${widths(inStock).join(", ") || "none"}. Sold out: ${widths(soldOut).filter((w) => !widths(inStock).includes(w)).join(", ") || "none"} (say it is sold out, do not substitute).` +
+      (inStock.length ? "" : " No fitting band is in stock: answer in one or two sentences without cards and do not search for other bands."),
+    products: shown.map((p) => forModel(shapeProduct(p))),
+  };
+}
+
 export async function searchCatalog(args, ctx) {
   const inStock = args.in_stock !== false;
   const limit = Math.min(Math.max(Number(args.limit) || 12, 1), 25);
@@ -512,6 +547,11 @@ export async function searchCatalog(args, ctx) {
         products: listed.slice(0, limit).map((p) => forModel(shapeProduct(p))),
       };
     }
+  }
+
+  if (asked && isGarmin(ctx.store)) {
+    const bands = await garminCompatibleBands(asked, args, ctx);
+    if (bands) return bands;
   }
 
   if (query) {
@@ -701,7 +741,8 @@ async function getProduct(args, ctx) {
 
   return {
     found: true,
-    product: forModel({ ...shapeProduct(product), description: trim(product.description, 1600), ...(specs.length ? { specs } : {}) }),
+    product: forModel({ ...shapeProduct(product), description: trim(correctDescription(product.name, product.description), 1600), ...(specs.length ? { specs } : {}),
+      spec_note: schema?.correct?.(product).specNote }),
   };
 }
 
@@ -749,12 +790,14 @@ export async function compareProducts(args, ctx) {
   const cards = products.map((p) => cardForProduct(shapeProduct(p)));
   ctx.comparison = { products: cards, ...table };
   const keyRow = (r) => ({ label: r.label, values: r.values.map((v) => v ?? "לא צוין במפרט") });
+  const specNotes = products.map((p) => ({ name: p.name, note: schema.correct?.(p).specNote })).filter((n) => n.note);
   return {
+    ...(specNotes.length ? { spec_notes: specNotes } : {}),
     compared: cards.map(({ product_id, name, price, in_stock }) => ({ product_id, name, price, in_stock })),
     differences: table.rows.filter((r) => r.differs).map(keyRow),
     same_key_specs: table.rows.filter((r) => !r.differs && schema.summaryOrder.includes(r.key)).map((r) => ({ label: r.label, value: r.values[0] })),
     note: "The shopper already sees this table under your answer. Write 2-4 sentences: the differences that decide between them and who each one suits. " +
-      "Use only these specs; \"לא צוין במפרט\" means the store does not list it, not that the product lacks it.",
+      "Use only these specs; \"לא צוין במפרט\" means the store does not list it, not that the product lacks it. Never call one product better on a spec the other does not list.",
   };
 }
 
@@ -1864,7 +1907,7 @@ export async function runAgent({ messages, ctx, onEvent, signal, modelClient, al
 
     if (toolBlocks.some((block) => ["search_catalog", "get_product", "find_alternatives"].includes(block.name))) lookedAtProducts = true;
     if (!toolBlocks.length) {
-      if (!presentedProducts && ((lookedAtProducts && !isSteimatzky(ctx.store)) || !textOnlyAllowed || !roundText.trim())) {
+      if (!presentedProducts && ((lookedAtProducts && !isSteimatzky(ctx.store) && !ctx.noFittingStock) || !textOnlyAllowed || !roundText.trim())) {
         // Do not expose a text-only recommendation. Give the model another
         // round to explicitly select cards from products already in history.
         // This round's text is being thrown away — tell the client to drop

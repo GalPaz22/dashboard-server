@@ -4,6 +4,8 @@
 // it (most used first), mapped once from the 762 names in garmin.products (Nov 2026). An attribute not listed is shown
 // under "more specs" with its own name. A new attribute name the store adds lands there until it is mapped here.
 
+import { correctSheet } from './spec-corrections.mjs';
+
 export const GROUPS = {
   build: 'מבנה ועיצוב', display: 'מסך', battery: 'סוללה', navigation: 'ניווט ו-GPS', health: 'בריאות',
   training: 'אימון וספורט', smart: 'פיצ׳רים חכמים', outdoor: 'שטח ובטיחות', general: 'כללי',
@@ -172,4 +174,4 @@ export function modelKey(name) {
   return text.slice(start).split(/\s*[|\-–(]\s*/)[0].replace(/\s+/g, ' ').trim().toLowerCase() || null;
 }
 
-export const garminSpecs = { groups: GROUPS, fields: FIELDS, sources: ATTRIBUTE_SOURCES, summaryOrder: SUMMARY_ORDER, inheritable: INHERITABLE, modelKey };
+export const garminSpecs = { groups: GROUPS, fields: FIELDS, sources: ATTRIBUTE_SOURCES, summaryOrder: SUMMARY_ORDER, inheritable: INHERITABLE, modelKey, correct: correctSheet };

@@ -44,6 +44,8 @@ const pixels = (text) => {
  * value is a number for number/water/resolution fields, true/false for bool fields, else null.
  */
 export function readSpecs(product, schema, sibling = null) {
+  // The store's own corrections first (schema.correct): a sheet copied from another model or size is fixed or trimmed.
+  if (schema.correct) product = schema.correct(product);
   const byName = new Map();
   for (const attribute of product?.attributes || []) {
     const name = clean(attribute?.name);

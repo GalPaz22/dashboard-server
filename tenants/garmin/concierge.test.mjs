@@ -98,3 +98,19 @@ test('a bare watch-band query is a replacement band, not a heart-rate strap; oth
   const text=garminConciergeInstructions({dbName:'garmin'});
   for(const must of ['רצועה לשעון (רצועת החלפה)','QuickFit Watch Bands','HRM'])assert.ok(text.includes(must),must);
 });
+
+test('a band search for a named watch offers only the widths that fit, and says when none is on the shelf', async () => {
+  const {searchCatalog} = await import('../../concierge.mjs');
+  const band = (id, name, stockStatus = 'instock') => ({_id: id, id, name, price: 149, status: 'publish', stockStatus, category: ['רצועות לשעון גרמין']});
+  const rows = [band('18', 'רצועה Quick Release Bands (18 mm)'), band('20', 'רצועה Quick Release Bands (20 mm)'), band('22', 'רצועה Quick Release Bands (22 mm)', 'outofstock')];
+  const collection = {find: () => ({limit: () => ({toArray: async () => rows})})};
+  const ctx = (message) => ({store: {dbName: 'garmin', products: 'products'}, message, trigger: {}, deps: {getMongoClient: async () => ({db: () => ({collection: () => collection})})}});
+  // The model searches by product line; the watch comes from the shopper's sentence.
+  const found = await searchCatalog({query: 'Quick Release Bands'}, ctx('איזו רצועה מתאימה לשעון Venu 4 שלי?'));
+  assert.deepEqual(found.products.map((p) => p.product_id), ['18']);
+  assert.match(found.note, /22mm/);
+  const asked = ctx('רצועה ל Venu 4 45');
+  const none = await searchCatalog({query: 'Venu 4 45 band'}, asked);
+  assert.deepEqual(none.products, []);
+  assert.equal(asked.noFittingStock, true);
+});

@@ -5,6 +5,7 @@ import {createDraftRuntime} from './engine/runtime.mjs';
 import {processProduct} from './engine/core/core.mjs';
 import {hash} from './engine/core/hash.mjs';
 import {createSessions} from './sessions.mjs';
+import {guardGarminSearch} from '../garmin/search-guard.mjs';
 const read=name=>JSON.parse(readFileSync(new URL(name,import.meta.url),'utf8'));
 export const manifest=read('./semantix.module.json');
 const LIVE=["price","regularPrice","stockStatus","hidden","status","url","image"];
@@ -22,7 +23,7 @@ export function withSource(rows){
 }
 // A merchant Mongo row in the engine's raw shape (as the studio imports existing clients).
 export function adaptRow(row){
- return {id:String(row.id??row._id),name:row.name||row.title||'',sku:String(row.sku||''),url:row.url||row.permalink,image:row.image||row.images?.[0]?.src||row.images?.[0]||null,
+ return {id:String(row.id??row._id),name:row.name||row.title||'',sku:String(row.sku||''),raw:{sku:String(row.sku||'')},url:row.url||row.permalink,image:row.image||row.images?.[0]?.src||row.images?.[0]||null,
   price:number(row.price),regularPrice:number(row.regularPrice??row.regular_price),currency:row.currency||null,
   stockStatus:row.stockStatus||row.stock_status||'unknown',status:row.status||'ACTIVE',
   // Hidden as the studio imports it: the store's own flag, "not in store", or a catalog visibility of "hidden".
@@ -114,7 +115,7 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
   // Rows slimmed against an earlier edition that this one does not carry are read again in full.
   if(loadRows.reload&&uncovered(s.productCards,rows))rows=await loadRows.reload(collection);
   const seen=new Set(),cards=mergeLive(s.productCards,rows,e.profile,manifest.tenantId,seen);
-  const next=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile});
+  const next=createDraftRuntime({id:manifest.tenantId,url:manifest.url,platform:manifest.platform,productCards:cards,productCardsProfileHash:hash(e.profile),storeContext:s.storeContext,tagAssignments:s.tagAssignments,studioVectors:s.studioVectors,catalog:{products:[]}},{number:e.revision,profile:e.profile},{strictAlternatives:true});
   next.revision=e.revision;next.attach=withSource(rows);runtime=next;fingerprint=e.digest+':'+rowsPrint(rows);builtDigest=e.digest;builtAt=now();covered=seen;delete e.snapshot;
   if(loadRows.reload)compact(rows,seen);
  }
@@ -122,8 +123,11 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
  const search=async function({collection,sessions,moduleStore,request}){
   const limit=request.limit??(await published(moduleStore)).profile?.pipeline?.pageSize??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
-  const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
-  while(r.nextCursor&&matches.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
+  const rt=await current(collection,moduleStore);
+  const engine=async()=>{let r=await rt.search({query:request.query,limit:50});const all=[...r.matches];
+   while(r.nextCursor&&all.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});all.push(...r.matches);}return {...r,matches:all};};
+  // Service questions, part numbers and watch bands have rules of their own (tenants/garmin/search-guard.mjs).
+  const r=await guardGarminSearch({query:request.query,products:rt.products,profile:rt.profile,engine}),matches=r.matches;
   const attached=saleFirst(request.merchandise?await request.merchandise(matches.map(rt.attach)):matches.map(rt.attach)),result={...r,matches:attached,total:attached.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
   return sessions?createSessions(sessions).save(result,limit):{...result,matches:attached.slice(0,limit)};
  };
