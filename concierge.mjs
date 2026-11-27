@@ -45,7 +45,8 @@ import {parseBandQuery, bandsFor, bandSpec, isWatchBand} from './tenants/garmin/
 import {identityForSession, linkSessionIdentity} from './session-identity.mjs';
 import {garminSpecs} from './tenants/garmin/specs.mjs';
 import {alternativesWorthOpening, bookAbout, CLASSIFY_PROMPT, sameAuthor, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
-import {buyable, GAME_DEPARTMENTS, IDENTIFY_PROMPT, IDENTIFY_SCHEMA, namedInReply, notCarriedOpening, similarGames, storeHoldsName} from './tenants/steimatzky/concierge-missing.mjs';
+import {buyable, GAME_DEPARTMENTS, IDENTIFY_PROMPT, IDENTIFY_SCHEMA, notCarriedOpening, similarGames, storeHoldsName} from './tenants/steimatzky/concierge-missing.mjs';
+import {namedInReply} from './tenants/steimatzky/concierge-cards.mjs';
 import {storePrice} from './tenants/steimatzky/pricing.mjs';
 import {createSalesRank, GAMES_OFFER, parseSaleQuery, saleBadgeValues, saleListing} from './tenants/steimatzky/sale.mjs';
 import {answeredOnScreen, CLASSIFY_PROMPT as MANOVINO_CLASSIFY_PROMPT, heldRows, isManoVino, manoVinoConciergeInstructions, namedRows, shownIds, worthDeciding} from './tenants/manovino/concierge.mjs';
@@ -905,7 +906,7 @@ async function findAlternatives(args, ctx) {
 }
 
 /** Resolve only the products the model explicitly chose for presentation. */
-export async function presentProducts(args, ctx) {
+export async function presentProducts(args, ctx, {partial = false} = {}) {
   // Cap matches the tool schema (maxItems 25). A lower cap here silently
   // truncated the model's selection no matter what the prompt asked for.
   const requested = [...new Set(asArray(args.product_ids).map(String).slice(0, 25))];
@@ -933,7 +934,8 @@ export async function presentProducts(args, ctx) {
     if (shaped.in_stock && (!isSteimatzky(ctx.store) || steimatzkyCardAllowed(shaped, ctx.responsePolicy))) byId.set(shaped.product_id, shaped);
     else soldOut.push(shaped.name);
   }
-  if (isSteimatzky(ctx.store) && requested.some(id => !byId.has(id))) {
+  // partial: cards for the books a reply already names; one that can't be shown doesn't take the others with it.
+  if (isSteimatzky(ctx.store) && !partial && requested.some(id => !byId.has(id))) {
     return {selected: 0, products: [], error: "הבחירה כוללת מוצר שאינו זמין או שאינו עומד באילוצי הבקשה. אין להציע חלופות שנדחו. בחר התאמות מאומתות בלבד, או סיים בלי כרטיס בשאלה מבררת או בתשובת שירות."};
   }
   const highlights = args.highlights && typeof args.highlights === "object" ? args.highlights : {};
@@ -1771,6 +1773,20 @@ async function runTool(block, ctx, onEvent) {
   }
 }
 
+// Steimatzky: the books a reply names, out of those this turn read, shown as cards. Stock, visibility and the turn's
+// limits are checked as for any selection.
+async function presentNamed(reply, ctx, onEvent) {
+  const ids = namedInReply(reply, [...(ctx.shown?.values() || [])], { asked: ctx.message || ctx.trigger?.query });
+  if (!ids.length) return;
+  const started = Date.now();
+  try {
+    const products = extractProducts(await presentProducts({ product_ids: ids }, ctx, { partial: true }));
+    if (products.length) onEvent({ type: "tool_end", tool: "present_products", ms: Date.now() - started, products, layout: "recommendations" });
+  } catch (err) {
+    console.warn("[CONCIERGE] cards for named books failed:", err.message);
+  }
+}
+
 /**
  * Runs one shopper turn to completion. `messages` is mutated so the caller
  * keeps the full history — tool_use / tool_result blocks must be replayed
@@ -1919,11 +1935,7 @@ export async function runAgent({ messages, ctx, onEvent, signal, modelClient, al
         });
         continue;
       }
-      // The missing-game opening: Flash-Lite sometimes names its picks without calling present_products (1 replay in 3).
-      if (!presentedProducts && !ctx.message && ctx.trigger?.offered_ids) {
-        const ids = namedInReply(roundText, [...(ctx.shown?.values() || [])]).slice(0, 4);
-        if (ids.length) await runTool({ id: "named_present", name: "present_products", input: { product_ids: ids } }, ctx, onEvent);
-      }
+      if (!presentedProducts && isSteimatzky(ctx.store) && !signal?.aborted) await presentNamed(roundText, ctx, onEvent);
       onEvent({ type: "done", usage, model });
       return { stopped: finishReason || "STOP", usage };
     }

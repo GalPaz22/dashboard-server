@@ -91,16 +91,6 @@ export function similarGames(products, {kind, subject = [], style = []}, limit =
     .filter(r => r.score > 0).sort((a, b) => b.score - a.score).slice(0, limit).map(r => r.p);
 }
 
-/** The ids of the offered products a reply names, a trailing "משחק קופסה" or "משחק קלפים" in the name being optional. */
-export function namedInReply(reply, products) {
-  const plain = text => words(text).join(' ');
-  const said = plain(reply);
-  return products.filter(p => {
-    const name = plain(p.name).replace(/ (?:משחק(?: (?:קופסה|קופסא|קלפים))?)$/u, '');
-    return name.length >= 3 && said.includes(name);
-  }).map(p => String(p.product_id));
-}
-
 export function notCarriedOpening(query, result) {
   return `[הודעת פתיחה אוטומטית — הלקוח עדיין לא כתב כלום]
 הלקוח חיפש באתר ${query}. בדקנו בקטלוג: אין בחנות מוצר בשם הזה, גם לא כמוצר שאזל. לפי not_carried זה ${result.not_carried.kind === 'toy' ? 'צעצוע' : 'משחק'} ולא ספר. פתח במשפט אחד: ${query} לא נמצא בחנות; אם not_carried.about מלא, אפשר להוסיף מה נראה שחיפש, בלשון זהירה (״נשמע כמו…״), בלי להמציא עליו שום פרט. אחר כך הצע 2–3 מוצרים מתוך similar שקרובים באמת לפי השם והתיאור שלהם (אותו נושא, אותו סוג משחק או גיל דומה), ולכל אחד משפט קצר במה הוא דומה, רק לפי מה שכתוב עליו. אם בשם מוצר ב-similar ברור שזה אותו מוצר בכתיב אחר, הצג אותו כמוצר שחיפש. אל תציע ספרים ואל תציע מוצר שאינו ב-similar. אם רק חלק קטן קרוב, הצע רק אותו. סיים בשאלה קצרה אחת (למשל לאיזה גיל). חובה: באותה תגובה קרא ל-present_products עם המזהים (product_id) של כל מוצר שאתה מזכיר בטקסט; מוצר שלא מוצג ככרטיס אין להזכיר. כתוב טקסט רגיל בלבד: בלי כוכביות, בלי HTML ובלי שורה שמפרטת אילו מוצרים מוצגים. אל תזכיר שזו הודעה אוטומטית.
