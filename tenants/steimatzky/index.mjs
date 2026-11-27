@@ -15,7 +15,7 @@ export function createTenantRoutes({getDb,merchandise=null,search=createTenantSe
   const limit=request.limit===undefined||request.limit===null||request.limit===''?undefined:Number(request.limit);
   if(limit!==undefined&&(!Number.isInteger(limit)||limit<1||limit>50))return res.status(400).json({error:'Invalid limit'});
   if(request.cursor?typeof request.cursor!=='string'||!request.cursor:typeof request.query!=='string'||!request.query.trim()||request.query.length>300)return res.status(400).json({error:'Invalid request'});
-  try{const db=await getDb(manifest.dbName);const result=await search({collection:db.collection(req.store.products||manifest.collection||'products'),sessions:db.collection('semantix_'+manifest.slug.replace(/-/g,'_')+'_sessions'),moduleStore:db.collection('semantix_module'),request:{...request,limit,...(merchandise&&fresh?{merchandise:matches=>merchandise(req,matches)}:{})}});
+  try{const db=await getDb(manifest.dbName);const result=await search({collection:db.collection(req.store.products||manifest.collection||'products'),sessions:db.collection('semantix_'+manifest.slug.replace(/-/g,'_')+'_sessions'),orders:db.collection('checkout_events'),moduleStore:db.collection('semantix_module'),request:{...request,limit,...(merchandise&&fresh?{merchandise:matches=>merchandise(req,matches)}:{})}});
    res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(result.metadata?.revision??manifest.revision));if(result.nextCursor)res.setHeader('X-Next-Token',manifest.tokenPrefix+result.nextCursor);onServed();return res.json(storefrontResponse(result,modern));}
   catch(error){if(error.message==='Search expired; start a new search'||error.message==='Invalid cursor')return res.status(410).json({error:'Search expired; start a new search'});
    console.error('[SEMANTIX '+manifest.slug+']',error.message);
@@ -31,7 +31,7 @@ export function createTenantRoutes({getDb,merchandise=null,search=createTenantSe
   // A query the module has nothing for, or any failure, falls through to the existing autocomplete.
   async autocomplete(req,res,next){if(!mine(req)||!enabled(req)||typeof search.suggest!=='function')return next();
    const query=typeof req.query.query==='string'?req.query.query.trim():'';if(query.length<2||query.length>300)return next();
-   try{const db=await getDb(manifest.dbName),r=await search.suggest({collection:db.collection(req.store.products||manifest.collection||'products'),moduleStore:db.collection('semantix_module'),query,limit:Math.min(Math.max(parseInt(req.query.limit,10)||8,1),24)});
+   try{const db=await getDb(manifest.dbName),r=await search.suggest({collection:db.collection(req.store.products||manifest.collection||'products'),moduleStore:db.collection('semantix_module'),orders:db.collection('checkout_events'),query,limit:Math.min(Math.max(parseInt(req.query.limit,10)||8,1),24)});
     if(!r.matches.length)return next();
     res.setHeader('X-Semantix-Tenant',manifest.slug+'@'+(r.revision??manifest.revision));onServed();
     return res.json(r.matches.map(p=>{const {description,specifications,provenance,issues,badgeCandidates,...rest}=p,name=p.title??p.name;return {...rest,suggestion:name,name,source:'products',author:specifications?.author||rest.author||''};}));}

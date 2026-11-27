@@ -44,6 +44,8 @@ import {identityForSession, linkSessionIdentity} from './session-identity.mjs';
 import {garminSpecs} from './tenants/garmin/specs.mjs';
 import {alternativesWorthOpening, bookAbout, CLASSIFY_PROMPT, sameAuthor, conciergeRolloutOpen, isSteimatzky, shownBooks, soldOutNamed, soldOutPossible, steimatzkyConciergeInstructions, worthClassifying} from './tenants/steimatzky/concierge.mjs';
 import {buyable, GAME_DEPARTMENTS, IDENTIFY_PROMPT, IDENTIFY_SCHEMA, namedInReply, notCarriedOpening, similarGames, storeHoldsName} from './tenants/steimatzky/concierge-missing.mjs';
+import {storePrice} from './tenants/steimatzky/pricing.mjs';
+import {createSalesRank, GAMES_OFFER, parseSaleQuery, saleBadgeValues, saleListing} from './tenants/steimatzky/sale.mjs';
 import {answeredOnScreen, CLASSIFY_PROMPT as MANOVINO_CLASSIFY_PROMPT, heldRows, isManoVino, manoVinoConciergeInstructions, namedRows, shownIds, worthDeciding} from './tenants/manovino/concierge.mjs';
 
 /* --------------------------------------------------------------------------- *
@@ -269,14 +271,15 @@ const PRODUCT_PROJECTION = {
   stock_status: 1, specialSales: 1, ItemID: 1,
   categories: 1, tags: 1, status: 1, hidden: 1, catalog_visibility: 1,
   regularPrice: 1, regular_price: 1, author: 1, notInStore: 1,
-  "siteCard.digital": 1,
+  "siteCard.digital": 1, salePrice: 1, onSale: 1, specialLabel: 1,
 };
 
 // Steimatzky sells an e-book beside most printed books (19,001 of 31,035 in stock); the store's card holds it. Without
 // it the concierge told a shopper who asked for Ken Follett digitally that the site sells printed books only (08.11),
 // while his e-books were ₪28.
 function digitalPriceOf(product) {
-  const digital = product.siteCard?.digital;
+  // The format label is what the store's card prints today; siteCard lags behind it on some rows.
+  const digital = product.specialLabel?.type === "book_formats" ? product.specialLabel.digital : product.siteCard?.digital;
   return digital?.enabled === true && Number(digital.value) > 0 ? Number(digital.value) : null;
 }
 
@@ -344,6 +347,10 @@ async function getCollection(ctx) {
   return client.db(ctx.store.dbName).collection(ctx.store.products);
 }
 
+// Steimatzky rows carry the list price; what the shopper pays during a campaign is in the format label. Every row the
+// concierge reads goes through here once, so cards, budgets and sorting all see the store's price.
+const storeDocs = (ctx, docs) => (isSteimatzky(ctx.store) ? docs.map((doc) => ({ ...doc, ...storePrice(doc) })) : docs);
+
 /** Atlas text search — same "default" index the search endpoints use. */
 async function textCandidates(ctx, query, { inStock }) {
   if (!query || !query.trim()) return [];
@@ -395,7 +402,7 @@ async function textCandidates(ctx, query, { inStock }) {
   ];
 
   try {
-    return await collection.aggregate(pipeline).toArray();
+    return storeDocs(ctx, await collection.aggregate(pipeline).toArray());
   } catch (err) {
     console.warn("[CONCIERGE] text search failed:", err.message);
     return [];
@@ -434,7 +441,7 @@ async function vectorCandidates(ctx, query, { inStock }) {
   ];
 
   try {
-    return await collection.aggregate(pipeline).toArray();
+    return storeDocs(ctx, await collection.aggregate(pipeline).toArray());
   } catch (err) {
     console.warn("[CONCIERGE] vector search failed:", err.message);
     return [];
@@ -495,6 +502,18 @@ export async function searchCatalog(args, ctx) {
     };
   }
 
+  if (query && isSteimatzky(ctx.store)) {
+    const sale = parseSaleQuery(query);
+    const listed = sale ? (await steimatzkySale(sale, ctx)).filter((p) => offeredToShoppers(p) && passesPostFilters(p, args)) : [];
+    if (listed.length) {
+      return {
+        query, in_stock_only: true, total_matched: listed.length, returned: Math.min(limit, listed.length), lexical_matches: listed.length,
+        note: "These are the store's sale products for this request (campaign tags), best sellers first; price is the sale price and regular_price the list price.",
+        products: listed.slice(0, limit).map((p) => forModel(shapeProduct(p))),
+      };
+    }
+  }
+
   if (query) {
     const [text, vector] = await Promise.all([
       textCandidates(ctx, query, { inStock }),
@@ -536,15 +555,18 @@ export async function searchCatalog(args, ctx) {
     // whose sync doesn't write the field.
     if (inStock) match.$or = [{ stockStatus: "instock" }, { stockStatus: { $exists: false } }];
     if (typeof args.price_min === "number" || typeof args.price_max === "number") {
-      match.price = {};
-      if (typeof args.price_min === "number") match.price.$gte = args.price_min;
-      if (typeof args.price_max === "number") match.price.$lte = args.price_max;
+      const range = {};
+      if (typeof args.price_min === "number") range.$gte = args.price_min;
+      if (typeof args.price_max === "number") range.$lte = args.price_max;
+      // Steimatzky: either price may be the one in the range; the exact one is checked after reading.
+      if (isSteimatzky(ctx.store)) match.$and = [{ $or: [{ price: range }, { salePrice: range }] }];
+      else match.price = range;
     }
     const sort = args.sort === "price_asc" ? { price: 1 }
       : args.sort === "price_desc" ? { price: -1 }
       : { _id: 1 };
-    pool = await collection.find(match, { projection: PRODUCT_PROJECTION })
-      .sort(sort).limit(RETRIEVAL_POOL).toArray();
+    pool = storeDocs(ctx, await collection.find(match, { projection: PRODUCT_PROJECTION })
+      .sort(sort).limit(RETRIEVAL_POOL).toArray());
   }
 
   let results = pool.filter((p) => offeredToShoppers(p) && passesPostFilters(p, args));
@@ -605,6 +627,43 @@ export async function searchCatalog(args, ctx) {
   };
 }
 
+// The campaign rows are read light and kept for ten minutes; the leading ones are then read in full.
+const SALE_TTL_MS = 10 * 60 * 1000;
+const SALE_DETAILS = 40;
+const saleShelves = new WeakMap();
+const salesRank = createSalesRank();
+async function steimatzkySale(sale, ctx) {
+  try {
+    const collection = await getCollection(ctx);
+    let kept = saleShelves.get(ctx.deps);
+    if (!kept || Date.now() - kept.at >= SALE_TTL_MS) {
+      const values = saleBadgeValues();
+      const rows = await collection.find(
+        {
+          hidden: { $ne: true }, notInStore: { $ne: true }, stockStatus: "instock",
+          $or: [
+            ...["specialLabel.badge.value", "specialLabel.printed.badge", "specialLabel.digital.badge"].map((field) => ({ [field]: { $in: values } })),
+            { "specialLabel.offers.value": GAMES_OFFER },
+          ],
+        },
+        { projection: { id: 1, name: 1, author: 1, price: 1, salePrice: 1, onSale: 1, specialLabel: 1, stockStatus: 1, category: 1, productTypes: 1, pageCheck: 1, "siteCard.siteCategory": 1 } },
+      ).toArray();
+      kept = { at: Date.now(), rows: storeDocs(ctx, rows.filter((p) => p.pageCheck?.status !== 404)).map((p) => ({ ...p, categories: asArray(p.category), department: p.siteCard?.siteCategory })) };
+      saleShelves.set(ctx.deps, kept);
+    }
+    const db = (await ctx.deps.getMongoClient()).db(ctx.store.dbName);
+    const sold = await salesRank(db.collection("checkout_events"));
+    const ids = saleListing(kept.rows, sale, { sold, limit: SALE_DETAILS }).map((p) => p.id);
+    if (!ids.length) return [];
+    const full = storeDocs(ctx, await collection.find({ id: { $in: ids } }, { projection: PRODUCT_PROJECTION }).toArray());
+    const byId = new Map(full.map((p) => [String(p.id), p]));
+    return ids.map((id) => byId.get(String(id))).filter(Boolean);
+  } catch (err) {
+    console.warn("[CONCIERGE] sale listing failed:", err.message);
+    return [];
+  }
+}
+
 const MAX_PRODUCTS_PER_DETAIL = 6;
 
 async function getProduct(args, ctx) {
@@ -634,8 +693,9 @@ async function getProduct(args, ctx) {
   if (!or.length) return { error: "יש לספק product_ids, product_id או name." };
 
   const schema = specSchemaFor(ctx.store);
-  const product = await collection.findOne({ $or: or, hidden: { $ne: true },
+  const found = await collection.findOne({ $or: or, hidden: { $ne: true },
     ...(isBeautics(ctx.store) ? {status:{$in:['ACTIVE','publish']}} : {}) }, { projection: schema ? { ...PRODUCT_PROJECTION, attributes: 1 } : PRODUCT_PROJECTION });
+  const product = found && storeDocs(ctx, [found])[0];
   if (!offeredToShoppers(product)) return { found: false, message: "לא נמצא מוצר תואם בקטלוג." };
   const specs = schema ? specLines(product, schema, 30, await sparseSibling(product, schema, collection)) : [];
 
@@ -780,7 +840,7 @@ async function findAlternatives(args, ctx) {
     const sourceCategories = new Set(asArray(source.category));
     const sameKind = (d) => asArray(d.category).some((c) => sourceCategories.has(c));
     try {
-      const docs = await collection.aggregate(pipeline).toArray();
+      const docs = storeDocs(ctx, await collection.aggregate(pipeline).toArray());
       const products = [...docs.filter(sameKind), ...docs.filter((d) => !sameKind(d))]
         .filter((d) => offeredToShoppers(d) && String(d.id) !== String(source.id))
         .slice(0, limit)
@@ -818,10 +878,10 @@ export async function presentProducts(args, ctx) {
     const numeric = Number(raw);
     if (Number.isFinite(numeric)) or.push({ id: numeric }, { ItemID: numeric });
   }
-  const docs = await collection.find(
+  const docs = storeDocs(ctx, await collection.find(
     { $or: or, hidden: { $ne: true } },
     { projection: PRODUCT_PROJECTION }
-  ).toArray();
+  ).toArray());
   const byId = new Map();
   const soldOut = [];
   for (const doc of docs) {
@@ -1453,6 +1513,8 @@ async function classifySearch(query, visitor, deps, { tenant, prompt, schema, re
 // (metadata.closestFallback of the Semantix answer). The shopper is helped at once, after a named sold-out book, which
 // says more.
 export async function decideMoment({ query, visitor, repeats, shown, alternatives = false, ctx }) {
+  // A search for the sale itself shows the campaign books; "the product wasn't found" would be wrong there (26.11).
+  if (parseSaleQuery(query)) return null;
   const ids = shown.map((b) => b.id).filter(Boolean).slice(0, 6);
   const candidates = soldOutPossible(query, shown) ? await textCandidates(ctx, query, { inStock: false }) : [];
   const soldOut = soldOutNamed(query, candidates.filter(productInStock).map((p) => ({ title: p.name, author: p.author, inStock: true })).concat(shown), candidates.filter((p) => !productInStock(p)));
@@ -2033,7 +2095,7 @@ async function gameShelf(ctx) {
       $or: Object.entries(GAME_DEPARTMENTS).map(([field, values]) => ({ [field]: { $in: values } })),
     },
     { projection: { ...PRODUCT_PROJECTION, productTypes: 1, pageCheck: 1 } },
-  ).toArray();
+  ).toArray().then((found) => storeDocs(ctx, found));
   gameShelves.set(ctx.deps, { at: Date.now(), rows });
   return rows;
 }

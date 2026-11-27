@@ -5,6 +5,10 @@ import {createDraftRuntime} from './engine/runtime.mjs';
 import {processProduct,retiredRows,feedCategories,normalize} from './engine/core/core.mjs';
 import {hash} from './engine/core/hash.mjs';
 import {createSessions} from './sessions.mjs';
+import {listPrices,storePrice} from './pricing.mjs';
+import {createSalesRank,parseSaleQuery,saleListing} from './sale.mjs';
+// Fewer campaign products than this and a sale search is answered by the index like any other.
+const SALE_MIN=4;
 const read=name=>JSON.parse(readFileSync(new URL(name,import.meta.url),'utf8'));
 export const manifest=read('./semantix.module.json');
 const LIVE=["price","regularPrice","stockStatus","hidden","status","url","image"];
@@ -36,13 +40,13 @@ function formatsFor(rows){
 }
 export function withSource(rows){
  let byId=sources.get(rows);
- if(!byId){byId=new Map();const formats=formatsFor(rows);for(const r of rows){const s={};for(const k of SOURCE_FIELDS)if(r[k]!==undefined&&r[k]!==null)s[k]=r[k];if(s.specialLabel)s.specialLabel=formats(skuOf(r),s.specialLabel);if(Object.keys(s).length)byId.set(String(r.id??r._id),s);}sources.set(rows,byId);}
- return p=>{const s=byId.get(String(p.id))||byId.get(String(p.id).split(':').pop());return s?{...s,...p}:p;};
+ if(!byId){byId=new Map();const formats=formatsFor(rows);for(const r of rows){const s={};byId.set('list:'+String(r.id??r._id),listPrices(r));for(const k of SOURCE_FIELDS)if(r[k]!==undefined&&r[k]!==null)s[k]=r[k];if(s.specialLabel)s.specialLabel=formats(skuOf(r),s.specialLabel);if(r.siteCard?.siteCategory)s.department=r.siteCard.siteCategory;if(Object.keys(s).length)byId.set(String(r.id??r._id),s);}sources.set(rows,byId);}
+ return p=>{const id=String(p.id),tail=id.split(':').pop(),s=byId.get(id)||byId.get(tail),list=byId.get('list:'+id)||byId.get('list:'+tail),out=s?{...s,...p}:p;return list?{...out,...list}:out;};
 }
 // A merchant Mongo row in the engine's raw shape (as the studio imports existing clients).
 export function adaptRow(row,retired=()=>false){
  return {id:String(row.id??row._id),name:row.name||row.title||'',sku:String(row.sku||''),url:row.url||row.permalink,image:row.image||row.images?.[0]?.src||row.images?.[0]||null,
-  price:number(row.price),regularPrice:number(row.regularPrice??row.regular_price),currency:row.currency||null,
+  ...storePrice(row),currency:row.currency||null,
   stockStatus:row.stockStatus||row.stock_status||'unknown',status:row.status||'ACTIVE',
   // Hidden as the studio imports it: the store's own flag, "not in store", a catalog visibility of "hidden", or an
   // out-of-stock row the store has retired (no price, or missed by the catalog's latest sync — retiredRows).
@@ -58,7 +62,7 @@ export function adaptRow(row,retired=()=>false){
 export function mergeLive(cards,rows,profile,tenantId,seen=new Set()){
  const retired=retiredRows(rows),live=new Map(rows.map(r=>{const a=adaptRow(r,retired);return [a.id,a];})),out=[];
  for(const c of cards){const key=String(c.id).split(':').pop(),row=live.get(String(c.id))||live.get(key);if(!row)continue;seen.add(row.id);
-  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];if(!next.categories?.length&&row.categories.length)next.categories=row.categories;
+  const next={...c};for(const k of LIVE)if(row[k]!==undefined&&row[k]!==null)next[k]=row[k];next.regularPrice=row.regularPrice;if(!next.categories?.length&&row.categories.length)next.categories=row.categories;
   if(row.name&&normalize(row.name)!==normalize(c.title))next.sourceTitle=row.name;else delete next.sourceTitle;out.push(next);}
  const client={...profile,tenantId,version:'semantix-mini',publishedStatuses:['ACTIVE','publish']};
  for(const [id,row] of live)if(!seen.has(id))out.push(processProduct(row,client));
@@ -83,12 +87,12 @@ const local=()=>{const has=n=>existsSync(new URL(n,import.meta.url));return has(
 // The live-rows part of the fingerprint (with the store's name, so a rename is searchable after the next rebuild), once per rows array (the loader returns the same array until it refreshes,
 // and a refresh is a new array): hashing the whole catalog on every search and suggestion cost CPU and garbage.
 const prints=new WeakMap();
-const rowsPrint=rows=>{let p=prints.get(rows);if(p===undefined)prints.set(rows,p=hash(rows.map(r=>[r.id??r._id,r.name??r.title??null,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null,r.pageCheck?.status??null])));return p;};
+const rowsPrint=rows=>{let p=prints.get(rows);if(p===undefined)prints.set(rows,p=hash(rows.map(r=>[r.id??r._id,r.name??r.title??null,...LIVE.map(k=>r[k]??r[k==='stockStatus'?'stock_status':k]??null),r.catalog_visibility??null,r.notInStore??null,r.lastSeenAt??null,r.pageCheck?.status??null,storePrice(r).price])));return p;};
 // Live rows the built edition already covers with enriched cards are cut down to what the fingerprint, the live fields, the name,
 // the hidden rule and withSource read; their text (description, specifications, images...) stays only in the runtime.
 // Rows the edition lacks keep everything: a build processes them as new products. Only the module's own row loader
 // (it can reload) has its rows slimmed, in place, so a caller's own array is never changed.
-const SLIM_FIELDS=['_id','id','name','title','price','regularPrice','regular_price','currency','stockStatus','stock_status','status','hidden','notInStore','catalog_visibility','lastSeenAt','pageCheck','url','permalink','image',...SOURCE_FIELDS];
+const SLIM_FIELDS=['_id','id','name','title','price','regularPrice','regular_price','currency','stockStatus','stock_status','status','hidden','notInStore','catalog_visibility','lastSeenAt','pageCheck','url','permalink','image','siteCard',...SOURCE_FIELDS];
 const slim=new WeakSet();
 function slimRow(r){const s={};for(const k of SLIM_FIELDS)if(r[k]!==undefined)s[k]=r[k];if(!r.categories?.length&&!r.category?.length){const feed=feedCategories(r);if(feed.length)s.productTypes=feed;}if(!r.image&&r.images?.length)s.images=[r.images[0]];slim.add(s);return s;}
 function compact(rows,covered){for(let i=0;i<rows.length;i++){const r=rows[i];if(!slim.has(r)&&covered.has(String(r.id??r._id)))rows[i]=slimRow(r);}}
@@ -97,7 +101,7 @@ function uncovered(cards,rows){if(!rows.some(r=>slim.has(r)))return false;const 
  return rows.some(r=>slim.has(r)&&!ids.has(String(r.id??r._id)));}
 // liveRebuildMs: a rebuild of the whole runtime costs seconds of CPU on a large catalog and blocks every search on the
 // server meanwhile, so live price/stock changes are folded in twice a day (a new edition is built at once).
-export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=43200000,now=Date.now}={}){
+export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=43200000,now=Date.now,salesRank=createSalesRank({now})}={}){
  let fingerprint=null,runtime=null,edition=null,checkedAt=-Infinity,checking=null,building=null,builtDigest=null,builtAt=-Infinity,covered=null;
  async function published(store){
   if(store&&now()-checkedAt>=checkMs)checking??=(async()=>{
@@ -129,18 +133,26 @@ export function createTenantSearch({loadRows,checkMs=30000,liveRebuildMs=4320000
   next.revision=e.revision;next.attach=withSource(rows);runtime=next;fingerprint=e.digest+':'+rowsPrint(rows);builtDigest=e.digest;builtAt=now();covered=seen;delete e.snapshot;
   if(loadRows.reload)compact(rows,seen);
  }
+ // The campaign products for a search about the sale itself, or null for every other search.
+ async function onSale(rt,query,orders){
+  const sale=typeof query==='string'?parseSaleQuery(query):null;if(!sale)return null;
+  const matches=saleListing(rt.products||[],sale,{attach:p=>({...rt.attach(p),price:p.price}),sold:await salesRank(orders)});
+  return matches.length>=SALE_MIN?matches:null;
+ }
  // Page size when the storefront sends no limit: the tenant's pipeline.pageSize (published with the profile), else 12.
- const search=async function({collection,sessions,moduleStore,request}){
+ const search=async function({collection,sessions,moduleStore,orders,request}){
   const limit=request.limit??(await published(moduleStore)).profile?.pipeline?.pageSize??12;if(!Number.isInteger(limit)||limit<1||limit>50)throw Error('Invalid limit');
   if(request.cursor){if(request.query!==undefined)throw Error('Invalid request');if(!sessions)throw Error('Search expired; start a new search');return createSessions(sessions).read(request.cursor,limit);}
-  const rt=await current(collection,moduleStore);let r=await rt.search({query:request.query,limit:50});const matches=[...r.matches];
+  const rt=await current(collection,moduleStore),sale=await onSale(rt,request.query,orders);
+  let r=sale?{status:'matched',query:request.query,matches:sale,total:sale.length,nextCursor:null,message:null,revision:rt.revision,metadata:{mode:'text',phase:'sale',fullMatch:true,exactMatch:false,llmUsed:false,llmCalls:0}}:await rt.search({query:request.query,limit:50});const matches=[...r.matches];
   while(r.nextCursor&&matches.length<500){r=await rt.search({cursor:r.nextCursor,limit:50});matches.push(...r.matches);}
   const attached=request.merchandise?await request.merchandise(matches.map(rt.attach)):matches.map(rt.attach),result={...r,matches:attached,total:attached.length,nextCursor:null,metadata:{...r.metadata,searchEngine:'semantix-'+manifest.slug,revision:rt.revision}};
   return sessions?createSessions(sessions).save(result,limit):{...result,matches:attached.slice(0,limit)};
  };
  // Suggestions while the shopper types: the same edition and live rows as search, answered from the index only.
- search.suggest=async({collection,moduleStore,query,limit})=>{
-  const rt=await current(collection,moduleStore);if(typeof rt.suggest!=='function')throw Error('Engine has no suggestions; export the module again');
+ search.suggest=async({collection,moduleStore,orders,query,limit})=>{
+  const rt=await current(collection,moduleStore),sale=await onSale(rt,query,orders);
+  if(sale)return {query,matches:sale.slice(0,limit).map(rt.attach),total:sale.length,revision:rt.revision};if(typeof rt.suggest!=='function')throw Error('Engine has no suggestions; export the module again');
   const r=await rt.suggest(query,{limit});return {...r,matches:r.matches.map(rt.attach),revision:rt.revision};
  };
  return search;
@@ -159,7 +171,7 @@ export function createRowLoader({ttlMs=43200000,now=Date.now,max=60000}={}){
  return get;
  function load(collection){
   if(pending)return pending;
-  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,lastSeenAt:1,pageCheck:1,productTypes:1,customAttributes:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
+  pending=(async()=>{const cursor=collection.find({},{projection:{_id:1,id:1,name:1,title:1,sku:1,url:1,permalink:1,image:1,images:1,price:1,regularPrice:1,regular_price:1,currency:1,stockStatus:1,stock_status:1,status:1,hidden:1,notInStore:1,catalog_visibility:1,lastSeenAt:1,pageCheck:1,'siteCard.siteCategory':1,productTypes:1,customAttributes:1,categories:1,category:1,tags:1,siteTags:1,description:1,short_description:1,specifications:1,...Object.fromEntries(SOURCE_FIELDS.map(k=>[k,1]))},maxTimeMS:20000}).limit(max+1).batchSize(500);
    try{const rows=await cursor.toArray();if(rows.length>max)throw Error('Catalog exceeds safety limit');cached=rows;expires=now()+ttlMs;return rows;}finally{await cursor.close?.();}})()
    .finally(()=>{pending=null;});
   return pending;

@@ -50,8 +50,7 @@ const list = value => (Array.isArray(value) ? value : value ? [value] : []).map(
 const isGame = p => list(p.category).includes('משחקי קופסא') || list(p.productTypes).includes('משחקים פאזלים וקלפים') || /משחק (?:קופס|קלפים|חברה|לוח)/u.test(`${p.name} ${p.description || ''}`);
 const isToy = p => isGame(p) || list(p.category).includes('צעצועים') || /בובה|בובת|צעצוע|משחק|לגו|LEGO|פליימוביל/iu.test(`${p.name} ${p.description || ''}`);
 
-// A row the shopper can open: priced (371 feed rows hold {value} instead and the concierge can't show their price) and
-// not a page the store check found missing.
+// A row the shopper can open: it has a price and the store check did not find its page missing.
 export const buyable = p => !!p && p.hidden !== true && p.notInStore !== true && Number(p.price) > 0 && p.pageCheck?.status !== 404;
 
 // A final letter takes its middle form, so "עצם" begins "עצמות".

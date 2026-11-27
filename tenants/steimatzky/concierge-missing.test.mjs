@@ -56,7 +56,9 @@ test('a missing game opens with games and only they can be shown', async () => {
   const {ctx} = ctxWith({found: [book('b', 'רצוא ושוב', 'לילה מאיה חפר')], trigger});
   const result = await prefetchOpeningSearch(trigger, ctx);
   assert.equal(result.not_carried.kind, 'game');
-  assert.deepEqual(result.similar.map(p => p.product_id).sort(), ['bone', 'dog']);
+  // A price stored as {value} is read as the price it is.
+  assert.deepEqual(result.similar.map(p => p.product_id).sort(), ['bone', 'dog', 'noprice']);
+  assert.equal(result.similar.find(p => p.product_id === 'noprice').price, 50);
   const policy = steimatzkyTurnPolicy(ctx.store, {trigger, message: ''});
   ctx.shown = new Map([['b', {}], ['dog', {}]]);
   ctx.responsePolicy = policy;
